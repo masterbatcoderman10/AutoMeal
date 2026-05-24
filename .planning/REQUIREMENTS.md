@@ -109,55 +109,55 @@ Explicitly excluded from this project. Includes reasoning to prevent re-adding.
 
 ## Traceability
 
-Phase mapping is populated by the roadmapper. Status updated as phases complete.
+Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases complete.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INGEST-01 | TBD | Pending |
-| INGEST-02 | TBD | Pending |
-| INGEST-03 | TBD | Pending |
-| INGEST-04 | TBD | Pending |
-| INGEST-05 | TBD | Pending |
-| VISION-01 | TBD | Pending |
-| VISION-02 | TBD | Pending |
-| VISION-03 | TBD | Pending |
-| VISION-04 | TBD | Pending |
-| MATCH-01 | TBD | Pending |
-| MATCH-02 | TBD | Pending |
-| MATCH-03 | TBD | Pending |
-| MATCH-04 | TBD | Pending |
-| REASON-01 | TBD | Pending |
-| REASON-02 | TBD | Pending |
-| REASON-03 | TBD | Pending |
-| REASON-04 | TBD | Pending |
-| GROUND-01 | TBD | Pending |
-| GROUND-02 | TBD | Pending |
-| GROUND-03 | TBD | Pending |
-| INTERVIEW-01 | TBD | Pending |
-| INTERVIEW-02 | TBD | Pending |
-| INTERVIEW-03 | TBD | Pending |
-| INTERVIEW-04 | TBD | Pending |
-| INTERVIEW-05 | TBD | Pending |
-| INTERVIEW-06 | TBD | Pending |
-| OUTPUT-01 | TBD | Pending |
-| OUTPUT-02 | TBD | Pending |
-| OUTPUT-03 | TBD | Pending |
-| OUTPUT-04 | TBD | Pending |
-| OUTPUT-05 | TBD | Pending |
-| OUTPUT-06 | TBD | Pending |
-| OUTPUT-07 | TBD | Pending |
-| OUTPUT-08 | TBD | Pending |
-| INFRA-01 | TBD | Pending |
-| INFRA-02 | TBD | Pending |
-| INFRA-03 | TBD | Pending |
-| INFRA-04 | TBD | Pending |
-| INFRA-05 | TBD | Pending |
+| INGEST-01 | Phase 1 | Pending |
+| INGEST-02 | Phase 1 | Pending |
+| INGEST-03 | Phase 1 | Pending |
+| INGEST-04 | Phase 1 | Pending |
+| INGEST-05 | Phase 1 | Pending |
+| VISION-01 | Phase 2 | Pending |
+| VISION-02 | Phase 2 | Pending |
+| VISION-03 | Phase 2 | Pending |
+| VISION-04 | Phase 2 | Pending |
+| MATCH-01 | Phase 1 | Pending |
+| MATCH-02 | Phase 3 | Pending |
+| MATCH-03 | Phase 3 | Pending |
+| MATCH-04 | Phase 3 | Pending |
+| REASON-01 | Phase 4 | Pending |
+| REASON-02 | Phase 4 | Pending |
+| REASON-03 | Phase 4 | Pending |
+| REASON-04 | Phase 4 | Pending |
+| GROUND-01 | Phase 5 | Pending |
+| GROUND-02 | Phase 5 | Pending |
+| GROUND-03 | Phase 5 | Pending |
+| INTERVIEW-01 | Phase 4 | Pending |
+| INTERVIEW-02 | Phase 4 | Pending |
+| INTERVIEW-03 | Phase 4 | Pending |
+| INTERVIEW-04 | Phase 4 | Pending |
+| INTERVIEW-05 | Phase 4 | Pending |
+| INTERVIEW-06 | Phase 4 | Pending |
+| OUTPUT-01 | Phase 6 | Pending |
+| OUTPUT-02 | Phase 6 | Pending |
+| OUTPUT-03 | Phase 6 | Pending |
+| OUTPUT-04 | Phase 6 | Pending |
+| OUTPUT-05 | Phase 6 | Pending |
+| OUTPUT-06 | Phase 6 | Pending |
+| OUTPUT-07 | Phase 6 | Pending |
+| OUTPUT-08 | Phase 6 | Pending |
+| INFRA-01 | Phase 1 | Pending |
+| INFRA-02 | Phase 1 | Pending |
+| INFRA-03 | Phase 1 | Pending |
+| INFRA-04 | Phase 4 | Pending |
+| INFRA-05 | Phase 1 | Pending |
 
 **Coverage:**
 - v1 requirements: 39 total
-- Mapped to phases: 0 (roadmapper will assign)
-- Unmapped: 39 ⚠ (resolves after roadmap)
+- Mapped to phases: 39
+- Unmapped: 0 (complete)
 
 ---
 *Requirements defined: 2026-05-24*
-*Last updated: 2026-05-24 after initial definition*
+*Last updated: 2026-05-24 — traceability populated by roadmapper*

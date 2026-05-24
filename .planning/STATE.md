@@ -1,0 +1,92 @@
+---
+gsd_state_version: '1.0'
+status: planning
+progress:
+  total_phases: 6
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
+---
+
+# Project State
+
+## Project Reference
+
+See: .planning/PROJECT.md (updated 2026-05-24)
+
+**Core value:** Lowest-friction meal logging for one person: snap a photo, get logged nutrition with zero manual entry, and have the system get faster and more accurate the more I use it.
+**Current focus:** Phase 1 — Foundation & Ingest
+
+## Current Position
+
+Phase: 1 of 6 (Foundation & Ingest)
+Plan: 0 of TBD in current phase
+Status: Ready to plan
+Last activity: 2026-05-24 — Roadmap created; ready for Phase 1 planning
+
+Progress: [░░░░░░░░░░] 0%
+
+## Performance Metrics
+
+**Velocity:**
+- Total plans completed: 0
+- Average duration: —
+- Total execution time: 0 hours
+
+**By Phase:**
+
+| Phase | Plans | Total | Avg/Plan |
+|-------|-------|-------|----------|
+| - | - | - | - |
+
+**Recent Trend:**
+- No data yet
+
+*Updated after each plan completion*
+
+## Accumulated Context
+
+### Decisions
+
+Decisions are logged in PROJECT.md Key Decisions table.
+Recent decisions affecting current work:
+
+- Roadmap: vector(1536) locked — Gemini Embedding 2 MRL at 1536 dims (within HNSW ceiling of 2000); schema must never use 1024
+- Roadmap: HNSW cosine index m=16, ef_construction=64 from day one (not IVFFlat)
+- Roadmap: APScheduler 3.10.x only (4.x is alpha); started in FastAPI lifespan
+- Roadmap: Portion estimates are discrete buckets (small/standard/large) — no continuous multipliers in v1
+- Roadmap: Multimodal embeddings via thin httpx wrapper, not OpenAI SDK typed path
+- Roadmap: FoodVisual invalidation cascades from USER_CORRECTED — ships in same phase as FoodVisual writes (Phase 4)
+
+### Pending Todos
+
+None yet.
+
+### Blockers/Concerns
+
+- Phase 1: CF-3 — iOS Shortcut "new photo added" trigger reliability is unverified on real device. Budget time for real-device smoke test; implement Share Sheet fallback if automatic trigger is unreliable.
+- Phase 2: Verify Gemini 3 Flash structured output + vision works in a single OpenRouter call. If not, split into two calls.
+- Phase 3: Gemini Embedding 2 cross-modal alignment on food must be verified with calibration script before building match logic.
+- Phase 4: Confidence calibration prompt patterns for multi-signal gating on Gemini 3 Flash are sparsely documented — plan a mini-research pass before implementing the gate.
+- Phase 5: Firecrawl resource envelope on Mac mini needs verification before shipping (5 sequential fetches under Docker mem limits).
+- Phase 6: Mac mini sleep prevention (`pmset -a sleep 0`) must be confirmed before declaring Phase 6 complete.
+
+## Deferred Items
+
+Items acknowledged and carried forward:
+
+| Category | Item | Status | Deferred At |
+|----------|------|--------|-------------|
+| v2 | BOOT-01: Bootstrap mode (relaxed thresholds first N meals) | Deferred | Roadmap |
+| v2 | BOOT-02: Seed-photos command | Deferred | Roadmap |
+| v2 | CAL-01: Empirical threshold recalibration tool | Deferred | Roadmap |
+| v2 | OUTPUT2-01..05: /last, /status, /why, /find, conversational queries | Deferred | Roadmap |
+| v2 | OPS-01: Interview-fatigue throttle | Deferred | Roadmap |
+| v2 | OPS-02: Structured JSON logging + per-meal cost log | Deferred | Roadmap |
+
+## Session Continuity
+
+Last session: 2026-05-24
+Stopped at: Roadmap written; STATE.md and REQUIREMENTS.md traceability updated
+Resume file: None

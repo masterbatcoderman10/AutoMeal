@@ -83,6 +83,15 @@
   },
   "agent_skills": {},
   "features": {},
+  "subagent_models": {
+    "execution": {
+      "primary": "zai glm-5.1",
+      "fallback": "opencode-go glm-5.1"
+    },
+    "review_verification": {
+      "primary": "openai-codex gpt-5.4"
+    }
+  },
   "resolve_model_ids": "omit",
   "mode": "interactive",
   "granularity": "standard"

@@ -243,6 +243,7 @@ A photo-based personal meal tracker. An iOS Shortcut posts the most recently tak
 ## Conventions
 
 Conventions not yet established. Will populate as patterns emerge during development.
+- During discussion and planning, use a single message without termination and ClarifyingQuestions instead.
 <!-- GSD:conventions-end -->
 
 <!-- GSD:architecture-start source:ARCHITECTURE.md -->

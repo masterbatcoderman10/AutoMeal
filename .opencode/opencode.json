@@ -1,0 +1,10 @@
+{
+  "permission": {
+    "read": {
+      "/Users/mali/Documents/Projects/MealTracker/.opencode/get-shit-done/*": "allow"
+    },
+    "external_directory": {
+      "/Users/mali/Documents/Projects/MealTracker/.opencode/get-shit-done/*": "allow"
+    }
+  }
+}

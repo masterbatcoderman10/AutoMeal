@@ -1,0 +1,122 @@
+erDiagram
+
+    FoodItems ||--o{ FoodVisuals : "has"
+    FoodItems ||--o{ MealSegments : "matched_in"
+    FoodItems ||--o{ DiaryEntries : "logged_as"
+    FoodItems ||--o| InterviewSessions : "created_by"
+
+    FoodVisuals }|--o| MealSegments : "sourced_from"
+    FoodVisuals ||--o{ MealSegments : "matched_by"
+
+    MealLogs ||--|{ MealSegments : "contains"
+    MealLogs ||--o{ DiaryEntries : "produces"
+
+    MealSegments ||--o| DiaryEntries : "becomes"
+    MealSegments ||--o| InterviewSessions : "triggers"
+
+    InterviewSessions ||--o{ InterviewMessages : "has"
+
+
+    FoodItems {
+        uuid id PK
+        string name
+        json aliases
+        enum source_type "GENERIC, HOMEMADE, RESTAURANT, PACKAGED"
+        string restaurant_name
+        string brand_name
+        float calories_per_unit
+        float carbs_per_unit
+        float protein_per_unit
+        float fat_per_unit
+        float fiber_per_unit
+        float glycemic_index
+        string standard_unit
+        float standard_quantity
+        int times_confirmed
+        boolean is_verified
+        text llm_reasoning
+        datetime created_at
+        datetime updated_at
+    }
+
+    FoodVisuals {
+        uuid id PK
+        uuid food_item_id FK
+        vector embedding
+        uuid source_segment_id FK
+        datetime created_at
+    }
+
+    MealLogs {
+        uuid id PK
+        string image_url
+        boolean is_food
+        float food_detection_confidence
+        enum meal_category "BREAKFAST, LUNCH, DINNER, SNACK, UNKNOWN"
+        float total_calories
+        float total_carbs
+        float total_protein
+        float total_fat
+        float total_fiber
+        enum processing_status "PENDING, DETECTING, SEGMENTING, MATCHING, REVIEWING, COMPLETED, NOT_FOOD"
+        datetime logged_at
+        datetime created_at
+    }
+
+    MealSegments {
+        uuid id PK
+        uuid meal_log_id FK
+        float[] bounding_box
+        string cropped_image_url
+        vector embedding
+        uuid matched_food_item_id FK
+        uuid matched_visual_id FK
+        enum identification_method "SIMILARITY, LLM, INTERVIEW, USER_CORRECTED"
+        float similarity_score
+        float quantity_multiplier
+        float estimated_quantity
+        string unit
+        text ai_reasoning
+        boolean needs_interview
+        boolean interview_completed
+        boolean user_confirmed
+        datetime created_at
+    }
+
+    DiaryEntries {
+        uuid id PK
+        uuid meal_log_id FK
+        uuid meal_segment_id FK
+        uuid food_item_id FK
+        string display_name
+        float quantity
+        string unit
+        float calories
+        float carbs
+        float protein
+        float fat
+        float fiber
+        datetime logged_at
+        datetime created_at
+    }
+
+    InterviewSessions {
+        uuid id PK
+        uuid meal_segment_id FK
+        string telegram_chat_id
+        string ai_initial_guess
+        float ai_initial_confidence
+        enum status "PENDING, IN_PROGRESS, COMPLETED, ABANDONED"
+        uuid resulting_food_item_id FK
+        datetime created_at
+        datetime completed_at
+    }
+
+    InterviewMessages {
+        uuid id PK
+        uuid session_id FK
+        enum sender "BOT, USER"
+        text message_text
+        enum message_key "INITIAL_QUESTION, FOOD_NAME, SOURCE_TYPE, RESTAURANT_NAME, BRAND_NAME, PORTION_CONTEXT, CONFIRMATION, CLARIFICATION"
+        datetime sent_at
+    }

@@ -1,0 +1,23 @@
+use_default_settings: true
+
+general:
+  instance_name: MealTracker SearXNG
+
+server:
+  secret_key: ${SEARXNG_SECRET:-changeme}
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: brave
+    disabled: false

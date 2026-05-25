@@ -32,7 +32,7 @@ wheels/
 htmlcov/
 .tox/
 
-# MyPy
+# Type checking
 .mypy_cache/
 .dmypy.json
 dmypy.json
@@ -51,5 +51,5 @@ uploads/
 .DS_Store
 Thumbs.db
 
-# Node (if any frontend tooling)
+# Node
 node_modules/

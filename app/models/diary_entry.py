@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, ForeignKey, String, func
-from sqlalchemy.dialects.postgresql import TIMESTAMPTZ
+from sqlalchemy.dialects.postgresql import TIMESTAMP as TIMESTAMPTZ
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base

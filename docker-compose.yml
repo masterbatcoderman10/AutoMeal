@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: mealttracker-postgres
+    environment:
+      POSTGRES_DB: mealttracker
+      POSTGRES_USER: mealttracker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mealttracker -d mealttracker"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: mealttracker-api
+    command: sh -c "alembic -c migrations/alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mealttracker:${POSTGRES_PASSWORD}@postgres:5432/mealttracker
+      INGEST_SECRET: ${INGEST_SECRET}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      FIRECRAWL_BASE_URL: http://firecrawl-api:3002
+      SEARXNG_BASE_URL: http://searxng:8080
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: mealttracker-bot
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mealttracker:${POSTGRES_PASSWORD}@postgres:5432/mealttracker
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: mealttracker-searxng
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-changeme}
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    container_name: mealttracker-firecrawl-api
+    command: node dist/src/harness.js --start-docker
+    environment: &firecrawl-env
+      HOST: 0.0.0.0
+      PORT: 3002
+      USE_DB_AUTHENTICATION: "false"
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      BULL_AUTH_KEY: ${FIRECRAWL_PASSWORD}
+    depends_on:
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+
+  firecrawl-worker:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    container_name: mealttracker-firecrawl-worker
+    command: node dist/src/harness.js --start-docker
+    environment:
+      <<: *firecrawl-env
+      PORT: 3005
+    depends_on:
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+
+  firecrawl-redis:
+    image: redis:7-alpine
+    container_name: mealttracker-firecrawl-redis
+    command: redis-server --bind 0.0.0.0
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    container_name: mealttracker-firecrawl-playwright
+    environment:
+      PORT: 3000
+      MAX_CONCURRENT_PAGES: 2
+
+volumes:
+  postgres_data:
+  uploads:

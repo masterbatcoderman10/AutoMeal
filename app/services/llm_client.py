@@ -79,6 +79,8 @@ def get_llm_client() -> OpenRouterClient:
     global _client
     if _client is None:
         settings = get_settings()
+        if not settings.OPENROUTER_API_KEY:
+            raise RuntimeError("OPENROUTER_API_KEY must be set")
         _client = OpenRouterClient(
             api_key=settings.OPENROUTER_API_KEY,
             base_url=settings.OPENROUTER_BASE_URL,

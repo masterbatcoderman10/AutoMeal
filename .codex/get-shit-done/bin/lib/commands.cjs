@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execGit, platformWriteSync, platformReadSync, platformEnsureDir } = require('./shell-command-projection.cjs');
-const { loadConfig, isGitIgnored, normalizePhaseName, comparePhaseNum, getArchivedPhaseDirs, generateSlugInternal, getMilestoneInfo, getMilestonePhaseFilter, resolveModelInternal, resolveReasoningEffortInternal, stripShippedMilestones, extractCurrentMilestone, toPosixPath, output, error, findPhaseInternal, extractOneLinerFromBody, getRoadmapPhaseInternal } = require('./core.cjs');
+const { loadConfig, isGitIgnored, normalizePhaseName, comparePhaseNum, getArchivedPhaseDirs, generateSlugInternal, getMilestoneInfo, getMilestonePhaseFilter, resolveModelInternal, resolveReasoningEffortInternal, resolveFallbackModelInternal, stripShippedMilestones, extractCurrentMilestone, toPosixPath, output, error, findPhaseInternal, extractOneLinerFromBody, getRoadmapPhaseInternal } = require('./core.cjs');
 const { planningDir, planningPaths } = require('./planning-workspace.cjs');
 const { extractFrontmatter } = require('./frontmatter.cjs');
 const { MODEL_PROFILES } = require('./model-profiles.cjs');
@@ -242,12 +242,17 @@ function cmdResolveModel(cwd, agentType, raw) {
   const profile = config.model_profile || 'balanced';
   const model = resolveModelInternal(cwd, agentType);
   const reasoningEffort = resolveReasoningEffortInternal(cwd, agentType);
+  const fallback = resolveFallbackModelInternal(cwd, agentType);
 
   const agentModels = MODEL_PROFILES[agentType];
   const result = agentModels
     ? { model, profile }
     : { model, profile, unknown_agent: true };
   if (reasoningEffort) result.reasoning_effort = reasoningEffort;
+  if (fallback?.model) {
+    result.fallback_model = fallback.model;
+    if (fallback.reasoning_effort) result.fallback_reasoning_effort = fallback.reasoning_effort;
+  }
   output(result, raw, model);
 }
 

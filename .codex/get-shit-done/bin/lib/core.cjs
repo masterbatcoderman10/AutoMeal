@@ -1264,14 +1264,20 @@ function _resolveRuntimeTier(config, tier) {
   });
 }
 
+function _resolveAgentOverride(config, agentType) {
+  const raw = config.model_overrides?.[agentType];
+  if (!raw) return null;
+  return typeof raw === 'string' ? { model: raw } : raw;
+}
+
 function resolveModelInternal(cwd, agentType) {
   const config = loadConfig(cwd);
 
   // 1. Per-agent override — always respected; highest precedence.
   // Users who set fully-qualified model IDs (e.g., "openai/gpt-5.4") get exactly that.
-  const override = config.model_overrides?.[agentType];
-  if (override) {
-    return override;
+  const override = _resolveAgentOverride(config, agentType);
+  if (override?.model) {
+    return override.model;
   }
 
   // 2. Compute the tier (opus/sonnet/haiku/inherit) for this agent.
@@ -1384,8 +1390,8 @@ function resolveModelForTier(cwd, agentType, attempt) {
 
   // Per-agent override always wins — same as resolveModelInternal step 1.
   // User-supplied full IDs bypass the entire tier mechanism.
-  const override = config.model_overrides?.[agentType];
-  if (override) return override;
+  const override = _resolveAgentOverride(config, agentType);
+  if (override?.model) return override.model;
 
   const dr = config.dynamic_routing;
   // Disabled / missing / non-object → fall back to the existing resolver.
@@ -1461,9 +1467,10 @@ function resolveReasoningEffortInternal(cwd, agentType) {
   // for that typo would leak `xhigh` into a Claude or unknown install
   // (review finding #3).
   if (!RUNTIMES_WITH_REASONING_EFFORT.has(config.runtime)) return null;
-  // Per-agent override means user supplied a fully-qualified ID; reasoning_effort
-  // for that case must be set via per-agent mechanism, not tier inference.
-  if (config.model_overrides?.[agentType]) return null;
+  // Per-agent object overrides may carry their own reasoning effort. String
+  // overrides keep the historic behavior and only pin the model.
+  const override = _resolveAgentOverride(config, agentType);
+  if (override) return override.reasoning_effort || null;
 
   const profile = String(config.model_profile || 'balanced').toLowerCase();
   const agentModels = MODEL_PROFILES[agentType];
@@ -1501,6 +1508,41 @@ function resolveReasoningEffortInternal(cwd, agentType) {
 
   const entry = _resolveRuntimeTier(config, tier);
   return entry?.reasoning_effort || null;
+}
+
+function resolveFallbackModelInternal(cwd, agentType) {
+  const config = loadConfig(cwd);
+  const override = _resolveAgentOverride(config, agentType);
+  if (override?.fallback_model) {
+    return {
+      model: override.fallback_model,
+      reasoning_effort: override.fallback_reasoning_effort || null,
+    };
+  }
+  if (override) return null;
+
+  const profile = String(config.model_profile || 'balanced').toLowerCase();
+  const agentModels = MODEL_PROFILES[agentType];
+  if (!agentModels) return null;
+
+  const phaseType = AGENT_TO_PHASE_TYPE[agentType];
+  const phaseTypeTier = (phaseType && config.models && typeof config.models === 'object')
+    ? config.models[phaseType]
+    : undefined;
+  const VALID_TIERS = new Set(['opus', 'sonnet', 'haiku']);
+  const tier = (phaseTypeTier && VALID_TIERS.has(phaseTypeTier))
+    ? phaseTypeTier
+    : (profile === 'inherit'
+      ? 'inherit'
+      : (agentModels[profile] || agentModels['balanced']));
+  if (!tier || tier === 'inherit') return null;
+
+  const entry = _resolveRuntimeTier(config, tier);
+  if (!entry?.fallback_model) return null;
+  return {
+    model: entry.fallback_model,
+    reasoning_effort: entry.fallback_reasoning_effort || null,
+  };
 }
 
 // ─── Summary body helpers ─────────────────────────────────────────────────
@@ -1880,6 +1922,7 @@ module.exports = {
   resolveModelInternal,
   resolveModelForTier,
   resolveReasoningEffortInternal,
+  resolveFallbackModelInternal,
   RUNTIME_PROFILE_MAP,
   RUNTIMES_WITH_REASONING_EFFORT,
   KNOWN_RUNTIMES,

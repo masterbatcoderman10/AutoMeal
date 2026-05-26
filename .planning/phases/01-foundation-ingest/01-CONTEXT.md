@@ -99,6 +99,17 @@ The pre-work `.ts` file has these errors that Python models must NOT replicate:
 
 </specifics>
 
+<execution_inputs>
+## User-Provided Runtime Inputs
+
+- The primary checkout has a populated, gitignored `.env` with real local values for `DATABASE_URL`, `POSTGRES_PASSWORD`, `INGEST_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `OPENROUTER_API_KEY`, `SEARXNG_SECRET`, and `FIRECRAWL_PASSWORD`.
+- Executors must never overwrite, log, stage, or commit `.env`. If a worktree executor needs to run Docker Compose or other runtime checks and `.env` is absent in that worktree, copy `.env` from the primary worktree as an untracked local file:
+  `PRIMARY_WT=$(git worktree list --porcelain | awk '/^worktree /{print substr($0,10); exit}') && [ -f "$PRIMARY_WT/.env" ] && cp "$PRIMARY_WT/.env" .env`
+- The primary checkout also has local HEIC sample photos under `sample_images/`: `IMG_4582.HEIC`, `IMG_4583.HEIC`, `IMG_4611.HEIC`, `IMG_4629.HEIC`, `IMG_4641.HEIC`, `IMG_4646.HEIC`.
+- `sample_images/` is currently untracked, so worktree executors should not assume those files are present unless copied from the primary checkout. Prefer generated tiny JPEGs for automated endpoint tests; use `sample_images/*.HEIC` for optional HEIC smoke tests after ensuring the files exist locally.
+
+</execution_inputs>
+
 <deferred>
 ## Deferred Ideas
 

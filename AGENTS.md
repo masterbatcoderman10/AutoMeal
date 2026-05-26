@@ -24,8 +24,11 @@ A photo-based personal meal tracker. An iOS Shortcut posts the most recently tak
 
 | Role | Primary | Fallback |
 |------|---------|----------|
-| **Execution subagents** | `zai glm-5.1` | `opencode-go glm-5.1` (when zai expires) |
-| **Review / verification subagents** | `openai-codex gpt-5.4` | — |
+| **Execution subagents** | `gpt-5.3-codex-spark` (`xhigh`) | `gpt-5.4` (`high`) |
+| **Code fixer subagents** | `gpt-5.4` (`high`) | inherited Codex default |
+| **Review / verification subagents** | `gpt-5.5` (`medium`) | inherited Codex default |
+
+GSD execution must use worktree-isolated Codex subagents. Keep `workflow.use_worktrees=true`; do not disable it to bypass routing or cleanup issues.
 
 <!-- GSD:project-end -->
 

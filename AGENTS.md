@@ -26,9 +26,11 @@ A photo-based personal meal tracker. An iOS Shortcut posts the most recently tak
 |------|---------|----------|
 | **Execution subagents** | `gpt-5.3-codex-spark` (`xhigh`) | `gpt-5.4` (`high`) |
 | **Code fixer subagents** | `gpt-5.4` (`high`) | inherited Codex default |
-| **Review / verification subagents** | `gpt-5.5` (`medium`) | inherited Codex default |
+| **Review / verification subagents** | `gpt-5.4` (`high`) | inherited Codex default |
 
 GSD execution must use worktree-isolated Codex subagents. Keep `workflow.use_worktrees=true`; do not disable it to bypass routing or cleanup issues.
+
+After spawning any GSD subagent, immediately inspect its Codex session metadata and verify the actual `turn_context.payload.model` and reasoning effort match the role table above. If the child inherited the parent/global model instead, stop that subagent before using its output, fix the agent TOML/config routing, and retry only after the route is verified.
 
 <!-- GSD:project-end -->
 

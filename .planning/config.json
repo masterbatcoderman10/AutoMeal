@@ -8,8 +8,8 @@
   "model_profile_overrides": {
     "codex": {
       "opus": {
-        "model": "gpt-5.5",
-        "reasoning_effort": "medium"
+        "model": "gpt-5.4",
+        "reasoning_effort": "high"
       },
       "sonnet": {
         "model": "gpt-5.3-codex-spark",

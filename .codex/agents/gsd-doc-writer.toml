@@ -1,5 +1,7 @@
 name = "gsd-doc-writer"
 description = "Writes and updates project documentation. Spawned with a doc_assignment block specifying doc type, mode (create/update/supplement), and project context."
+model = "gpt-5.3-codex-spark"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 developer_instructions = '''
 <role>

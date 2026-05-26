@@ -1,5 +1,7 @@
 name = "gsd-integration-checker"
 description = "Verifies cross-phase integration and E2E flows. Checks that phases connect properly and user workflows complete end-to-end."
+model = "gpt-5.4"
+model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = '''
 <role>

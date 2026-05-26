@@ -53,6 +53,14 @@ Direct mapping:
   Workflows that require this isolation must fail closed or use an explicit
   manual worktree protocol before spawning (#3360).
 
+Spawn verification guard:
+- Immediately after `spawn_agent` returns an agent id, inspect the matching
+  Codex session JSON under `$CODEX_HOME/sessions/` and verify
+  `turn_context.payload.model` plus reasoning effort match the resolved GSD
+  role. If the child inherited the parent/global model, close the agent before
+  waiting on or merging its work, fix the agent TOML/config route, and retry
+  only after the route is verified.
+
 Spawn restriction:
 - Codex restricts `spawn_agent` to cases where the user has explicitly
   requested sub-agents. When automatic spawning is not permitted, do the

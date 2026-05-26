@@ -50,4 +50,5 @@ Context files are resolved inside the workflow via `gsd-sdk query init.execute-p
 <process>
 Execute end-to-end.
 Preserve all workflow gates (wave execution, checkpoint handling, verification, state updates, routing).
+After each subagent spawn, immediately verify the actual child session model and reasoning effort from Codex session metadata before waiting on or merging that subagent. If routing inherited the parent/global model, stop the child, fix the agent TOML/config route, and retry only after the route is verified.
 </process>

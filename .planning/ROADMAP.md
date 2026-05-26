@@ -6,7 +6,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 
 ## Phases
 
-- [ ] **Phase 1: Foundation & Ingest** - Docker stack running, correct schema, iOS Shortcut posts a photo and gets a Telegram ack (implementation complete; real-device/Telegram smoke pending)
+- [ ] **Phase 1: Foundation & Ingest** - Docker stack running, correct schema, iOS Shortcut posts a photo and gets a Telegram ack
 - [ ] **Phase 2: Vision Slice** - Photo upload produces a bot message listing detected food items by name (no nutrition yet)
 - [ ] **Phase 3: Embed & Match** - Seeded foods matched by vector similarity produce DiaryEntries and a nutrition push
 - [ ] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes
@@ -115,7 +115,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation & Ingest | 5/5 | Awaiting user setup verification | - |
+| 1. Foundation & Ingest | 0/TBD | Not started | - |
 | 2. Vision Slice | 0/TBD | Not started | - |
 | 3. Embed & Match | 0/TBD | Not started | - |
 | 4. Reason, Interview & Learning Loop | 0/TBD | Not started | - |

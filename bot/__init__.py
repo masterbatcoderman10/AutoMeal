@@ -1,1 +1,0 @@
-"""MealTracker Telegram bot package."""

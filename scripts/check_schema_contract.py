@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import sys
 
 
@@ -118,12 +119,13 @@ def assert_migration_contract() -> None:
     assert "portion_bucket" in text
     assert "image_hash" in text
     assert "is_invalidated" in text
-    assert text.index("op.create_table(\"food_items\"") < text.index(
-        "op.create_table(\"food_visuals\""
-    )
-    assert text.index("op.create_table(\"meal_logs\"") < text.index(
-        "op.create_table(\"meal_segments\""
-    )
+    def create_table_position(table_name: str) -> int:
+        match = re.search(rf"op\.create_table\(\s*[\"']{table_name}[\"']", text)
+        assert match is not None, f"missing create_table for {table_name}"
+        return match.start()
+
+    assert create_table_position("food_items") < create_table_position("food_visuals")
+    assert create_table_position("meal_logs") < create_table_position("meal_segments")
 
 
 def main() -> None:

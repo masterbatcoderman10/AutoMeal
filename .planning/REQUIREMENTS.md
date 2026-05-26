@@ -22,7 +22,7 @@
 
 ### Match
 
-- [ ] **MATCH-01**: Schema uses `vector(1536)` — Gemini Embedding 2 MRL truncated to 1536 dims (within pgvector's HNSW indexability ceiling of 2000); FoodVisuals and MealSegments columns updated accordingly
+- [x] **MATCH-01**: Schema uses `vector(1536)` — Gemini Embedding 2 MRL truncated to 1536 dims (within pgvector's HNSW indexability ceiling of 2000); FoodVisuals and MealSegments columns updated accordingly
 - [ ] **MATCH-02**: Per-crop multimodal embedding is generated with `output_dimensionality=1536`, `task_type=RETRIEVAL_DOCUMENT` on writes / `RETRIEVAL_QUERY` on searches; stored on `MealSegment.embedding`
 - [ ] **MATCH-03**: HNSW cosine index (`m=16, ef_construction=64`) on `FoodVisuals.embedding`; cosine similarity search returns the top match + score
 - [ ] **MATCH-04**: On confirmed identification (any method) a `FoodVisual` row is written so the visual vocabulary grows
@@ -122,7 +122,7 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 | VISION-02 | Phase 2 | Pending |
 | VISION-03 | Phase 2 | Pending |
 | VISION-04 | Phase 2 | Pending |
-| MATCH-01 | Phase 1 | Pending |
+| MATCH-01 | Phase 1 | Complete |
 | MATCH-02 | Phase 3 | Pending |
 | MATCH-03 | Phase 3 | Pending |
 | MATCH-04 | Phase 3 | Pending |

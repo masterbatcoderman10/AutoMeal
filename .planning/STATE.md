@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-05-26T10:17:51.872Z"
+last_updated: "2026-05-26T10:34:20.505Z"
 last_activity: 2026-05-26
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 5
-  completed_plans: 1
-  percent: 20
+  completed_plans: 2
+  percent: 40
 ---
 
 # Project State
@@ -25,29 +25,29 @@ See: .planning/PROJECT.md (updated 2026-05-24)
 ## Current Position
 
 Phase: 01 (foundation-ingest) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-05-26
 
-Progress: [██░░░░░░░░] 20%
+Progress: [████░░░░░░] 40%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 1
-- Average duration: 8min
-- Total execution time: 8min
+- Total plans completed: 2
+- Average duration: 10min
+- Total execution time: 19min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-foundation-ingest | 1 | 8min | 8min |
+| 01-foundation-ingest | 2 | 19min | 10min |
 
 **Recent Trend:**
 
-- Plan 01 completed in 8min
+- Plan 02 completed in 11min
 
 *Updated after each plan completion*
 
@@ -66,6 +66,8 @@ Recent decisions affecting current work:
 - Roadmap: FoodVisual invalidation cascades from USER_CORRECTED — ships in same phase as FoodVisual writes (Phase 4)
 - [Phase 01-foundation-ingest]: 01-01: API host port is bound to 127.0.0.1:8000; Firecrawl and SearXNG remain internal-only in Compose. — Avoid exposing the ingest and grounding services beyond the local single-user deployment surface.
 - [Phase 01-foundation-ingest]: 01-01: Runtime secrets are referenced through env substitution; .env remains local and untracked. — Mitigates secret exposure in docker-compose logs and git history.
+- [Phase 01-foundation-ingest]: 01-02: SQLAlchemy 2.0.36 uses PostgreSQL TIMESTAMP(timezone=True) aliased as TIMESTAMPTZ in code. — Preserves actual TIMESTAMPTZ behavior while staying compatible with the installed SQLAlchemy API.
+- [Phase 01-foundation-ingest]: 01-02: Initial Alembic migration is handwritten. — Keeps pgvector extension creation and HNSW index SQL deterministic.
 
 ### Pending Todos
 
@@ -95,6 +97,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-05-26T10:17:26.693Z
-Stopped at: Phase 1 context gathered
+Last session: 2026-05-26T10:34:20.501Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None

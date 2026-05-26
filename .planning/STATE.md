@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-05-26T11:12:30.325Z"
+last_updated: "2026-05-26T12:18:03.943Z"
 last_activity: 2026-05-26
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 5
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-05-24)
 ## Current Position
 
 Phase: 01 (foundation-ingest) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-05-26
 
-Progress: [██████░░░░] 60%
+Progress: [████████░░] 80%
 
 ## Performance Metrics
 
@@ -51,6 +51,7 @@ Progress: [██████░░░░] 60%
 
 *Updated after each plan completion*
 | Phase 01 P03 | 12min | 5 tasks | 5 files |
+| Phase 01 P04 | 56min | 4 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,8 @@ Recent decisions affecting current work:
 - [Phase 01-foundation-ingest]: 01-02: Initial Alembic migration is handwritten. — Keeps pgvector extension creation and HNSW index SQL deterministic.
 - [Phase ?]: Use raw-bytes SHA-256 hashing before transcoding for dedup correctness
 - [Phase ?]: Keep request handling lightweight and return 202/200 without pipeline work
+- [Phase 01]: Telegram bot runs via PTB Application.run_polling() with the DB acknowledgement loop attached through post_init/post_shutdown hooks.
+- [Phase 01]: Pending MealLog acknowledgements use FOR UPDATE SKIP LOCKED and only advance to DETECTING after Telegram send_message succeeds.
 
 ### Pending Todos
 
@@ -100,6 +103,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-05-26T11:12:02.750Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-05-26T12:18:03.939Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None

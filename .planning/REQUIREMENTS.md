@@ -7,11 +7,11 @@
 
 ### Ingest
 
-- [ ] **INGEST-01**: iOS Shortcut posts the last-taken photo to the authenticated endpoint
-- [ ] **INGEST-02**: Endpoint verifies a shared-secret header; rejects missing or wrong secret with 401
-- [ ] **INGEST-03**: Endpoint saves the image to local disk and returns 202 ack within 5 seconds
-- [ ] **INGEST-04**: A `MealLog` row is created with `processing_status=PENDING` on every accepted photo
-- [ ] **INGEST-05**: Re-submitting the same image-hash within a 60-second window returns the existing `MealLog` (dedup)
+- [x] **INGEST-01**: iOS Shortcut posts the last-taken photo to the authenticated endpoint
+- [x] **INGEST-02**: Endpoint verifies a shared-secret header; rejects missing or wrong secret with 401
+- [x] **INGEST-03**: Endpoint saves the image to local disk and returns 202 ack within 5 seconds
+- [x] **INGEST-04**: A `MealLog` row is created with `processing_status=PENDING` on every accepted photo
+- [x] **INGEST-05**: Re-submitting the same image-hash within a 60-second window returns the existing `MealLog` (dedup)
 
 ### Vision
 
@@ -113,11 +113,11 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INGEST-01 | Phase 1 | Pending |
-| INGEST-02 | Phase 1 | Pending |
-| INGEST-03 | Phase 1 | Pending |
-| INGEST-04 | Phase 1 | Pending |
-| INGEST-05 | Phase 1 | Pending |
+| INGEST-01 | Phase 1 | Complete |
+| INGEST-02 | Phase 1 | Complete |
+| INGEST-03 | Phase 1 | Complete |
+| INGEST-04 | Phase 1 | Complete |
+| INGEST-05 | Phase 1 | Complete |
 | VISION-01 | Phase 2 | Pending |
 | VISION-02 | Phase 2 | Pending |
 | VISION-03 | Phase 2 | Pending |

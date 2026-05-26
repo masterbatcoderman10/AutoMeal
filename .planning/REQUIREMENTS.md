@@ -62,11 +62,11 @@
 
 ### Infra
 
-- [ ] **INFRA-01**: A single `docker-compose.yml` brings up app + Postgres+pgvector + SearXNG + Firecrawl
+- [x] **INFRA-01**: A single `docker-compose.yml` brings up app + Postgres+pgvector + SearXNG + Firecrawl
 - [ ] **INFRA-02**: All LLM calls go through OpenRouter via the OpenAI SDK with swapped `base_url` (vision, tool calls, structured outputs through SDK; multimodal embeddings via a thin `httpx` wrapper)
-- [ ] **INFRA-03**: Runtime config (OpenRouter key, Telegram bot token + chat id, ingest secret, confidence thresholds, summary time + TZ) is loaded from an env file
+- [x] **INFRA-03**: Runtime config (OpenRouter key, Telegram bot token + chat id, ingest secret, confidence thresholds, summary time + TZ) is loaded from an env file
 - [ ] **INFRA-04**: Pipeline state machine includes a `FAILED` status; a janitor job resets `*ING` rows stuck longer than 10 minutes
-- [ ] **INFRA-05**: The full stack runs arm64 on the Mac mini and the same `docker-compose.yml` works on amd64 (multi-arch images preferred)
+- [x] **INFRA-05**: The full stack runs arm64 on the Mac mini and the same `docker-compose.yml` works on amd64 (multi-arch images preferred)
 
 ## v2 Requirements
 
@@ -147,11 +147,11 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 | OUTPUT-06 | Phase 6 | Pending |
 | OUTPUT-07 | Phase 6 | Pending |
 | OUTPUT-08 | Phase 6 | Pending |
-| INFRA-01 | Phase 1 | Pending |
+| INFRA-01 | Phase 1 | Complete |
 | INFRA-02 | Phase 1 | Pending |
-| INFRA-03 | Phase 1 | Pending |
+| INFRA-03 | Phase 1 | Complete |
 | INFRA-04 | Phase 4 | Pending |
-| INFRA-05 | Phase 1 | Pending |
+| INFRA-05 | Phase 1 | Complete |
 
 **Coverage:**
 - v1 requirements: 39 total

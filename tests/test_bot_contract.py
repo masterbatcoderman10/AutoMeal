@@ -66,7 +66,10 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             processing_status=MealProcessingStatus.PENDING,
         )
         session = AsyncMock()
-        session.execute.return_value.scalar_one_or_none.return_value = meal
+        session.execute.return_value = Mock(
+            scalar_one_or_none=Mock(return_value=meal),
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
 
         class SessionContext:
             async def __aenter__(self):
@@ -84,7 +87,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
-            patch.object(polling, "create_async_engine", return_value=object()) as create_engine,
+            patch.object(polling, "create_async_engine", return_value=engine) as create_engine,
             patch.object(polling, "async_sessionmaker", return_value=session_factory) as sessionmaker,
             patch.object(polling, "format_ack_message", return_value="ack text") as format_ack_message,
             patch.object(
@@ -105,6 +108,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         bot.send_message.assert_awaited_once_with(chat_id="999", text="ack text")
         format_ack_message.assert_called_once_with(meal.id)
         session.commit.assert_awaited_once()
+        engine.dispose.assert_awaited_once()
         self.assertEqual(meal.processing_status, MealProcessingStatus.DETECTING)
 
     async def test_poll_reraises_cancelled_error(self) -> None:
@@ -112,6 +116,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
 
         session = AsyncMock()
         session.execute.side_effect = asyncio.CancelledError
+        engine = SimpleNamespace(dispose=AsyncMock())
 
         class SessionContext:
             async def __aenter__(self):
@@ -128,7 +133,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
-            patch.object(polling, "create_async_engine", return_value=object()),
+            patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
         ):
             with self.assertRaises(asyncio.CancelledError):
@@ -137,6 +142,8 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                     settings,
                     poll_interval=0.01,
                 )
+
+        engine.dispose.assert_awaited_once()
 
 
 class MainWiringTests(unittest.IsolatedAsyncioTestCase):

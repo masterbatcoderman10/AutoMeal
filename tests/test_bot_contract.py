@@ -153,11 +153,17 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
         application = SimpleNamespace(bot=object(), bot_data={})
         settings = SimpleNamespace(BOT_POLL_INTERVAL=3.0)
         fake_task = object()
+        created_coroutines: list[object] = []
+
+        def create_task(coroutine):
+            created_coroutines.append(coroutine)
+            coroutine.close()
+            return fake_task
 
         with (
             patch.object(bot_main, "get_settings", return_value=settings),
             patch.object(bot_main, "poll_and_acknowledge", new=AsyncMock()) as poll_and_acknowledge,
-            patch.object(bot_main.asyncio, "create_task", return_value=fake_task) as create_task,
+            patch.object(bot_main.asyncio, "create_task", side_effect=create_task) as create_task_mock,
         ):
             await bot_main.post_init(application)
 
@@ -166,20 +172,31 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             settings,
             settings.BOT_POLL_INTERVAL,
         )
-        create_task.assert_called_once()
+        create_task_mock.assert_called_once()
+        self.assertEqual(len(created_coroutines), 1)
         self.assertIs(application.bot_data["poll_task"], fake_task)
 
     async def test_post_shutdown_cancels_background_polling_task(self) -> None:
         from bot import main as bot_main
 
-        poll_task = AsyncMock()
-        poll_task.cancel = Mock()
+        class FakeTask:
+            def __init__(self) -> None:
+                self.cancel = Mock()
+                self.awaited = False
+
+            async def wait(self) -> None:
+                self.awaited = True
+
+            def __await__(self):
+                return self.wait().__await__()
+
+        poll_task = FakeTask()
         application = SimpleNamespace(bot_data={"poll_task": poll_task})
 
         await bot_main.post_shutdown(application)
 
         poll_task.cancel.assert_called_once_with()
-        poll_task.assert_awaited_once()
+        self.assertTrue(poll_task.awaited)
 
     def test_main_builds_application_and_runs_polling(self) -> None:
         from bot import main as bot_main

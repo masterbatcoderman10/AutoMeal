@@ -48,8 +48,10 @@ services:
     container_name: mealttracker-bot
     environment:
       DATABASE_URL: postgresql+asyncpg://mealttracker:${POSTGRES_PASSWORD}@postgres:5432/mealttracker
+      INGEST_SECRET: ${INGEST_SECRET}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
     volumes:
       - uploads:/data/uploads
     depends_on:

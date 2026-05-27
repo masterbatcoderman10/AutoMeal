@@ -61,7 +61,12 @@ Six phases transform a blank repo into a fully operational personal meal tracker
   2. Re-photographing a food item that was manually seeded in FoodItems/FoodVisuals triggers a SIMILARITY match (score ≥ 0.85) and produces a DiaryEntry without LLM or interview involvement
   3. After any confirmation (SIMILARITY, LLM, or INTERVIEW path), a new FoodVisual row is written to the index so the visual vocabulary grows; confirming the same food twice produces two FoodVisual rows
   4. A Telegram meal-result message is pushed when MealLog.processing_status reaches COMPLETED, showing food name, estimated portion bucket, macros, and verification status
-**Plans**: TBD
+**Plans**: 4 plans
+Plans:
+  - [ ] `03-01-PLAN.md` — Wave 0 embedding contract hardening, calibration gate, and demo seed helper
+  - [ ] `03-02-PLAN.md` — per-segment embed/search gate with unresolved-meal routing to `REASONING`
+  - [ ] `03-03-PLAN.md` — transactional similarity completion with `DiaryEntry` creation and `FoodVisual` write-back
+  - [ ] `03-04-PLAN.md` — post-commit Telegram nutrition push and Phase 03 UAT evidence scaffold
 **Phase note**: Run cross-modal sanity calibration before building match logic: "rice and lentils" text embedding should rank closer to a daal chawal photo than to a random food. If cross-modal alignment is degenerate, stop and evaluate alternative embedding models before proceeding.
 
 ---

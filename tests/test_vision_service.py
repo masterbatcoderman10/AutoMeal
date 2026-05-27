@@ -6,10 +6,16 @@ from unittest.mock import AsyncMock
 
 from app.services.vision_service import (
     _coerce_detect_decision,
+    _coerce_segment_candidates,
+    normalize_segment_box,
     _normalize_payload,
     detect_food_photo,
     detect_prompt,
     detect_response_format,
+    label_prompt,
+    label_response_format,
+    segment_prompt,
+    segment_response_format,
 )
 
 
@@ -58,6 +64,77 @@ class DetectPayloadTests(unittest.TestCase):
     def test_normalize_payload_parses_json_content(self) -> None:
         parsed = _normalize_payload(json.dumps({"is_food": True, "confidence": 0.88}))
         self.assertEqual(parsed, {"is_food": True, "confidence": 0.88})
+
+
+class SegmentPromptTests(unittest.TestCase):
+    def test_segment_prompt_includes_grouping_and_garnish_rules(self) -> None:
+        prompt = segment_prompt("https://example.test/meal.jpg")
+        prompt_text = prompt[0]["content"][0]["text"].lower()
+        self.assertIn("distinct visible food region", prompt_text)
+        self.assertIn("clearly separate", prompt_text)
+        self.assertIn("tiny garnish", prompt_text)
+        self.assertIn("box_2d", prompt_text)
+
+    def test_segment_response_format_is_strict_json_schema(self) -> None:
+        schema = segment_response_format()
+        self.assertEqual(schema["type"], "json_schema")
+        json_schema = schema["json_schema"]["schema"]
+        self.assertTrue(json_schema["additionalProperties"] is False)
+        self.assertIn("segments", json_schema["required"])
+
+
+class SegmentBoxTests(unittest.TestCase):
+    def test_normalize_segment_box_divides_raw_1000_scale(self) -> None:
+        normalized = normalize_segment_box([0, 250, 1000, 500])
+        self.assertEqual(normalized, [0.0, 0.25, 1.0, 0.5])
+
+    def test_reversed_coordinate_box_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            normalize_segment_box([900, 900, 100, 100])
+
+    def test_out_of_range_segment_box_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            normalize_segment_box([900, 900, 1100, 1200])
+
+    def test_tiny_segment_area_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            normalize_segment_box([0, 0, 80, 120])
+
+
+class SegmentCandidateTests(unittest.TestCase):
+    def test_coerce_segment_candidates_validates_whole_response(self) -> None:
+        payload = {
+            "segments": [
+                {"box_2d": [100, 100, 500, 500], "label_hint": "bread"},
+                {"box_2d": [900, 900, 950, 950]},
+            ],
+        }
+        with self.assertRaises(ValueError):
+            _coerce_segment_candidates(payload, max_segments=2)
+
+    def test_segment_candidate_cap_is_applied(self) -> None:
+        payload = {
+            "segments": [
+                {"box_2d": [0, 0, 200, 500]},
+                {"box_2d": [200, 0, 400, 500]},
+                {"box_2d": [400, 0, 600, 500]},
+            ],
+        }
+        candidates = _coerce_segment_candidates(payload, max_segments=2)
+        self.assertEqual(len(candidates), 2)
+
+    def test_segment_label_prompt_includes_d_07_d_08_rules(self) -> None:
+        prompt_text = label_prompt("https://example.test/crop.jpg")[0]["content"][0]["text"].lower()
+        self.assertIn("dish-level labels", prompt_text)
+        self.assertIn("ingredient-level", prompt_text)
+        self.assertIn("tiny sauce", prompt_text)
+
+    def test_segment_label_response_format_is_strict(self) -> None:
+        schema = label_response_format()
+        self.assertEqual(schema["type"], "json_schema")
+        json_schema = schema["json_schema"]["schema"]
+        self.assertTrue(json_schema["additionalProperties"] is False)
+        self.assertIn("label", json_schema["required"])
 
 
 class DetectServiceTests(unittest.IsolatedAsyncioTestCase):

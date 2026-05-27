@@ -440,6 +440,7 @@ function rescueSummaryArtifacts(worktreePath, repoRoot, deps) {
   const readFileSync = deps.readFileSync || ((p) => fs.readFileSync(p, 'utf8'));
   const mkdirSync = deps.mkdirSync || ((d, o) => fs.mkdirSync(d, o));
   const copyFileSync = deps.copyFileSync || fs.copyFileSync;
+  const execGit = deps.execGit || execGitDefault;
 
   const summaryPaths = findSummaryFiles(worktreePath);
   const rescuedRelPaths = new Set();
@@ -449,6 +450,13 @@ function rescueSummaryArtifacts(worktreePath, repoRoot, deps) {
     // Normalize to forward slashes so the Set comparison against `git status --porcelain`
     // output works on Windows too (git always emits forward slashes in porcelain output).
     const relPath = absPath.slice(worktreePath.length).replace(/^[/\\]/, '').replace(/\\/g, '/');
+    const trackedCheck = execGit(['-C', worktreePath, 'ls-files', '--error-unmatch', '--', relPath], { cwd: repoRoot });
+    if (gitResultOk(trackedCheck)) {
+      // Only rescue untracked SUMMARY artifacts. If the file is already tracked on the
+      // worktree branch, copying it into the main checkout creates an untracked path
+      // that blocks the subsequent merge of the committed branch version.
+      continue;
+    }
     rescuedRelPaths.add(relPath);
 
     const dest = path.join(repoRoot, relPath);

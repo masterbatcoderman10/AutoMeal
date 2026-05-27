@@ -6,7 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.models import MealProcessingStatus
-from app.services.embedding_service import EMBEDDING_DIMENSION, RETRIEVAL_QUERY
+from app.services.embedding_service import (
+    EMBEDDING_DIMENSION,
+    RETRIEVAL_DOCUMENT,
+    RETRIEVAL_QUERY,
+)
 
 
 async def _noop_sleep(*_args, **_kwargs) -> None:
@@ -275,6 +279,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_poll_and_match_writes_all_rows_only_when_all_segments_pass_threshold(self) -> None:
         from bot import polling
+        from app.services import matching_service
 
         segment_one = SimpleNamespace(
             id="segment-1",
@@ -320,6 +325,10 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             MATCHING_MODEL="google/gemini-embedding-2-preview",
             BOT_POLL_INTERVAL=3.0,
         )
+        write_back_embeddings = [
+            [0.101] * matching_service.EMBEDDING_DIMENSION,
+            [0.202] * matching_service.EMBEDDING_DIMENSION,
+        ]
 
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
@@ -346,6 +355,11 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ],
             ),
+            patch.object(
+                polling.matching_service,
+                "embed_segment_visual_embedding",
+                side_effect=write_back_embeddings,
+            ),
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
@@ -353,4 +367,109 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
         self.assertEqual(len(session.add.call_args_list), 4)
+        food_visual_rows = [
+            call.args[0]
+            for call in session.add.call_args_list
+            if getattr(call.args[0], "cropped_image_url", None)
+        ]
+        self.assertEqual(
+            len(food_visual_rows),
+            2,
+            "Expected one FoodVisual row per segment",
+        )
+        self.assertIn([0.101] * matching_service.EMBEDDING_DIMENSION, [row.embedding for row in food_visual_rows])
+        self.assertIn([0.202] * matching_service.EMBEDDING_DIMENSION, [row.embedding for row in food_visual_rows])
         bot.send_message.assert_not_awaited()
+
+    async def test_poll_and_match_reuses_new_retrieval_document_embedding_for_each_confirmation(self) -> None:
+        from bot import polling
+        from app.services import matching_service
+
+        segment_one = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=[0.11] * EMBEDDING_DIMENSION,
+            label="Pita Bread",
+        )
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            processing_status=MealProcessingStatus.MATCHING,
+        )
+        session = AsyncMock()
+        session_claim = Mock(scalar_one_or_none=Mock(return_value=meal))
+        session_segments = Mock(
+            scalars=Mock(
+                return_value=Mock(
+                    all=Mock(return_value=[segment_one]),
+                )
+            )
+        )
+        session.execute.side_effect = [
+            session_claim,
+            session_segments,
+            asyncio.CancelledError,
+            session_claim,
+            session_segments,
+            asyncio.CancelledError,
+        ]
+        session.add = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        first_run_embedding = [0.3] * EMBEDDING_DIMENSION
+        second_run_embedding = [0.4] * EMBEDDING_DIMENSION
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling.matching_service,
+                "match_segment_against_visual_corpus",
+                return_value=SimpleNamespace(
+                    food_visual_id="visual-1",
+                    food_item_id="item-1",
+                    similarity=0.91,
+                    is_match=True,
+                    is_below_threshold=False,
+                    query_embedding=[0.11] * EMBEDDING_DIMENSION,
+                ),
+            ),
+            patch.object(
+                polling.matching_service,
+                "embed_segment_visual_embedding",
+                side_effect=[first_run_embedding, second_run_embedding],
+            ),
+            patch.object(polling.asyncio, "sleep", new=_noop_sleep),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+
+        food_visual_payloads = [
+            call.args[0].embedding
+            for call in session.add.call_args_list
+            if getattr(call.args[0], "cropped_image_url", None)
+        ]
+        self.assertEqual(len(food_visual_payloads), 2)
+        self.assertIn(first_run_embedding, food_visual_payloads)
+        self.assertIn(second_run_embedding, food_visual_payloads)
+
+        matching_service_args = polling.matching_service.embed_segment_visual_embedding.call_args_list
+        self.assertEqual(len(matching_service_args), 2)
+        self.assertEqual(matching_service_args[0].kwargs["task_type"], RETRIEVAL_DOCUMENT)
+        self.assertEqual(matching_service_args[1].kwargs["task_type"], RETRIEVAL_DOCUMENT)

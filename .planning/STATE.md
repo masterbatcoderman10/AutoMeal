@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-05-27T16:26:38Z"
-last_activity: 2026-05-27 -- Phase 02 plan 03 complete
+last_updated: "2026-05-27T16:33:00Z"
+last_activity: 2026-05-27 -- Phase 02 plan 04 complete
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 8
-  percent: 89
+  completed_plans: 9
+  percent: 100
 ---
 
 # Project State
@@ -25,19 +25,19 @@ See: .planning/PROJECT.md (updated 2026-05-24)
 ## Current Position
 
 Phase: 02 (vision-slice) — EXECUTING
-Plan: 3 of 4
-Status: Ready for 02-04
-Last activity: 2026-05-27 -- Completed 02-03-PLAN.md
+Plan: 4 of 4
+Status: Ready for review/verify
+Last activity: 2026-05-27 -- Completed 02-04-PLAN.md
 
-Progress: [████████░░] 75%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 3
+- Total plans completed: 4
 - Average duration: 10min
-- Total execution time: 30min
+- Total execution time: 47min
 
 **By Phase:**
 
@@ -47,7 +47,7 @@ Progress: [████████░░] 75%
 
 **Recent Trend:**
 
-- Plan 03 completed in 11min
+- Plan 04 completed in 17min
 
 *Updated after each plan completion*
 | Phase 01 P03 | 12min | 5 tasks | 5 files |
@@ -56,6 +56,7 @@ Progress: [████████░░] 75%
 | Phase 02 P01 | 53s | 3 tasks | 7 files |
 | Phase 02 P02 | 26m | 3 tasks | 7 files |
 | Phase 02 P03 | 11m | 3 tasks | 5 files |
+| Phase 02 P04 | 17m | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Reject partially invalid segmentation payloads wholesale and retry once on a stronger model. — Prevents mixed-valid corruption and keeps retry behavior bounded.
 - [Phase 02]: Deduplicate overlapping segment boxes before persistence using IoU > 0.5. — Stops duplicate crop creation and double-counting in user output.
 - [Phase 02]: Collapse duplicate labels in final message and hedge only weak items inline. — Keeps Phase 2 output readable without exposing confidence internals.
+- [Phase 02]: Live smoke probes should transcode HEIC samples locally and call shared services directly. — Keeps verification close to production code while remaining runnable outside containers.
+- [Phase 02]: Settings ignore unrelated env keys from shared `.env` files. — Prevents local operator tooling from failing before runtime-specific settings are read.
 
 ### Pending Todos
 
@@ -121,6 +124,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-05-27T16:26:38Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-05-27T16:33:00Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None

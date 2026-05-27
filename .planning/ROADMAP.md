@@ -120,7 +120,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation & Ingest | 5/5 | Complete   | 2026-05-26 |
-| 2. Vision Slice | 3/4 | In Progress|  |
+| 2. Vision Slice | 4/4 | In Progress|  |
 | 3. Embed & Match | 0/TBD | Not started | - |
 | 4. Reason, Interview & Learning Loop | 0/TBD | Not started | - |
 | 5. Agentic Grounding | 0/TBD | Not started | - |

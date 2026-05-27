@@ -1,4 +1,5 @@
 import asyncio
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -129,6 +130,29 @@ class OpenRouterContractTests(unittest.IsolatedAsyncioTestCase):
             tools=None,
             extra_body=extra_body,
         )
+
+
+class SettingsContractTests(unittest.TestCase):
+    def test_settings_ignore_unrelated_env_keys(self) -> None:
+        from app.config import Settings
+
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql+asyncpg://meal:pw@db:5432/meal",
+                "INGEST_SECRET": "secret",
+                "TELEGRAM_BOT_TOKEN": "token",
+                "TELEGRAM_CHAT_ID": "999",
+                "OPENROUTER_API_KEY": "router-key",
+                "POSTGRES_PASSWORD": "extra-value",
+                "API_HOST_PORT": "18000",
+            },
+            clear=True,
+        ):
+            settings = Settings()
+
+        self.assertEqual(settings.OPENROUTER_API_KEY, "router-key")
+        self.assertEqual(settings.TELEGRAM_CHAT_ID, "999")
 
 
 class PollingTests(unittest.IsolatedAsyncioTestCase):

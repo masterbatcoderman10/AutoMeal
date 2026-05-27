@@ -111,7 +111,7 @@ async def _embed_with_retry(
     ) -> list[float]:
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(MAX_EMBEDDING_RETRIES),
-        wait=wait_exponential_jitter(multiplier=0.4, max=1.8),
+        wait=wait_exponential_jitter(initial=0.4, max=1.8),
         retry=retry_if_exception_type((httpx.HTTPError,)),
         reraise=True,
     ):

@@ -83,14 +83,13 @@ None - plan executed as written.
 
 ## Issues Encountered
 
-- Verification commands were not runnable in this worktree shell because project dependencies (`rtk`, `httpx`, `sqlalchemy`, etc.) are not installed in the execution environment.
-  - `rtk .venv/bin/python -m unittest tests.test_embedding_service` failed: `rtk: No such file or directory`.
-  - `python3 -m unittest tests.test_embedding_service` failed: `ModuleNotFoundError: No module named 'httpx'`.
-  - `python3 scripts/embed_match_smoke.py --mode calibrate ...` failed: `ModuleNotFoundError: No module named 'sqlalchemy'`.
+- The isolated executor worktree shell did not have the project runtime available for verification, so in-worktree checks failed on missing local tools and dependencies.
+- Post-merge local verification from the primary checkout exposed one real defect: `wait_exponential_jitter()` was called with an unsupported `multiplier=` keyword for the installed `tenacity` version.
+- The merged checkout was corrected to use `initial=0.4`, and `rtk .venv/bin/python -m unittest tests.test_embedding_service` then passed.
 
 ## Next Phase Readiness
 
-- Phase 3 embedding/matching may proceed when runtime dependencies are available for live smoke verification (`embeddings`, `sqlalchemy`, `rtk` stack).
+- Phase 3 embedding/matching may proceed immediately; the embedding contract test suite now passes in the primary checkout venv.
 - `scripts/embed_match_smoke.py` is in place for calibration evidence and can be executed by CI/dev with the required stack available.
 
 ## Self-Check: PASSED

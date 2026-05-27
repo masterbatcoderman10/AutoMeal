@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import argparse
+import asyncio
 import json
 import mimetypes
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,8 +19,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import get_settings
-from app.models import FoodItem, FoodVisual
-from app.services import embedding_service
+from app.models import FoodItem, FoodVisual, MealSegment
+from app.services import embedding_service, matching_service
+from app.services.image_service import transcode_to_jpeg
 from app.services.llm_client import get_llm_client
 
 EMBEDDING_MODEL = "google/gemini-embedding-2-preview"
@@ -29,7 +32,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Wave 0 embedding contract smoke helper.")
     parser.add_argument(
         "--mode",
-        choices=["calibrate", "seed-demo"],
+        choices=["calibrate", "seed-demo", "unresolved-probe"],
         required=True,
     )
     parser.add_argument(
@@ -71,8 +74,6 @@ def _prepare_sample_image(sample_path: Path) -> tuple[Path, tempfile.TemporaryDi
     suffix = sample_path.suffix.lower()
     if suffix not in {".heic", ".heif"}:
         return sample_path, None
-
-    from app.services.image_service import transcode_to_jpeg
 
     mime_type, _ = mimetypes.guess_type(sample_path.name)
     raw_bytes = _load_raw_bytes(sample_path)
@@ -249,7 +250,6 @@ async def _run_seed_demo(args: argparse.Namespace, llm_client) -> dict[str, Any]
                     is_verified=item["is_verified"],
                 )
                 session.add(food_item)
-
                 session.add(
                     FoodVisual(
                         id=f"{food_item.id}-visual",
@@ -272,6 +272,90 @@ async def _run_seed_demo(args: argparse.Namespace, llm_client) -> dict[str, Any]
     }
 
 
+async def _run_unresolved_probe(args: argparse.Namespace, llm_client) -> dict[str, Any]:
+    settings = get_settings()
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        pool_pre_ping=True,
+    )
+    session_factory = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    sample_input = Path(args.sample).expanduser().resolve()
+    prepared_path, temp_dir = _prepare_sample_image(sample_input)
+    probe_segment = MealSegment(
+        id=str(uuid.uuid4()),
+        meal_log_id="probe-meal",
+        cropped_image_url=str(prepared_path),
+    )
+
+    try:
+        async with session_factory() as session:
+            existing_visuals = await session.scalar(
+                select(func.count())
+                .select_from(FoodVisual)
+                .where(FoodVisual.is_invalidated == False)  # noqa: E712
+            )
+            existing_visuals = int(existing_visuals or 0)
+
+            if existing_visuals > 0:
+                await session.execute(
+                    update(FoodVisual)
+                    .where(FoodVisual.is_invalidated == False)  # noqa: E712
+                    .values(is_invalidated=True)
+                )
+                probe_food_item_id = f"probe-unresolved-item-{uuid.uuid4()}"
+                probe_item = FoodItem(
+                    id=probe_food_item_id,
+                    name="Probe Unresolved",
+                    is_verified=False,
+                )
+                session.add(probe_item)
+                probe_embedding = await matching_service.embed_segment_query_embedding(
+                    segment=probe_segment,
+                    llm_client=llm_client,
+                    embedding_model=matching_service.MATCHING_EMBEDDING_MODEL,
+                )
+                session.add(
+                    FoodVisual(
+                        id=f"{probe_food_item_id}-visual",
+                        food_item_id=probe_food_item_id,
+                        cropped_image_url=str(prepared_path),
+                        embedding=[-value for value in probe_embedding],
+                        is_invalidated=False,
+                    )
+                )
+                await session.flush()
+
+            result = await matching_service.match_segment_against_visual_corpus(
+                segment=probe_segment,
+                session=session,
+                llm_client=llm_client,
+                embedding_model=matching_service.MATCHING_EMBEDDING_MODEL,
+            )
+
+            return {
+                "mode": "unresolved-probe",
+                "status": "pass",
+                "sample": str(sample_input),
+                "probe_route": "empty-corpus" if existing_visuals == 0 else "below-threshold",
+                "visual_count_before_probe": existing_visuals,
+                "resolved": result.resolved,
+                "is_below_threshold": result.is_below_threshold,
+                "routed_state": "REASONING" if result.is_below_threshold else "COMPLETED",
+                "similarity": result.similarity,
+            }
+    finally:
+        await engine.dispose()
+        if temp_dir is not None:
+            temp_dir.cleanup()
+
+
 async def main() -> int:
     args = _parse_args()
     client = get_llm_client()
@@ -279,8 +363,10 @@ async def main() -> int:
     try:
         if args.mode == "calibrate":
             report = await _run_calibrate(args, client)
-        else:
+        elif args.mode == "seed-demo":
             report = await _run_seed_demo(args, client)
+        else:
+            report = await _run_unresolved_probe(args, client)
 
         print(json.dumps(report, indent=2))
         return 0

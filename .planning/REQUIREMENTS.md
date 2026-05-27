@@ -16,7 +16,7 @@
 ### Vision
 
 - [ ] **VISION-01**: Detect stage classifies image as food vs not-food
-- [ ] **VISION-02**: NOT_FOOD photos trigger a polite bot message and skip the rest of the pipeline
+- [ ] **VISION-02**: NOT_FOOD photos skip the rest of the pipeline and produce no final Phase 2 result message
 - [ ] **VISION-03**: Segment stage outputs `[y0,x0,y1,x1]` bounding boxes per food item, validated and IoU-deduped
 - [ ] **VISION-04**: Each accepted segment is cropped and saved to disk
 

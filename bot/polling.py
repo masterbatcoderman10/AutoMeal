@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.models import DiaryEntry, FoodVisual, MealSegment, MealLog, MealProcessingStatus
+from app.models import MealSegment, MealLog, MealProcessingStatus
 from app.services.llm_client import get_llm_client
 from app.services import matching_service
 from app.services.image_service import save_segment_crop
@@ -394,32 +394,12 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                             logger.exception("Error sending unresolved match message")
                         continue
 
-                    for segment, result in match_results:
-                        if result.food_item_id is None:
-                            raise matching_service.MatchingError(
-                                f"resolved match for segment {segment.id} is missing food_item_id"
-                            )
-
-                        session.add(
-                            DiaryEntry(
-                                id=str(uuid.uuid4()),
-                                meal_log_id=meal.id,
-                                food_item_id=result.food_item_id,
-                                segment_id=segment.id,
-                                portion_bucket="STANDARD",
-                                identification_method="SIMILARITY",
-                                is_verified=False,
-                            )
-                        )
-                        session.add(
-                            FoodVisual(
-                                id=str(uuid.uuid4()),
-                                food_item_id=result.food_item_id,
-                                cropped_image_url=segment.cropped_image_url or "",
-                                embedding=result.query_embedding,
-                                is_invalidated=False,
-                            )
-                        )
+                    await matching_service.persist_successful_match_rows(
+                        session=session,
+                        meal=meal,
+                        match_results=match_results,
+                        llm_client=llm_client,
+                    )
 
                     meal.processing_status = MealProcessingStatus.COMPLETED
                     await session.commit()

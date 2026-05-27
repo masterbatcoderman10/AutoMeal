@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,8 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
-from app.models import FoodVisual, MealSegment
-from app.services import image_service
+from app.models import DiaryEntry, FoodVisual, MealSegment, MealLog
+from app.services import embedding_service, image_service
 from app.services.llm_client import OpenRouterClient
 
 MATCH_THRESHOLD: float = 0.85
@@ -145,8 +146,67 @@ async def embed_segment_query_embedding(
         llm_client=llm_client,
         model=embedding_model,
         content=content,
-        task_type="RETRIEVAL_QUERY",
+        task_type=embedding_service.RETRIEVAL_QUERY,
     )
+
+
+async def embed_segment_visual_embedding(
+    *,
+    segment: MealSegment,
+    llm_client: OpenRouterClient,
+    embedding_model: str = MATCHING_EMBEDDING_MODEL,
+) -> list[float]:
+    if not segment.cropped_image_url:
+        raise MatchingError("segment crop URL is required for match write-back")
+    content = _prepare_query_content(segment.cropped_image_url)
+    return await _embed_with_retry(
+        llm_client=llm_client,
+        model=embedding_model,
+        content=content,
+        task_type=embedding_service.RETRIEVAL_DOCUMENT,
+    )
+
+
+async def persist_successful_match_rows(
+    *,
+    session: AsyncSession,
+    meal: MealLog,
+    match_results: list[tuple[MealSegment, SegmentMatchResult]],
+    llm_client: OpenRouterClient,
+    embedding_model: str = MATCHING_EMBEDDING_MODEL,
+) -> None:
+    for segment, result in match_results:
+        if result.food_item_id is None:
+            raise MatchingError(
+                f"resolved match for segment {segment.id} is missing food_item_id"
+            )
+
+        segment_visual_embedding = await embed_segment_visual_embedding(
+            segment=segment,
+            llm_client=llm_client,
+            embedding_model=embedding_model,
+        )
+
+        session.add(
+            DiaryEntry(
+                id=str(uuid.uuid4()),
+                meal_log_id=meal.id,
+                food_item_id=result.food_item_id,
+                segment_id=segment.id,
+                portion_bucket="STANDARD",
+                identification_method="SIMILARITY",
+                is_verified=False,
+            )
+        )
+        session.add(
+            FoodVisual(
+                id=str(uuid.uuid4()),
+                food_item_id=result.food_item_id,
+                cropped_image_url=segment.cropped_image_url or "",
+                embedding=segment_visual_embedding,
+                is_invalidated=False,
+            )
+        )
 
 
 async def _best_food_visual_match(
@@ -238,6 +298,8 @@ __all__ = [
     "SegmentMatchResult",
     "MatchingError",
     "embed_segment_query_embedding",
+    "embed_segment_visual_embedding",
+    "persist_successful_match_rows",
     "is_below_threshold",
     "match_segment_against_visual_corpus",
     "match_segment_with_cached_embedding",

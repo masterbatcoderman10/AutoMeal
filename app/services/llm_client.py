@@ -40,12 +40,14 @@ class OpenRouterClient:
         messages: list[dict[str, Any]],
         response_format: dict[str, Any] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         response = await self._chat_client.chat.completions.create(
             model=model,
             messages=messages,
             response_format=response_format,
             tools=tools,
+            extra_body=extra_body,
         )
         return response.model_dump()
 

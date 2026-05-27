@@ -57,6 +57,60 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class OpenRouterContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_completion_forwards_multimodal_payload_and_extra_body(self) -> None:
+        from app.services import llm_client
+
+        create_call = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: {"ok": True}))
+
+        class FakeAsyncOpenAI:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                self.chat = SimpleNamespace(completions=SimpleNamespace(create=create_call))
+
+        class FakeAsyncClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def aclose(self) -> None:
+                return None
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "check"},
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+                ],
+            },
+        ]
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "detect", "strict": True, "schema": {}},
+        }
+        extra_body = {"provider": {"reasoning": {"effort": "low"}}}
+
+        with (
+            patch.object(llm_client, "AsyncOpenAI", FakeAsyncOpenAI),
+            patch.object(llm_client.httpx, "AsyncClient", FakeAsyncClient),
+        ):
+            client = llm_client.OpenRouterClient(api_key="token", base_url="https://example.test")
+            result = await client.chat_completion(
+                model="google/gemma-4-31b-it",
+                messages=messages,
+                response_format=response_format,
+                extra_body=extra_body,
+            )
+
+        self.assertEqual(result, {"ok": True})
+        create_call.assert_awaited_once_with(
+            model="google/gemma-4-31b-it",
+            messages=messages,
+            response_format=response_format,
+            tools=None,
+            extra_body=extra_body,
+        )
+
+
 class PollingTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_claims_pending_meal_and_acknowledges_it(self) -> None:
         from bot import polling

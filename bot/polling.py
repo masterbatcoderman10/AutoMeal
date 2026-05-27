@@ -6,7 +6,9 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.services.llm_client import get_llm_client
 from app.models.meal_log import MealLog, MealProcessingStatus
+from app.services.vision_service import detect_food_photo
 from bot.messages import format_ack_message
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,56 @@ async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None
                 raise
             except Exception:
                 logger.exception("Error in poll_and_acknowledge")
+
+            await asyncio.sleep(interval)
+    finally:
+        await engine.dispose()
+
+
+async def poll_and_detect_food(bot, settings, poll_interval: float | None = None) -> None:
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        pool_pre_ping=True,
+    )
+    session_factory = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    interval = poll_interval or settings.BOT_POLL_INTERVAL
+    llm_client = get_llm_client()
+
+    try:
+        while True:
+            try:
+                async with session_factory() as session:
+                    statement = (
+                        select(MealLog)
+                        .where(MealLog.processing_status == MealProcessingStatus.DETECTING)
+                        .order_by(MealLog.created_at.asc())
+                        .limit(1)
+                        .with_for_update(skip_locked=True)
+                    )
+                    result = await session.execute(statement)
+                    meal = result.scalar_one_or_none()
+
+                    if meal is not None:
+                        decision = await detect_food_photo(
+                            meal.image_url,
+                            llm_client=llm_client,
+                            model=settings.DETECT_MODEL,
+                        )
+                        if decision["next_action"] == "segment":
+                            meal.processing_status = MealProcessingStatus.SEGMENTING
+                        else:
+                            meal.processing_status = MealProcessingStatus.COMPLETED
+                        await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error in poll_and_detect_food")
 
             await asyncio.sleep(interval)
     finally:

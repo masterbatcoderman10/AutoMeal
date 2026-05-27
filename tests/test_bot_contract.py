@@ -199,6 +199,128 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
 
         engine.dispose.assert_awaited_once()
 
+    async def test_poll_detects_meal_and_marks_skipped_non_food_without_result_message(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            image_url="s3://bucket/photo.jpg",
+            processing_status=MealProcessingStatus.DETECTING,
+        )
+        session = AsyncMock()
+        session.execute.return_value = Mock(
+            scalar_one_or_none=Mock(return_value=meal),
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            DETECT_MODEL="google/gemma-4-31b-it",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling,
+                "detect_food_photo",
+                AsyncMock(
+                    return_value={
+                        "next_action": "skip",
+                        "is_food": False,
+                        "confidence": 0.91,
+                    }
+                ),
+            ),
+            patch.object(
+                polling.asyncio,
+                "sleep",
+                side_effect=asyncio.CancelledError,
+            ),
+            patch.object(
+                polling,
+                "get_llm_client",
+                return_value=SimpleNamespace(chat_completion=AsyncMock()),
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_detect_food(bot, settings, poll_interval=0.01)
+
+        session.commit.assert_awaited_once()
+        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
+        bot.send_message.assert_not_awaited()
+
+    async def test_poll_detects_food_and_advances_to_segmenting(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            image_url="s3://bucket/photo.jpg",
+            processing_status=MealProcessingStatus.DETECTING,
+        )
+        session = AsyncMock()
+        session.execute.return_value = Mock(
+            scalar_one_or_none=Mock(return_value=meal),
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            DETECT_MODEL="google/gemma-4-31b-it",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling,
+                "detect_food_photo",
+                AsyncMock(
+                    return_value={
+                        "next_action": "segment",
+                        "is_food": True,
+                        "confidence": 0.95,
+                    }
+                ),
+            ),
+            patch.object(
+                polling.asyncio,
+                "sleep",
+                side_effect=asyncio.CancelledError,
+            ),
+            patch.object(
+                polling,
+                "get_llm_client",
+                return_value=SimpleNamespace(chat_completion=AsyncMock()),
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_detect_food(bot, settings, poll_interval=0.01)
+
+        session.commit.assert_awaited_once()
+        self.assertEqual(meal.processing_status, MealProcessingStatus.SEGMENTING)
+        bot.send_message.assert_not_awaited()
+
 
 class MainWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_post_init_starts_background_polling_task(self) -> None:
@@ -217,6 +339,7 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(bot_main, "get_settings", return_value=settings),
             patch.object(bot_main, "poll_and_acknowledge", new=AsyncMock()) as poll_and_acknowledge,
+            patch.object(bot_main, "poll_and_detect_food", new=AsyncMock()) as poll_and_detect_food,
             patch.object(bot_main.asyncio, "create_task", side_effect=create_task) as create_task_mock,
         ):
             await bot_main.post_init(application)
@@ -226,11 +349,17 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             settings,
             settings.BOT_POLL_INTERVAL,
         )
-        create_task_mock.assert_called_once()
-        self.assertEqual(len(created_coroutines), 1)
+        poll_and_detect_food.assert_called_once_with(
+            application.bot,
+            settings,
+            settings.BOT_POLL_INTERVAL,
+        )
+        create_task_mock.assert_called()
+        self.assertEqual(len(created_coroutines), 2)
         self.assertIs(application.bot_data["poll_task"], fake_task)
+        self.assertIs(application.bot_data["detect_task"], fake_task)
 
-    async def test_post_shutdown_cancels_background_polling_task(self) -> None:
+    async def test_post_shutdown_cancels_background_tasks(self) -> None:
         from bot import main as bot_main
 
         class FakeTask:
@@ -245,12 +374,15 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
                 return self.wait().__await__()
 
         poll_task = FakeTask()
-        application = SimpleNamespace(bot_data={"poll_task": poll_task})
+        detect_task = FakeTask()
+        application = SimpleNamespace(bot_data={"poll_task": poll_task, "detect_task": detect_task})
 
         await bot_main.post_shutdown(application)
 
         poll_task.cancel.assert_called_once_with()
         self.assertTrue(poll_task.awaited)
+        detect_task.cancel.assert_called_once_with()
+        self.assertTrue(detect_task.awaited)
 
     def test_main_builds_application_and_runs_polling(self) -> None:
         from bot import main as bot_main

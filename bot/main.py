@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler
 
 from app.config import get_settings
 from bot.handlers import start
-from bot.polling import poll_and_acknowledge
+from bot.polling import poll_and_acknowledge, poll_and_detect_food
 
 
 async def post_init(application: Application) -> None:
@@ -20,18 +20,28 @@ async def post_init(application: Application) -> None:
             settings.BOT_POLL_INTERVAL,
         )
     )
+    application.bot_data["detect_task"] = asyncio.create_task(
+        poll_and_detect_food(
+            application.bot,
+            settings,
+            settings.BOT_POLL_INTERVAL,
+        )
+    )
 
 
 async def post_shutdown(application: Application) -> None:
-    poll_task = application.bot_data.get("poll_task")
-    if poll_task is None:
-        return
+    for task in [
+        application.bot_data.get("poll_task"),
+        application.bot_data.get("detect_task"),
+    ]:
+        if task is None:
+            continue
 
-    poll_task.cancel()
-    try:
-        await poll_task
-    except asyncio.CancelledError:
-        pass
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def main() -> None:

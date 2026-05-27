@@ -80,6 +80,9 @@ class DetectPayloadTests(unittest.TestCase):
         parsed = _normalize_payload(json.dumps({"is_food": True, "confidence": 0.88}))
         self.assertEqual(parsed, {"is_food": True, "confidence": 0.88})
 
+    def test_normalize_payload_returns_none_on_invalid_json_string(self) -> None:
+        self.assertIsNone(_normalize_payload("{not-json"))
+
 
 class SegmentPromptTests(unittest.TestCase):
     def test_segment_prompt_includes_grouping_and_garnish_rules(self) -> None:
@@ -225,6 +228,26 @@ class DetectServiceTests(unittest.IsolatedAsyncioTestCase):
             response_format=detect_response_format(),
         )
 
+    async def test_detect_food_photo_fails_closed_on_invalid_json_string(self) -> None:
+        client = AsyncMock()
+        client.chat_completion.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "{not-json",
+                    },
+                },
+            ],
+        }
+
+        result = await detect_food_photo(
+            "https://example.test/meal.jpg",
+            llm_client=client,
+            model="google/gemma-4-31b-it",
+        )
+
+        self.assertEqual(result, {"is_food": False, "confidence": 0.0, "next_action": "skip"})
+
     async def test_label_food_segment_fails_closed_on_malformed_payload(self) -> None:
         from app.services.vision_service import label_food_segment
 
@@ -293,5 +316,46 @@ class DetectServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].box_2d, [0.1, 0.1, 0.6, 0.6])
+        self.assertEqual(client.chat_completion.await_args_list[0].kwargs["model"], "google/gemini-3-flash-preview")
+        self.assertEqual(client.chat_completion.await_args_list[1].kwargs["model"], "google/gemini-3.5-flash")
+
+    async def test_segment_food_photo_retries_on_invalid_json_string(self) -> None:
+        client = AsyncMock()
+        client.chat_completion.side_effect = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "{not-json",
+                        },
+                    },
+                ],
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "segments": [
+                                        {"box_2d": [100, 100, 600, 600], "confidence": 0.8},
+                                    ]
+                                }
+                            ),
+                        },
+                    },
+                ],
+            },
+        ]
+
+        result = await segment_food_photo_with_retry(
+            "https://example.test/meal.jpg",
+            llm_client=client,
+            model="google/gemini-3-flash-preview",
+            retry_model="google/gemini-3.5-flash",
+            max_segments=8,
+        )
+
+        self.assertEqual(len(result), 1)
         self.assertEqual(client.chat_completion.await_args_list[0].kwargs["model"], "google/gemini-3-flash-preview")
         self.assertEqual(client.chat_completion.await_args_list[1].kwargs["model"], "google/gemini-3.5-flash")

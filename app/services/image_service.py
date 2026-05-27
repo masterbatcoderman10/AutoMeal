@@ -52,6 +52,7 @@ def save_segment_crop(
     source_image_path: Path,
     segment_id: str,
     normalized_box: Sequence[float],
+    uploads_dir: Path | None = None,
 ) -> Path:
     if len(normalized_box) != 4:
         raise ValueError("normalized_box must be four coordinates")
@@ -74,7 +75,7 @@ def save_segment_crop(
     if crop.size[0] == 0 or crop.size[1] == 0:
         raise ValueError("invalid crop dimensions")
 
-    crops_dir = Path("/data/uploads/crops")
+    crops_dir = (uploads_dir or Path("/data/uploads")) / "crops"
     crops_dir.mkdir(parents=True, exist_ok=True)
     crop_path = crops_dir / f"{segment_id}.jpg"
 

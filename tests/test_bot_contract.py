@@ -1,5 +1,6 @@
 import asyncio
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -155,6 +156,26 @@ class SettingsContractTests(unittest.TestCase):
         self.assertEqual(settings.TELEGRAM_CHAT_ID, "999")
 
 
+class ImageServiceContractTests(unittest.TestCase):
+    def test_save_segment_crop_uses_configured_upload_root(self) -> None:
+        from app.services.image_service import save_segment_crop
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            source_path = tmp_path / "meal.jpg"
+            Image.new("RGB", (10, 10), color="white").save(source_path, format="JPEG")
+
+            crop_path = save_segment_crop(
+                source_image_path=source_path,
+                segment_id="segment-1",
+                normalized_box=[0.0, 0.0, 1.0, 1.0],
+                uploads_dir=tmp_path / "uploads",
+            )
+
+        self.assertEqual(crop_path, Path(tmp_dir) / "uploads" / "crops" / "segment-1.jpg")
+
+
 class PollingTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_claims_pending_meal_and_acknowledges_it(self) -> None:
         from bot import polling
@@ -242,6 +263,59 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         engine.dispose.assert_awaited_once()
+
+    async def test_poll_recovers_acknowledged_meal_state_after_commit_failure(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            processing_status=MealProcessingStatus.PENDING,
+        )
+        primary_session = AsyncMock()
+        primary_session.execute.return_value = Mock(
+            scalar_one_or_none=Mock(return_value=meal),
+        )
+        primary_session.commit.side_effect = RuntimeError("db down")
+
+        recovery_session = AsyncMock()
+        recovery_session.merge = AsyncMock()
+
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            def __init__(self, session):
+                self.session = session
+
+            async def __aenter__(self):
+                return self.session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(side_effect=[SessionContext(primary_session), SessionContext(recovery_session)])
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            TELEGRAM_CHAT_ID="999",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling.asyncio,
+                "sleep",
+                side_effect=asyncio.CancelledError,
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_acknowledge(bot, settings, poll_interval=0.01)
+
+        bot.send_message.assert_awaited_once_with(chat_id="999", text=polling.format_ack_message(meal.id))
+        recovery_session.merge.assert_awaited_once()
+        recovery_session.commit.assert_awaited_once()
+        self.assertEqual(meal.processing_status, MealProcessingStatus.DETECTING)
 
     async def test_poll_detects_meal_and_marks_skipped_non_food_without_result_message(self) -> None:
         from bot import polling
@@ -395,6 +469,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             SEGMENT_RETRY_MODEL="google/gemini-3.5-flash",
             LABEL_MODEL="google/gemini-3-flash-preview",
             VISION_MAX_SEGMENTS=8,
+            UPLOADS_DIR=Path("/data/uploads"),
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
@@ -479,6 +554,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             SEGMENT_RETRY_MODEL="google/gemini-3.5-flash",
             LABEL_MODEL="google/gemini-3-flash-preview",
             VISION_MAX_SEGMENTS=8,
+            UPLOADS_DIR=Path("/data/uploads"),
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
@@ -551,6 +627,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             SEGMENT_MODEL="google/gemini-3-flash-preview",
             SEGMENT_RETRY_MODEL="google/gemini-3.5-flash",
             VISION_MAX_SEGMENTS=8,
+            UPLOADS_DIR=Path("/data/uploads"),
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )

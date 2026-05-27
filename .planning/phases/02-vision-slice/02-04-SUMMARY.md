@@ -62,6 +62,7 @@ completed: 2026-05-27
 
 - Added `scripts/vision_smoke.py` with `detect`, `segment`, `label`, and `all` modes using shared project services.
 - Fixed a real runtime config bug discovered during smoke execution: `Settings` now ignores unrelated env keys instead of rejecting local `.env` files.
+- Fixed post-review hardening gaps: malformed model JSON now fails closed, segment crops honor `UPLOADS_DIR`, and ack polling recovers meal state after commit failure to avoid duplicate receipts.
 - Documented optional vision-stage model overrides in `.env.example`.
 - Added `02-UAT.md` with repeatable checks for non-food silence, crop existence, soft-failure behavior, and grouped sample-image behavior.
 

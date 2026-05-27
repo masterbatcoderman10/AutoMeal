@@ -262,7 +262,10 @@ def _normalize_payload(raw_content: Any) -> Mapping[str, Any] | None:
         return raw_content
     if not isinstance(raw_content, str):
         return None
-    parsed = json.loads(raw_content)
+    try:
+        parsed = json.loads(raw_content)
+    except json.JSONDecodeError:
+        return None
     return parsed if isinstance(parsed, Mapping) else None
 
 

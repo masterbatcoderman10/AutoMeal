@@ -39,6 +39,8 @@ async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None
 
     try:
         while True:
+            meal: MealLog | None = None
+            ack_sent = False
             try:
                 async with session_factory() as session:
                     statement = (
@@ -56,12 +58,21 @@ async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None
                             chat_id=settings.TELEGRAM_CHAT_ID,
                             text=format_ack_message(meal.id),
                         )
+                        ack_sent = True
                         meal.processing_status = MealProcessingStatus.DETECTING
                         await session.commit()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Error in poll_and_acknowledge")
+                if ack_sent and meal is not None:
+                    try:
+                        async with session_factory() as recovery_session:
+                            meal.processing_status = MealProcessingStatus.DETECTING
+                            await recovery_session.merge(meal)
+                            await recovery_session.commit()
+                    except Exception:
+                        logger.exception("Error recovering acknowledged meal state")
 
             await asyncio.sleep(interval)
     finally:
@@ -180,6 +191,7 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                             source_image_path=Path(meal.image_url),
                             segment_id=segment_id,
                             normalized_box=segment.box_2d,
+                            uploads_dir=settings.UPLOADS_DIR,
                         )
                         created_crop_paths.append(crop_path)
                         segment_rows.append(

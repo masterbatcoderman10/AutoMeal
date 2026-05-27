@@ -2,6 +2,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from pathlib import Path
 
 from app.models.meal_log import MealProcessingStatus
 
@@ -29,6 +30,14 @@ class MessageTemplateTests(unittest.TestCase):
         self.assertEqual(
             format_error_message(),
             "⚠️ Something went wrong processing your meal. I'll retry shortly.",
+        )
+
+    def test_result_sentence_is_single_sentence(self) -> None:
+        from bot.messages import format_result_sentence
+
+        self.assertEqual(
+            format_result_sentence(["Pita Bread", "Chicken Curry", "Chicken curry"]),
+            "I see 2 items: Pita Bread, Chicken Curry.",
         )
 
 
@@ -319,6 +328,151 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
 
         session.commit.assert_awaited_once()
         self.assertEqual(meal.processing_status, MealProcessingStatus.SEGMENTING)
+        bot.send_message.assert_not_awaited()
+
+    async def test_poll_segments_creates_crops_and_labels_then_completes(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            image_url="/data/uploads/meals/12345678-abcd-efgh.jpg",
+            processing_status=MealProcessingStatus.SEGMENTING,
+        )
+        session = AsyncMock()
+        session.add_all = Mock()
+        session.execute.return_value = Mock(
+            scalar_one_or_none=Mock(return_value=meal),
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            SEGMENT_MODEL="google/gemini-3-flash-preview",
+            LABEL_MODEL="google/gemini-3-flash-preview",
+            VISION_MAX_SEGMENTS=8,
+            TELEGRAM_CHAT_ID="999",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling.asyncio,
+                "sleep",
+                side_effect=asyncio.CancelledError,
+            ),
+            patch.object(
+                polling,
+                "segment_food_photo",
+                AsyncMock(
+                    return_value=[
+                        SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6]),
+                        SimpleNamespace(box_2d=[0.6, 0.6, 1.0, 1.0]),
+                    ],
+                ),
+            ),
+            patch.object(
+                polling,
+                "save_segment_crop",
+                side_effect=[
+                    Path("/data/uploads/crops/aaa.jpg"),
+                    Path("/data/uploads/crops/bbb.jpg"),
+                ],
+            ),
+            patch.object(
+                polling,
+                "label_food_segment",
+                AsyncMock(side_effect=["pita bread", "mixed vegetables"]),
+            ),
+            patch.object(
+                polling,
+                "get_llm_client",
+                return_value=SimpleNamespace(chat_completion=AsyncMock()),
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_segment_food(bot, settings, poll_interval=0.01)
+
+        session.add_all.assert_called_once()
+        self.assertEqual(len(session.add_all.call_args.args[0]), 2)
+        for segment in session.add_all.call_args.args[0]:
+            self.assertTrue(segment.bounding_box)
+            self.assertIn(segment.cropped_image_url, {"/data/uploads/crops/aaa.jpg", "/data/uploads/crops/bbb.jpg"})
+            self.assertIsNotNone(segment.label)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
+        bot.send_message.assert_awaited_once()
+        self.assertTrue(bot.send_message.await_args.kwargs["text"].startswith("I see "))
+
+    async def test_poll_segments_rejects_empty_segments_with_no_result_message(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            image_url="/data/uploads/meals/12345678-abcd-efgh.jpg",
+            processing_status=MealProcessingStatus.SEGMENTING,
+        )
+        session = AsyncMock()
+        session.execute.return_value = Mock(
+            scalar_one_or_none=Mock(
+                side_effect=lambda: (
+                    meal if meal.processing_status == MealProcessingStatus.SEGMENTING else None
+                )
+            ),
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            SEGMENT_MODEL="google/gemini-3-flash-preview",
+            VISION_MAX_SEGMENTS=8,
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling.asyncio,
+                "sleep",
+                side_effect=asyncio.CancelledError,
+            ),
+            patch.object(
+                polling,
+                "segment_food_photo",
+                AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                polling,
+                "get_llm_client",
+                return_value=SimpleNamespace(chat_completion=AsyncMock()),
+            ),
+            patch.object(polling, "label_food_segment", AsyncMock()),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_segment_food(bot, settings, poll_interval=0.01)
+
+        session.add_all.assert_not_called()
+        session.commit.assert_awaited_once()
+        self.assertEqual(meal.processing_status, MealProcessingStatus.FAILED)
         bot.send_message.assert_not_awaited()
 
 

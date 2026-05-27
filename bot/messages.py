@@ -8,3 +8,24 @@ def format_start_message() -> str:
 
 def format_error_message() -> str:
     return "⚠️ Something went wrong processing your meal. I'll retry shortly."
+
+
+def format_result_sentence(labels: list[str]) -> str:
+    distinct: list[str] = []
+    seen: set[str] = set()
+    for raw_label in labels:
+        if not raw_label:
+            continue
+        label = raw_label.strip()
+        if not label:
+            continue
+        lowered = label.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        distinct.append(label)
+
+    item_count = len(distinct)
+    if item_count == 0:
+        return "I see your meal."
+    return f"I see {item_count} items: {', '.join(distinct)}."

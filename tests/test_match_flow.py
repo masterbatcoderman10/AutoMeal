@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+import asyncio
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
+from app.services.embedding_service import EMBEDDING_DIMENSION, RETRIEVAL_QUERY
+
+
+class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_match_segment_uses_retrieval_query_embedding_and_sets_segment_vector(self) -> None:
+        from app.services import matching_service
+
+        query_embedding = [0.12] * EMBEDDING_DIMENSION
+        segment = SimpleNamespace(id="segment-1", cropped_image_url="/data/uploads/crops/seg-1.jpg", embedding=None)
+        food_visual = SimpleNamespace(id="fv-1", food_item_id="item-1")
+        session = AsyncMock()
+        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.05)))
+        llm_client = AsyncMock()
+        llm_client.embed_multimodal.return_value = query_embedding
+
+        with (
+            patch.object(matching_service.Path, "read_bytes", return_value=b"\xff\xd8\xff"),
+            patch.object(matching_service, "_prepare_image_payload", return_value={"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}}),
+            patch.object(matching_service, "cosine_distance", side_effect=lambda *_: 0.05),
+        ):
+            result = await matching_service.match_segment_against_visual_corpus(
+                segment=segment,
+                session=session,
+                llm_client=llm_client,
+                embedding_model="google/gemini-embedding-2-preview",
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.food_visual_id, food_visual.id)
+        self.assertAlmostEqual(result.similarity, 0.95)
+        self.assertEqual(result.query_embedding, query_embedding)
+        self.assertEqual(segment.embedding, query_embedding)
+        self.assertEqual(result.match_threshold, matching_service.MATCH_THRESHOLD)
+        llm_client.embed_multimodal.assert_awaited_once()
+        kwargs = llm_client.embed_multimodal.await_args.kwargs
+        self.assertEqual(kwargs["model"], "google/gemini-embedding-2-preview")
+        self.assertEqual(kwargs["task_type"], RETRIEVAL_QUERY)
+
+    async def test_match_segment_with_empty_corpus_returns_no_match(self) -> None:
+        from app.services import matching_service
+
+        segment = SimpleNamespace(id="segment-1", cropped_image_url="/data/uploads/crops/seg-1.jpg", embedding=None)
+        session = AsyncMock()
+        session.execute.return_value = Mock(first=Mock(return_value=None))
+        llm_client = AsyncMock()
+        llm_client.embed_multimodal.return_value = [0.21] * EMBEDDING_DIMENSION
+
+        with patch.object(
+            matching_service.Path,
+            "read_bytes",
+            return_value=b"\xff\xd8\xff",
+        ):
+            result = await matching_service.match_segment_against_visual_corpus(
+                segment=segment,
+                session=session,
+                llm_client=llm_client,
+                embedding_model="google/gemini-embedding-2-preview",
+            )
+
+        self.assertFalse(result.is_match)
+        self.assertIsNone(result.food_visual_id)
+        self.assertIsNone(result.similarity)
+
+
+class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:
+        from bot import polling
+        from app.services import matching_service
+
+        segment_one = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=None,
+            label="Pita Bread",
+        )
+        segment_two = SimpleNamespace(
+            id="segment-2",
+            cropped_image_url="/data/uploads/crops/seg-2.jpg",
+            embedding=None,
+            label="Chicken Curry",
+        )
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            image_url="/data/uploads/meals/12345678-abcd-efgh.jpg",
+            processing_status=None,
+            segments=[segment_one, segment_two],
+        )
+        session = AsyncMock()
+        session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
+        session.add = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                matching_service,
+                "match_segment_against_visual_corpus",
+                side_effect=[
+                    SimpleNamespace(
+                        food_visual_id="visual-1",
+                        food_item_id="item-1",
+                        similarity=0.92,
+                        is_match=True,
+                        is_below_threshold=False,
+                        query_embedding=[0.1] * EMBEDDING_DIMENSION,
+                    ),
+                    SimpleNamespace(
+                        food_visual_id=None,
+                        food_item_id=None,
+                        similarity=0.12,
+                        is_match=False,
+                        is_below_threshold=True,
+                        query_embedding=[0.2] * EMBEDDING_DIMENSION,
+                    ),
+                ],
+            ),
+            patch.object(
+                matching_service,
+                "format_unresolved_match_message",
+                return_value="I can see your meal, but I do not know it yet.",
+            ),
+            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+
+        self.assertEqual(meal.processing_status, polling.MealProcessingStatus.REASONING)
+        bot.send_message.assert_awaited_once_with(
+            chat_id="999",
+            text="I can see your meal, but I do not know it yet.",
+        )
+        session.add.assert_not_called()
+        session.commit.assert_awaited_once()
+
+    async def test_poll_and_match_writes_all_rows_only_when_all_segments_pass_threshold(self) -> None:
+        from bot import polling
+        from app.services import matching_service
+
+        segment_one = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=None,
+            label="Pita Bread",
+        )
+        segment_two = SimpleNamespace(
+            id="segment-2",
+            cropped_image_url="/data/uploads/crops/seg-2.jpg",
+            embedding=None,
+            label="Chicken Curry",
+        )
+        food_visual_one = SimpleNamespace(
+            id="visual-1",
+            food_item_id="item-1",
+            is_invalidated=False,
+        )
+        food_visual_two = SimpleNamespace(
+            id="visual-2",
+            food_item_id="item-2",
+            is_invalidated=False,
+        )
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            processing_status=None,
+            segments=[segment_one, segment_two],
+        )
+        session = AsyncMock()
+        session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
+        session.add = Mock()
+        session.add_all = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                matching_service,
+                "match_segment_against_visual_corpus",
+                side_effect=[
+                    SimpleNamespace(
+                        food_visual_id=food_visual_one.id,
+                        food_item_id=food_visual_one.food_item_id,
+                        similarity=0.92,
+                        is_match=True,
+                        is_below_threshold=False,
+                        query_embedding=[0.1] * EMBEDDING_DIMENSION,
+                    ),
+                    SimpleNamespace(
+                        food_visual_id=food_visual_two.id,
+                        food_item_id=food_visual_two.food_item_id,
+                        similarity=0.9,
+                        is_match=True,
+                        is_below_threshold=False,
+                        query_embedding=[0.2] * EMBEDDING_DIMENSION,
+                    ),
+                ],
+            ),
+            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+
+        self.assertEqual(meal.processing_status, polling.MealProcessingStatus.COMPLETED)
+        self.assertEqual(len(session.add.call_args_list), 4)
+        bot.send_message.assert_not_awaited()

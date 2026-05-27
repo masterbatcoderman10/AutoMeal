@@ -60,11 +60,13 @@ class OpenRouterClient:
         output_dimensionality: int = 1536,
         task_type: str = "RETRIEVAL_DOCUMENT",
     ) -> list[float]:
+        input_type = _map_embedding_task_type(task_type)
         payload = {
             "model": model,
             "input": [{"content": content}],
-            "output_dimensionality": output_dimensionality,
-            "task_type": task_type,
+            "dimensions": output_dimensionality,
+            "encoding_format": "float",
+            "input_type": input_type,
         }
         response = await self._http.post("/embeddings", json=payload)
         response.raise_for_status()
@@ -110,6 +112,15 @@ def get_llm_client() -> OpenRouterClient:
             base_url=settings.OPENROUTER_BASE_URL,
         )
     return _client
+
+
+def _map_embedding_task_type(task_type: str) -> str:
+    normalized = task_type.strip().upper()
+    if normalized == "RETRIEVAL_QUERY":
+        return "search_query"
+    if normalized == "RETRIEVAL_DOCUMENT":
+        return "search_document"
+    return normalized.casefold()
 
 
 __all__ = ["OpenRouterClient", "get_llm_client"]

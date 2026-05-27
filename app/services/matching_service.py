@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pgvector.sqlalchemy import cosine_distance
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
@@ -39,6 +38,11 @@ class SegmentMatchResult:
     @property
     def resolved(self) -> bool:
         return self.is_match and not self.is_below_threshold
+
+
+def cosine_distance(column: Any, embedding: list[float]) -> Any:
+    """Small indirection keeps the distance expression easy to patch in tests."""
+    return column.cosine_distance(embedding)
 
 
 def _prepare_image_payload(image_path: Path) -> dict[str, Any]:
@@ -150,10 +154,11 @@ async def _best_food_visual_match(
     session: AsyncSession,
     query_embedding: list[float],
 ) -> tuple[FoodVisual | None, float | None]:
+    distance_expr = cosine_distance(FoodVisual.embedding, query_embedding)
     statement = (
-        select(FoodVisual, cosine_distance(FoodVisual.embedding, query_embedding).label("distance"))
+        select(FoodVisual, distance_expr.label("distance"))
         .where(FoodVisual.is_invalidated == False)  # noqa: E712
-        .order_by(cosine_distance(FoodVisual.embedding, query_embedding))
+        .order_by(distance_expr)
         .limit(1)
     )
     result = await session.execute(statement)

@@ -61,6 +61,11 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="How many existing FoodVisual rows are visible for calibration context",
     )
+    parser.add_argument(
+        "--database-url",
+        default=None,
+        help="Optional database URL override for seed-demo and unresolved-probe modes",
+    )
     return parser.parse_args()
 
 
@@ -89,6 +94,16 @@ def is_corpus_branch_valid(visual_count: int) -> bool:
     if visual_count < 0:
         raise RuntimeError("visual corpus size must be >= 0")
     return visual_count == 0 or visual_count > 0
+
+
+def _resolve_database_url(args: argparse.Namespace) -> str:
+    settings = get_settings()
+    database_url = args.database_url or settings.DATABASE_URL
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is empty. Set it in .env or pass --database-url for smoke modes that use Postgres."
+        )
+    return database_url
 
 
 async def _run_calibrate(args: argparse.Namespace, llm_client) -> dict[str, Any]:
@@ -178,9 +193,8 @@ async def _run_calibrate(args: argparse.Namespace, llm_client) -> dict[str, Any]
 
 
 async def _run_seed_demo(args: argparse.Namespace, llm_client) -> dict[str, Any]:
-    settings = get_settings()
     engine = create_async_engine(
-        settings.DATABASE_URL,
+        _resolve_database_url(args),
         echo=False,
         pool_pre_ping=True,
     )
@@ -273,9 +287,8 @@ async def _run_seed_demo(args: argparse.Namespace, llm_client) -> dict[str, Any]
 
 
 async def _run_unresolved_probe(args: argparse.Namespace, llm_client) -> dict[str, Any]:
-    settings = get_settings()
     engine = create_async_engine(
-        settings.DATABASE_URL,
+        _resolve_database_url(args),
         echo=False,
         pool_pre_ping=True,
     )

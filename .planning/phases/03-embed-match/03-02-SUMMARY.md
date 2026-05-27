@@ -92,7 +92,9 @@ None - plan executed as written.
 
 ## Issues Encountered
 
-- In this worktree runtime, full verification commands were blocked by missing project dependencies (`sqlalchemy` not installed in `.venv`), so `unittest` and smoke verification could not be executed here.
+- In this worktree runtime, full verification commands were blocked by missing project dependencies, so the subagent could not prove the plan locally before merge.
+- Post-merge verification in the primary checkout exposed three real gaps: a stale `pgvector` helper import path in `matching_service`, test harness drift around polling-loop cancellation and imported formatter symbols, and a live OpenRouter embeddings wire-format bug inherited from Wave 0.
+- After correcting those issues, `rtk .venv/bin/python -m unittest tests.test_match_flow` passes and the live unresolved probe succeeds against the running compose Postgres with `routed_state=REASONING` on an empty corpus.
 
 ## Known Stubs
 

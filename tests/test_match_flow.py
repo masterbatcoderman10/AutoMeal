@@ -9,6 +9,10 @@ from app.models import MealProcessingStatus
 from app.services.embedding_service import EMBEDDING_DIMENSION, RETRIEVAL_QUERY
 
 
+async def _noop_sleep(*_args, **_kwargs) -> None:
+    return None
+
+
 class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_match_segment_uses_retrieval_query_embedding_and_sets_segment_vector(self) -> None:
         from app.services import matching_service
@@ -24,7 +28,6 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(matching_service.Path, "read_bytes", return_value=b"\xff\xd8\xff"),
             patch.object(matching_service, "_prepare_image_payload", return_value={"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}}),
-            patch.object(matching_service, "cosine_distance", side_effect=lambda *_: 0.05),
         ):
             result = await matching_service.match_segment_against_visual_corpus(
                 segment=segment,
@@ -98,7 +101,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
-        session.execute.side_effect = [session_claim, session_segments]
+        session.execute.side_effect = [session_claim, session_segments, asyncio.CancelledError]
         engine = SimpleNamespace(dispose=AsyncMock())
 
         class SessionContext:
@@ -123,7 +126,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "embed_segment_query_embedding",
                 side_effect=[[0.1] * matching_service.EMBEDDING_DIMENSION, [0.2] * matching_service.EMBEDDING_DIMENSION],
             ),
-            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+            patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
@@ -143,7 +146,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         session = AsyncMock()
         session_claim = Mock(scalar_one_or_none=Mock(return_value=meal))
         session_segments = Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[]))) )
-        session.execute.side_effect = [session_claim, session_segments]
+        session.execute.side_effect = [session_claim, session_segments, asyncio.CancelledError]
         engine = SimpleNamespace(dispose=AsyncMock())
 
         class SessionContext:
@@ -168,7 +171,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "embed_segment_query_embedding",
                 return_value=[0.1] * 1536,
             ),
-            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+            patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
@@ -180,7 +183,6 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:
         from bot import polling
-        import bot.messages
 
         segment_one = SimpleNamespace(
             id="segment-1",
@@ -208,7 +210,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
-        session.execute.side_effect = [session_claim, session_segments]
+        session.execute.side_effect = [session_claim, session_segments, asyncio.CancelledError]
         session.add = Mock()
         engine = SimpleNamespace(dispose=AsyncMock())
 
@@ -254,11 +256,11 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 ],
             ),
             patch.object(
-                bot.messages,
+                polling,
                 "format_unresolved_match_message",
                 return_value="I can see your meal, but I do not know it yet.",
             ),
-            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+            patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
@@ -299,7 +301,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
-        session.execute.side_effect = [session_claim, session_segments]
+        session.execute.side_effect = [session_claim, session_segments, asyncio.CancelledError]
         session.add = Mock()
         session.add_all = Mock()
         engine = SimpleNamespace(dispose=AsyncMock())
@@ -344,7 +346,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ],
             ),
-            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+            patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)

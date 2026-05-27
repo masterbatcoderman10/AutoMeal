@@ -86,6 +86,8 @@ None - plan executed as written.
 - The isolated executor worktree shell did not have the project runtime available for verification, so in-worktree checks failed on missing local tools and dependencies.
 - Post-merge local verification from the primary checkout exposed one real defect: `wait_exponential_jitter()` was called with an unsupported `multiplier=` keyword for the installed `tenacity` version.
 - The merged checkout was corrected to use `initial=0.4`, and `rtk .venv/bin/python -m unittest tests.test_embedding_service` then passed.
+- Live OpenRouter calibration on 2026-05-28 exposed a second contract bug in `app/services/llm_client.py`: the embeddings request used Google-native `output_dimensionality` / `task_type` fields instead of OpenRouter's `dimensions` / `input_type`, so the provider returned the default 3072-d vector shape.
+- The primary checkout now translates the Phase 03 retrieval intent onto the OpenRouter wire format correctly, and the live calibration smoke passes with same-image self-similarity `1.0` plus a positive `rice and lentils` cross-modal margin against `sample_images/IMG_4611.HEIC`.
 
 ## Next Phase Readiness
 

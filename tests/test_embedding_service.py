@@ -181,6 +181,17 @@ class OpenRouterClientContractTests(unittest.IsolatedAsyncioTestCase):
                 output_dimensionality=embedding_service.EMBEDDING_DIMENSION,
             )
 
+        client._http.post.assert_awaited_once_with(  # type: ignore[attr-defined]
+            "/embeddings",
+            json={
+                "model": "google/gemini-embedding-2-preview",
+                "input": [{"content": [{"type": "text", "text": "hello"}]}],
+                "dimensions": embedding_service.EMBEDDING_DIMENSION,
+                "encoding_format": "float",
+                "input_type": "search_document",
+            },
+        )
+
     async def test_embed_multimodal_rejects_missing_data_payload(self) -> None:
         response = _FakeHTTPResponse({})
         client = OpenRouterClient(api_key="test-key", base_url="https://openrouter.ai/api/v1")
@@ -191,6 +202,38 @@ class OpenRouterClientContractTests(unittest.IsolatedAsyncioTestCase):
                 model="google/gemini-embedding-2-preview",
                 content=[{"type": "text", "text": "hello"}],
             )
+
+    async def test_embed_multimodal_maps_retrieval_query_to_openrouter_input_type(self) -> None:
+        response = _FakeHTTPResponse(
+            {
+                "data": [
+                    {
+                        "embedding": [0.1] * embedding_service.EMBEDDING_DIMENSION,
+                    },
+                ],
+            }
+        )
+        client = OpenRouterClient(api_key="test-key", base_url="https://openrouter.ai/api/v1")
+        client._http = _FakeHTTPClient(response)  # type: ignore[assignment]
+
+        embedding = await client.embed_multimodal(
+            model="google/gemini-embedding-2-preview",
+            content=[{"type": "text", "text": "rice and lentils"}],
+            output_dimensionality=embedding_service.EMBEDDING_DIMENSION,
+            task_type=embedding_service.RETRIEVAL_QUERY,
+        )
+
+        self.assertEqual(len(embedding), embedding_service.EMBEDDING_DIMENSION)
+        client._http.post.assert_awaited_once_with(  # type: ignore[attr-defined]
+            "/embeddings",
+            json={
+                "model": "google/gemini-embedding-2-preview",
+                "input": [{"content": [{"type": "text", "text": "rice and lentils"}]}],
+                "dimensions": embedding_service.EMBEDDING_DIMENSION,
+                "encoding_format": "float",
+                "input_type": "search_query",
+            },
+        )
 
 
 if __name__ == "__main__":

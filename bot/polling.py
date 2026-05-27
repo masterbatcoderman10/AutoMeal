@@ -395,8 +395,10 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                         continue
 
                     for segment, result in match_results:
-                        if result.food_visual is None or result.food_item_id is None:
-                            continue
+                        if result.food_item_id is None:
+                            raise matching_service.MatchingError(
+                                f"resolved match for segment {segment.id} is missing food_item_id"
+                            )
 
                         session.add(
                             DiaryEntry(

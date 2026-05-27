@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-last_updated: "2026-05-27T15:48:24.151Z"
-last_activity: 2026-05-27
+status: executing
+last_updated: "2026-05-27T16:15:05Z"
+last_activity: 2026-05-27 -- Phase 02 plan 02 complete
 progress:
   total_phases: 6
   completed_phases: 1
@@ -24,12 +24,12 @@ See: .planning/PROJECT.md (updated 2026-05-24)
 
 ## Current Position
 
-Phase: 02 (vision-slice) — PLANNED
-Plan: 4 of 4
-Status: Phase complete — ready for verification
-Last activity: 2026-05-27
+Phase: 02 (vision-slice) — EXECUTING
+Plan: 2 of 4
+Status: Ready for 02-03
+Last activity: 2026-05-27 -- Completed 02-02-PLAN.md
 
-Progress: [███████░░░] 67%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
@@ -54,6 +54,7 @@ Progress: [███████░░░] 67%
 | Phase 01 P04 | 56min | 4 tasks | 7 files |
 | Phase 01 P05 | 76 | 5 tasks | 7 files |
 | Phase 02 P01 | 53s | 3 tasks | 7 files |
+| Phase 02 P02 | 26m | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,12 @@ Recent decisions affecting current work:
 - [Phase 02]: Keep detect conservative: require high-confidence is_food before moving to SEGMENTING. — Conservative routing protects downstream segmentation from noisy detections and aligns with D-02.
 - [Phase 02]: Add detect model defaults in config for shared slice behavior. — Settings now expose per-stage models and segment count in one config surface for later vision stages.
 - [Phase 02]: Run detect worker as dedicated background task and complete non-food silently. — DETECTING loop is isolated and startup/shutdown tasks are mirrored to avoid worker leaks.
+- [Phase 02]: Normalize segment coordinates before persistence and crop creation. — Provider 0..1000 boxes now convert into validated [0,1] floats before any DB write or file save.
+- [Phase 02]: Persist accepted crop JPEGs before labeling. — Stable crop paths under /data/uploads/crops/ let later phases reuse segment artifacts safely.
+- [Phase 02]: Keep final result output to one plain sentence. — Happy-path Phase 2 messaging stays lightweight without introducing nutrition or DiaryEntry work.
+- [Phase 02]: Start segment worker alongside detect and ack workers. — SEGMENTING meals now have a live runtime consumer instead of stalling after detect.
+- [Phase 02]: Convert local image paths to data URLs before vision calls. — OpenRouter multimodal requests now receive usable image inputs from saved meal and crop files.
+- [Phase 02]: Fail closed on malformed labels without downgrading completed meals on notification errors. — Bad label payloads stop the segment flow, while Telegram send failures no longer corrupt already-committed meal state.
 
 ### Pending Todos
 
@@ -110,6 +117,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-05-27T15:48:24.147Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-05-27T16:15:05Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None

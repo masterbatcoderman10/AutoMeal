@@ -18,7 +18,7 @@
 - [x] **VISION-01**: Detect stage classifies image as food vs not-food
 - [x] **VISION-02**: NOT_FOOD photos skip the rest of the pipeline and produce no final Phase 2 result message
 - [ ] **VISION-03**: Segment stage outputs `[y0,x0,y1,x1]` bounding boxes per food item, validated and IoU-deduped
-- [ ] **VISION-04**: Each accepted segment is cropped and saved to disk
+- [x] **VISION-04**: Each accepted segment is cropped and saved to disk
 
 ### Match
 
@@ -121,7 +121,7 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 | VISION-01 | Phase 2 | Complete |
 | VISION-02 | Phase 2 | Complete |
 | VISION-03 | Phase 2 | Pending |
-| VISION-04 | Phase 2 | Pending |
+| VISION-04 | Phase 2 | Complete |
 | MATCH-01 | Phase 1 | Complete |
 | MATCH-02 | Phase 3 | Pending |
 | MATCH-03 | Phase 3 | Pending |
@@ -160,4 +160,4 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 
 ---
 *Requirements defined: 2026-05-24*
-*Last updated: 2026-05-24 — traceability populated by roadmapper*
+*Last updated: 2026-05-27 — Vision crop persistence completed in Phase 2 plan 02-02*

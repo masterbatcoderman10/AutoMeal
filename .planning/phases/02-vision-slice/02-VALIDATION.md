@@ -38,18 +38,18 @@ created: 2026-05-27
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 02-01-01 | 01 | 1 | VISION-01 | T-02-01 / model spoofing | detect path only advances obvious meals and conservatively skips borderline input | unit | `.venv/bin/python -m unittest tests.test_vision_service` | ❌ W0 | ⬜ pending |
-| 02-01-02 | 01 | 1 | VISION-02 | T-02-02 / false final message | non-food completion sends no final result message and creates no segments | async contract | `.venv/bin/python -m unittest tests.test_bot_contract` | ✅ | ⬜ pending |
-| 02-01-03 | 01 | 1 | VISION-01 | T-02-03 / orphaned workers | detect worker registration and shutdown are symmetrical | async contract | `.venv/bin/python -m unittest tests.test_bot_contract` | ✅ | ⬜ pending |
-| 02-02-01 | 02 | 2 | VISION-03 | T-02-04 / bad coordinates | raw `0..1000` boxes normalize into valid `[0,1]` boxes before persistence | unit | `.venv/bin/python -m unittest tests.test_vision_service` | ❌ W0 | ⬜ pending |
-| 02-02-02 | 02 | 2 | VISION-04 | T-02-05 / wrong crop path | accepted segments persist crop JPEGs under `/data/uploads/crops/{segment_id}.jpg` | unit | `.venv/bin/python -m unittest tests.test_vision_service` | ❌ W0 | ⬜ pending |
-| 02-02-03 | 02 | 2 | VISION-01 | T-02-06 / misleading labels | successful segment labeling results in one plain-sentence Telegram message | async contract | `.venv/bin/python -m unittest tests.test_bot_contract` | ✅ | ⬜ pending |
-| 02-03-01 | 03 | 3 | VISION-03 | T-02-07 / partial invalid acceptance | any invalid box causes full-response rejection and retry escalation | unit | `.venv/bin/python -m unittest tests.test_vision_service` | ❌ W0 | ⬜ pending |
-| 02-03-02 | 03 | 3 | VISION-03 | T-02-08 / double counting | IoU > 0.5 keeps only the stronger region before crop generation | unit | `.venv/bin/python -m unittest tests.test_vision_service` | ❌ W0 | ⬜ pending |
+| 02-01-01 | 01 | 1 | VISION-01 | T-02-01 / transport drift | shared client forwards multimodal arrays and `extra_body` unchanged to the provider client | async contract | `.venv/bin/python -m unittest tests.test_bot_contract` | ✅ | ⬜ pending |
+| 02-01-02 | 01 | 1 | VISION-01, VISION-02 | T-02-02 / model spoofing | detect path skips malformed or uncertain payloads but still continues when a meal is clearly present amid clutter | unit | `.venv/bin/python -m unittest tests.test_vision_service` | created in task 02-01-02 | ⬜ pending |
+| 02-01-03 | 01 | 1 | VISION-02 | T-02-03 / false final message | non-food completion sends no final result message and detect worker lifecycle is clean | async contract | `.venv/bin/python -m unittest tests.test_bot_contract` | ✅ | ⬜ pending |
+| 02-02-01 | 02 | 2 | VISION-03 | T-02-04 / bad coordinates | normalized boxes follow grouped-region rules and reject invalid ranges before persistence | unit | `.venv/bin/python -m unittest tests.test_vision_service` | created in 02-01-02 | ⬜ pending |
+| 02-02-02 | 02 | 2 | VISION-04 | T-02-05 / wrong crop path | accepted segments persist crop JPEGs under `/data/uploads/crops/{segment_id}.jpg` | unit | `.venv/bin/python -m unittest tests.test_vision_service tests.test_bot_contract` | created in 02-01-02 | ⬜ pending |
+| 02-02-03 | 02 | 2 | VISION-01, VISION-03 | T-02-06 / misleading labels | successful segment labeling uses dish-level labels for mixed foods, suppresses garnish noise, and emits one plain sentence | async contract | `.venv/bin/python -m unittest tests.test_bot_contract` | ✅ | ⬜ pending |
+| 02-03-01 | 03 | 3 | VISION-03 | T-02-07 / partial invalid acceptance | any invalid box causes full-response rejection and stronger-model retry | unit | `.venv/bin/python -m unittest tests.test_vision_service` | created in 02-01-02 | ⬜ pending |
+| 02-03-02 | 03 | 3 | VISION-03 | T-02-08 / double counting | IoU > 0.5 keeps only the stronger region before crop generation | unit | `.venv/bin/python -m unittest tests.test_vision_service` | created in 02-01-02 | ⬜ pending |
 | 02-03-03 | 03 | 3 | VISION-02 | T-02-09 / user confusion | second segmentation failure sends one soft-failure message and marks the meal failed | async contract | `.venv/bin/python -m unittest tests.test_bot_contract` | ✅ | ⬜ pending |
-| 02-04-01 | 04 | 4 | VISION-01 | T-02-10 / provider drift | live smoke script fails closed when structured detect output cannot be parsed | script | `.venv/bin/python scripts/vision_smoke.py --mode detect --sample sample_images/IMG_4583.HEIC` | ❌ W0 | ⬜ pending |
-| 02-04-02 | 04 | 4 | VISION-03 | T-02-11 / provider drift | live smoke script prints segment boxes and exits non-zero on invalid format | script | `.venv/bin/python scripts/vision_smoke.py --mode segment --sample sample_images/IMG_4583.HEIC` | ❌ W0 | ⬜ pending |
-| 02-04-03 | 04 | 4 | VISION-04 | T-02-12 / unverifiable slice | UAT evidence records crop-file and Telegram-output checks for the sample image | doc check | `rtk rg -n \"Phase 2\" .planning/phases/02-vision-slice/02-UAT.md` | ❌ W0 | ⬜ pending |
+| 02-04-01 | 04 | 4 | VISION-01, VISION-03, VISION-04 | T-02-10 / provider drift | smoke script exercises detect, segment, and label through shared runtime code and fails closed on parse or validator errors | script | `.venv/bin/python scripts/vision_smoke.py --mode all --sample sample_images/IMG_4583.HEIC` | created in task 02-04-01 | ⬜ pending |
+| 02-04-02 | 04 | 4 | VISION-01 | T-02-11 / config drift | env template documents all optional vision settings and default behavior | source check | `rtk rg -n \"DETECT_MODEL|SEGMENT_MODEL|SEGMENT_RETRY_MODEL|LABEL_MODEL|VISION_MAX_SEGMENTS\" .env.example` | ✅ | ⬜ pending |
+| 02-04-03 | 04 | 4 | VISION-03, VISION-04 | T-02-12 / unverifiable slice | UAT evidence records grouped sample-image behavior, crop files, and final Telegram output | doc check | `rtk rg -n \"IMG_4583|grouped|crop|non-food\" .planning/phases/02-vision-slice/02-UAT.md` | created in task 02-04-03 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -57,10 +57,12 @@ created: 2026-05-27
 
 ## Wave 0 Requirements
 
-- [ ] `tests/test_vision_service.py` - add deterministic service-level fixtures for detect, segment, normalization, IoU, and label collapse
-- [ ] `scripts/vision_smoke.py` - create the live OpenRouter smoke probe used by Wave 4
+No standalone Wave 0 plan is required for Phase 2.
 
-*Existing infrastructure covers all other phase requirements.*
+- `tests/test_vision_service.py` is created in Plan `02-01`, Task `2` before later verify steps depend on it
+- `scripts/vision_smoke.py` is created in Plan `02-04`, Task `1`, and its first verify runs in that same task
+
+Existing infrastructure covers the rest of the validation stack.
 
 ---
 
@@ -77,7 +79,7 @@ created: 2026-05-27
 
 - [x] All tasks have automated verify or explicit Wave 0 dependencies
 - [x] Sampling continuity: no 3 consecutive tasks without automated verify
-- [x] Wave 0 covers all missing references
+- [x] No standalone Wave 0 is required; every generated test/script artifact is created before its first dependent verify step
 - [x] No watch-mode flags
 - [x] Feedback latency < 20s
 - [x] `nyquist_compliant: true` set in frontmatter

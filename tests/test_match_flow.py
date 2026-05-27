@@ -5,6 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from app.models import MealProcessingStatus
 from app.services.embedding_service import EMBEDDING_DIMENSION, RETRIEVAL_QUERY
 
 
@@ -69,10 +70,117 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.similarity)
 
 
+class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_poll_and_embed_moves_meal_to_matching_and_persists_segment_vector(self) -> None:
+        from bot import polling
+        from app.services import matching_service
+
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            processing_status=MealProcessingStatus.EMBEDDING,
+        )
+        segment_one = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=None,
+        )
+        segment_two = SimpleNamespace(
+            id="segment-2",
+            cropped_image_url="/data/uploads/crops/seg-2.jpg",
+            embedding=None,
+        )
+        session = AsyncMock()
+        session_claim = Mock(scalar_one_or_none=Mock(return_value=meal))
+        session_segments = Mock(
+            scalars=Mock(
+                return_value=Mock(
+                    all=Mock(return_value=[segment_one, segment_two]),
+                )
+            )
+        )
+        session.execute.side_effect = [session_claim, session_segments]
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling.matching_service,
+                "embed_segment_query_embedding",
+                side_effect=[[0.1] * matching_service.EMBEDDING_DIMENSION, [0.2] * matching_service.EMBEDDING_DIMENSION],
+            ),
+            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
+
+        self.assertEqual(segment_one.embedding, [0.1] * matching_service.EMBEDDING_DIMENSION)
+        self.assertEqual(segment_two.embedding, [0.2] * matching_service.EMBEDDING_DIMENSION)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.MATCHING)
+        session.commit.assert_awaited_once()
+
+    async def test_poll_and_embed_routes_meal_without_segments_to_reasoning(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            processing_status=MealProcessingStatus.EMBEDDING,
+        )
+        session = AsyncMock()
+        session_claim = Mock(scalar_one_or_none=Mock(return_value=meal))
+        session_segments = Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[]))) )
+        session.execute.side_effect = [session_claim, session_segments]
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling.matching_service,
+                "embed_segment_query_embedding",
+                return_value=[0.1] * 1536,
+            ),
+            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
+
+        self.assertEqual(meal.processing_status, MealProcessingStatus.REASONING)
+        session.commit.assert_awaited_once()
+
+
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:
         from bot import polling
-        from app.services import matching_service
+        import bot.messages
 
         segment_one = SimpleNamespace(
             id="segment-1",
@@ -89,11 +197,18 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         meal = SimpleNamespace(
             id="12345678-abcd-efgh",
             image_url="/data/uploads/meals/12345678-abcd-efgh.jpg",
-            processing_status=None,
-            segments=[segment_one, segment_two],
+            processing_status=MealProcessingStatus.MATCHING,
         )
         session = AsyncMock()
-        session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
+        session_claim = Mock(scalar_one_or_none=Mock(return_value=meal))
+        session_segments = Mock(
+            scalars=Mock(
+                return_value=Mock(
+                    all=Mock(return_value=[segment_one, segment_two]),
+                )
+            )
+        )
+        session.execute.side_effect = [session_claim, session_segments]
         session.add = Mock()
         engine = SimpleNamespace(dispose=AsyncMock())
 
@@ -109,6 +224,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
             MATCHING_MODEL="google/gemini-embedding-2-preview",
+            TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
 
@@ -116,7 +232,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
             patch.object(
-                matching_service,
+                polling.matching_service,
                 "match_segment_against_visual_corpus",
                 side_effect=[
                     SimpleNamespace(
@@ -138,7 +254,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 ],
             ),
             patch.object(
-                matching_service,
+                bot.messages,
                 "format_unresolved_match_message",
                 return_value="I can see your meal, but I do not know it yet.",
             ),
@@ -147,7 +263,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
-        self.assertEqual(meal.processing_status, polling.MealProcessingStatus.REASONING)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.REASONING)
         bot.send_message.assert_awaited_once_with(
             chat_id="999",
             text="I can see your meal, but I do not know it yet.",
@@ -157,7 +273,6 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_poll_and_match_writes_all_rows_only_when_all_segments_pass_threshold(self) -> None:
         from bot import polling
-        from app.services import matching_service
 
         segment_one = SimpleNamespace(
             id="segment-1",
@@ -171,23 +286,20 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             embedding=None,
             label="Chicken Curry",
         )
-        food_visual_one = SimpleNamespace(
-            id="visual-1",
-            food_item_id="item-1",
-            is_invalidated=False,
-        )
-        food_visual_two = SimpleNamespace(
-            id="visual-2",
-            food_item_id="item-2",
-            is_invalidated=False,
-        )
         meal = SimpleNamespace(
             id="12345678-abcd-efgh",
-            processing_status=None,
-            segments=[segment_one, segment_two],
+            processing_status=MealProcessingStatus.MATCHING,
         )
         session = AsyncMock()
-        session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
+        session_claim = Mock(scalar_one_or_none=Mock(return_value=meal))
+        session_segments = Mock(
+            scalars=Mock(
+                return_value=Mock(
+                    all=Mock(return_value=[segment_one, segment_two]),
+                )
+            )
+        )
+        session.execute.side_effect = [session_claim, session_segments]
         session.add = Mock()
         session.add_all = Mock()
         engine = SimpleNamespace(dispose=AsyncMock())
@@ -211,20 +323,20 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
             patch.object(
-                matching_service,
+                polling.matching_service,
                 "match_segment_against_visual_corpus",
                 side_effect=[
                     SimpleNamespace(
-                        food_visual_id=food_visual_one.id,
-                        food_item_id=food_visual_one.food_item_id,
+                        food_visual_id="visual-1",
+                        food_item_id="item-1",
                         similarity=0.92,
                         is_match=True,
                         is_below_threshold=False,
                         query_embedding=[0.1] * EMBEDDING_DIMENSION,
                     ),
                     SimpleNamespace(
-                        food_visual_id=food_visual_two.id,
-                        food_item_id=food_visual_two.food_item_id,
+                        food_visual_id="visual-2",
+                        food_item_id="item-2",
                         similarity=0.9,
                         is_match=True,
                         is_below_threshold=False,
@@ -237,6 +349,6 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
-        self.assertEqual(meal.processing_status, polling.MealProcessingStatus.COMPLETED)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
         self.assertEqual(len(session.add.call_args_list), 4)
         bot.send_message.assert_not_awaited()

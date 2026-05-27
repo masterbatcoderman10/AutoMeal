@@ -14,6 +14,13 @@ def format_soft_failure_message() -> str:
     return "⚠️ I couldn't confidently segment that meal photo. Please try another photo."
 
 
+def format_unresolved_match_message(meal_id: str) -> str:
+    return (
+        f"I see your meal (ID: {meal_id[:8]}), but I don't yet recognize it. "
+        "I flagged it for follow-up identification."
+    )
+
+
 def format_result_sentence(labels: list[str], weak_labels: set[str] | None = None) -> str:
     cleaned: list[str] = []
     seen: set[str] = set()

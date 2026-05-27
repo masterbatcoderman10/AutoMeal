@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 from app.services.vision_service import (
     _coerce_detect_decision,
     _coerce_segment_candidates,
+    dedupe_overlapping_segments,
     normalize_segment_box,
     _normalize_payload,
     detect_food_photo,
@@ -16,6 +17,8 @@ from app.services.vision_service import (
     detect_response_format,
     label_prompt,
     label_response_format,
+    segment_food_photo_with_retry,
+    SegmentDecision,
     segment_prompt,
     segment_response_format,
 )
@@ -158,6 +161,19 @@ class SegmentCandidateTests(unittest.TestCase):
         image_url = prompt[0]["content"][1]["image_url"]["url"]
         self.assertTrue(image_url.startswith("data:image/jpeg;base64,"))
 
+    def test_dedupe_overlapping_segments_keeps_higher_confidence_region(self) -> None:
+        segments = [
+            SegmentDecision(box_2d=[0.0, 0.0, 0.6, 0.6], label_hint="rice", confidence=0.40),
+            SegmentDecision(box_2d=[0.05, 0.05, 0.65, 0.65], label_hint="rice", confidence=0.90),
+            SegmentDecision(box_2d=[0.7, 0.7, 0.9, 0.9], label_hint="salad", confidence=0.50),
+        ]
+
+        deduped = dedupe_overlapping_segments(segments, threshold=0.5)
+
+        self.assertEqual(len(deduped), 2)
+        self.assertEqual(deduped[0].confidence, 0.90)
+        self.assertEqual(deduped[1].label_hint, "salad")
+
 
 class DetectServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_detect_food_photo_uses_conservative_threshold(self) -> None:
@@ -230,3 +246,52 @@ class DetectServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(result)
+
+    async def test_segment_food_photo_retries_once_with_retry_model_after_invalid_primary_response(self) -> None:
+        client = AsyncMock()
+        client.chat_completion.side_effect = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "segments": [
+                                        {"box_2d": [100, 100, 600, 600], "confidence": 0.6},
+                                        {"box_2d": [900, 900, 950, 950], "confidence": 0.9},
+                                    ]
+                                }
+                            ),
+                        },
+                    },
+                ],
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "segments": [
+                                        {"box_2d": [100, 100, 600, 600], "confidence": 0.8},
+                                    ]
+                                }
+                            ),
+                        },
+                    },
+                ],
+            },
+        ]
+
+        result = await segment_food_photo_with_retry(
+            "https://example.test/meal.jpg",
+            llm_client=client,
+            model="google/gemini-3-flash-preview",
+            retry_model="google/gemini-3.5-flash",
+            max_segments=8,
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].box_2d, [0.1, 0.1, 0.6, 0.6])
+        self.assertEqual(client.chat_completion.await_args_list[0].kwargs["model"], "google/gemini-3-flash-preview")
+        self.assertEqual(client.chat_completion.await_args_list[1].kwargs["model"], "google/gemini-3.5-flash")

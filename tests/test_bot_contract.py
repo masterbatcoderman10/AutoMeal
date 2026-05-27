@@ -32,12 +32,23 @@ class MessageTemplateTests(unittest.TestCase):
             "⚠️ Something went wrong processing your meal. I'll retry shortly.",
         )
 
+    def test_soft_failure_message(self) -> None:
+        from bot.messages import format_soft_failure_message
+
+        self.assertEqual(
+            format_soft_failure_message(),
+            "⚠️ I couldn't confidently segment that meal photo. Please try another photo.",
+        )
+
     def test_result_sentence_is_single_sentence(self) -> None:
         from bot.messages import format_result_sentence
 
         self.assertEqual(
-            format_result_sentence(["Pita Bread", "Chicken Curry"]),
-            "I see 2 items: Pita Bread, Chicken Curry.",
+            format_result_sentence(
+                ["Pita Bread", "Chicken Curry", "Chicken Curry"],
+                weak_labels={"Chicken Curry"},
+            ),
+            "I see 2 items: Pita Bread, maybe Chicken Curry.",
         )
 
 
@@ -357,6 +368,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
             SEGMENT_MODEL="google/gemini-3-flash-preview",
+            SEGMENT_RETRY_MODEL="google/gemini-3.5-flash",
             LABEL_MODEL="google/gemini-3-flash-preview",
             VISION_MAX_SEGMENTS=8,
             TELEGRAM_CHAT_ID="999",
@@ -373,11 +385,11 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 polling,
-                "segment_food_photo",
+                "segment_food_photo_with_retry",
                 AsyncMock(
                     return_value=[
-                        SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6]),
-                        SimpleNamespace(box_2d=[0.6, 0.6, 1.0, 1.0]),
+                        SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6], confidence=0.9),
+                        SimpleNamespace(box_2d=[0.6, 0.6, 1.0, 1.0], confidence=0.9),
                     ],
                 ),
             ),
@@ -440,6 +452,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
             SEGMENT_MODEL="google/gemini-3-flash-preview",
+            SEGMENT_RETRY_MODEL="google/gemini-3.5-flash",
             LABEL_MODEL="google/gemini-3-flash-preview",
             VISION_MAX_SEGMENTS=8,
             TELEGRAM_CHAT_ID="999",
@@ -456,8 +469,8 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 polling,
-                "segment_food_photo",
-                AsyncMock(return_value=[SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6])]),
+                "segment_food_photo_with_retry",
+                AsyncMock(return_value=[SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6], confidence=0.9)]),
             ),
             patch.object(
                 polling,
@@ -512,7 +525,9 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
             SEGMENT_MODEL="google/gemini-3-flash-preview",
+            SEGMENT_RETRY_MODEL="google/gemini-3.5-flash",
             VISION_MAX_SEGMENTS=8,
+            TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
 
@@ -526,7 +541,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 polling,
-                "segment_food_photo",
+                "segment_food_photo_with_retry",
                 AsyncMock(return_value=[]),
             ),
             patch.object(
@@ -535,6 +550,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 return_value=SimpleNamespace(chat_completion=AsyncMock()),
             ),
             patch.object(polling, "label_food_segment", AsyncMock()),
+            patch.object(polling, "format_soft_failure_message", return_value="soft fail"),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_segment_food(bot, settings, poll_interval=0.01)
@@ -542,7 +558,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         session.add_all.assert_not_called()
         session.commit.assert_awaited_once()
         self.assertEqual(meal.processing_status, MealProcessingStatus.FAILED)
-        bot.send_message.assert_not_awaited()
+        bot.send_message.assert_awaited_once_with(chat_id="999", text="soft fail")
 
 
 class MainWiringTests(unittest.IsolatedAsyncioTestCase):

@@ -12,11 +12,13 @@ from app.services.llm_client import get_llm_client
 from app.models import MealSegment, MealLog, MealProcessingStatus
 from app.services.image_service import save_segment_crop
 from app.services.vision_service import (
+    WEAK_SEGMENT_CONFIDENCE_THRESHOLD,
+    dedupe_overlapping_segments,
     detect_food_photo,
     label_food_segment,
-    segment_food_photo,
+    segment_food_photo_with_retry,
 )
-from bot.messages import format_ack_message, format_result_sentence
+from bot.messages import format_ack_message, format_result_sentence, format_soft_failure_message
 
 logger = logging.getLogger(__name__)
 
@@ -151,15 +153,24 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                         await asyncio.sleep(interval)
                         continue
 
-                    segments = await segment_food_photo(
+                    segments = await segment_food_photo_with_retry(
                         meal.image_url,
                         llm_client=llm_client,
                         model=settings.SEGMENT_MODEL,
+                        retry_model=settings.SEGMENT_RETRY_MODEL,
                         max_segments=settings.VISION_MAX_SEGMENTS,
                     )
+                    segments = dedupe_overlapping_segments(segments)
                     if not segments:
                         meal.processing_status = MealProcessingStatus.FAILED
                         await session.commit()
+                        try:
+                            await bot.send_message(
+                                chat_id=settings.TELEGRAM_CHAT_ID,
+                                text=format_soft_failure_message(),
+                            )
+                        except Exception:
+                            logger.exception("Error sending segmentation soft-failure message")
                         continue
 
                     segment_rows = []
@@ -194,12 +205,20 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
 
                     meal.processing_status = MealProcessingStatus.COMPLETED
                     await session.commit()
+                    weak_labels = {
+                        segment_row.label
+                        for segment_row, segment in zip(segment_rows, segments, strict=False)
+                        if segment_row.label
+                        and segment.confidence is not None
+                        and segment.confidence < WEAK_SEGMENT_CONFIDENCE_THRESHOLD
+                    }
 
                     try:
                         await bot.send_message(
                             chat_id=settings.TELEGRAM_CHAT_ID,
                             text=format_result_sentence(
-                                [segment.label for segment in segment_rows if segment.label]
+                                [segment.label for segment in segment_rows if segment.label],
+                                weak_labels=weak_labels,
                             ),
                         )
                     except Exception:

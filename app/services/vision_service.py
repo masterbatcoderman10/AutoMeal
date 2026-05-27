@@ -13,6 +13,8 @@ from app.services.llm_client import OpenRouterClient
 DETECT_CONFIDENCE_THRESHOLD = 0.75
 SEGMENT_SCALE = 1000.0
 SEGMENT_MIN_AREA = 0.01
+SEGMENT_IOU_THRESHOLD = 0.5
+WEAK_SEGMENT_CONFIDENCE_THRESHOLD = 0.75
 
 
 @dataclass(frozen=True)
@@ -334,6 +336,50 @@ def _coerce_segment_candidates(
     return parsed_segments
 
 
+def _segment_rank(segment: SegmentDecision) -> tuple[float, float]:
+    confidence = segment.confidence if segment.confidence is not None else -1.0
+    y_min, x_min, y_max, x_max = segment.box_2d
+    area = (y_max - y_min) * (x_max - x_min)
+    return (confidence, area)
+
+
+def intersection_over_union(first_box: Sequence[float], second_box: Sequence[float]) -> float:
+    first_y_min, first_x_min, first_y_max, first_x_max = first_box
+    second_y_min, second_x_min, second_y_max, second_x_max = second_box
+
+    intersection_y_min = max(first_y_min, second_y_min)
+    intersection_x_min = max(first_x_min, second_x_min)
+    intersection_y_max = min(first_y_max, second_y_max)
+    intersection_x_max = min(first_x_max, second_x_max)
+
+    intersection_height = max(0.0, intersection_y_max - intersection_y_min)
+    intersection_width = max(0.0, intersection_x_max - intersection_x_min)
+    intersection_area = intersection_height * intersection_width
+    if intersection_area <= 0.0:
+        return 0.0
+
+    first_area = max(0.0, first_y_max - first_y_min) * max(0.0, first_x_max - first_x_min)
+    second_area = max(0.0, second_y_max - second_y_min) * max(0.0, second_x_max - second_x_min)
+    union_area = first_area + second_area - intersection_area
+    if union_area <= 0.0:
+        return 0.0
+
+    return intersection_area / union_area
+
+
+def dedupe_overlapping_segments(
+    segments: Sequence[SegmentDecision],
+    threshold: float = SEGMENT_IOU_THRESHOLD,
+) -> list[SegmentDecision]:
+    deduped: list[SegmentDecision] = []
+    ranked_segments = sorted(segments, key=_segment_rank, reverse=True)
+    for candidate in ranked_segments:
+        if any(intersection_over_union(candidate.box_2d, kept.box_2d) > threshold for kept in deduped):
+            continue
+        deduped.append(candidate)
+    return deduped
+
+
 async def detect_food_photo(
     image_url: str,
     *,
@@ -376,6 +422,31 @@ async def segment_food_photo(
         return []
 
 
+async def segment_food_photo_with_retry(
+    image_url: str,
+    *,
+    llm_client: OpenRouterClient,
+    model: str,
+    retry_model: str,
+    max_segments: int,
+) -> list[SegmentDecision]:
+    primary_segments = await segment_food_photo(
+        image_url,
+        llm_client=llm_client,
+        model=model,
+        max_segments=max_segments,
+    )
+    if primary_segments:
+        return primary_segments
+
+    return await segment_food_photo(
+        image_url,
+        llm_client=llm_client,
+        model=retry_model,
+        max_segments=max_segments,
+    )
+
+
 async def label_food_segment(
     image_url: str,
     *,
@@ -401,12 +472,17 @@ async def label_food_segment(
 
 __all__ = [
     "DETECT_CONFIDENCE_THRESHOLD",
+    "SEGMENT_IOU_THRESHOLD",
     "SEGMENT_SCALE",
     "SEGMENT_MIN_AREA",
+    "WEAK_SEGMENT_CONFIDENCE_THRESHOLD",
     "SegmentDecision",
+    "dedupe_overlapping_segments",
     "segment_prompt",
     "segment_response_format",
     "segment_food_photo",
+    "segment_food_photo_with_retry",
+    "intersection_over_union",
     "label_prompt",
     "label_response_format",
     "label_food_segment",

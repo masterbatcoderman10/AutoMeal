@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-05-27T16:15:05Z"
-last_activity: 2026-05-27 -- Phase 02 plan 02 complete
+last_updated: "2026-05-27T16:26:38Z"
+last_activity: 2026-05-27 -- Phase 02 plan 03 complete
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 6
-  percent: 17
+  completed_plans: 8
+  percent: 89
 ---
 
 # Project State
@@ -25,19 +25,19 @@ See: .planning/PROJECT.md (updated 2026-05-24)
 ## Current Position
 
 Phase: 02 (vision-slice) — EXECUTING
-Plan: 2 of 4
-Status: Ready for 02-03
-Last activity: 2026-05-27 -- Completed 02-02-PLAN.md
+Plan: 3 of 4
+Status: Ready for 02-04
+Last activity: 2026-05-27 -- Completed 02-03-PLAN.md
 
-Progress: [█████░░░░░] 50%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 2
+- Total plans completed: 3
 - Average duration: 10min
-- Total execution time: 19min
+- Total execution time: 30min
 
 **By Phase:**
 
@@ -47,7 +47,7 @@ Progress: [█████░░░░░] 50%
 
 **Recent Trend:**
 
-- Plan 02 completed in 11min
+- Plan 03 completed in 11min
 
 *Updated after each plan completion*
 | Phase 01 P03 | 12min | 5 tasks | 5 files |
@@ -55,6 +55,7 @@ Progress: [█████░░░░░] 50%
 | Phase 01 P05 | 76 | 5 tasks | 7 files |
 | Phase 02 P01 | 53s | 3 tasks | 7 files |
 | Phase 02 P02 | 26m | 3 tasks | 7 files |
+| Phase 02 P03 | 11m | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,9 @@ Recent decisions affecting current work:
 - [Phase 02]: Start segment worker alongside detect and ack workers. — SEGMENTING meals now have a live runtime consumer instead of stalling after detect.
 - [Phase 02]: Convert local image paths to data URLs before vision calls. — OpenRouter multimodal requests now receive usable image inputs from saved meal and crop files.
 - [Phase 02]: Fail closed on malformed labels without downgrading completed meals on notification errors. — Bad label payloads stop the segment flow, while Telegram send failures no longer corrupt already-committed meal state.
+- [Phase 02]: Reject partially invalid segmentation payloads wholesale and retry once on a stronger model. — Prevents mixed-valid corruption and keeps retry behavior bounded.
+- [Phase 02]: Deduplicate overlapping segment boxes before persistence using IoU > 0.5. — Stops duplicate crop creation and double-counting in user output.
+- [Phase 02]: Collapse duplicate labels in final message and hedge only weak items inline. — Keeps Phase 2 output readable without exposing confidence internals.
 
 ### Pending Todos
 
@@ -117,6 +121,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-05-27T16:15:05Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-05-27T16:26:38Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None

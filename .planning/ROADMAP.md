@@ -38,12 +38,16 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 **Requirements**: VISION-01, VISION-02, VISION-03, VISION-04
 **Success Criteria** (what must be TRUE):
   1. Submitting a food photo produces a Telegram message listing each detected food item by label (e.g. "I see 3 items: rice, daal, naan")
-  2. Submitting a non-food photo (screenshot, pet, receipt) produces a polite "skipped — didn't look like a meal" message and no DiaryEntry is created
+  2. Submitting a non-food photo (screenshot, pet, receipt) stops after detect with no final Phase 2 result message and no DiaryEntry is created
   3. Bounding boxes are validated before use: coordinates within [0,1], y0<y1, x0<x1, area >1% of image, count capped at 8; invalid or hallucinated boxes are rejected and the segment stage re-prompts
   4. IoU deduplication removes overlapping boxes (>0.5 IoU) so the same food item is never double-counted
   5. Each accepted segment has a cropped image file saved to disk at the correct path
-**Plans**: TBD
-**Phase note**: Run OpenRouter capability smoke tests during this phase: verify vision input + structured output + bounding-box format ([y,x,y,x] normalized 0–1000) all work for the pinned model. Verify structured-output-plus-vision works in a single call; if not, split into two calls here, not later.
+**Plans**:
+  - `02-01` (Wave 1) — detect-stage gate and non-food completion slice
+  - `02-02` (Wave 2, blocked on `02-01`) — simple food happy path with normalized boxes, saved crops, and one-sentence result output
+  - `02-03` (Wave 3, blocked on `02-02`) — segmentation retry, IoU dedupe, duplicate-label collapse, and soft-failure handling
+  - `02-04` (Wave 4, blocked on `02-03`) — live OpenRouter smoke coverage, env-template updates, and UAT scaffolding
+**Phase note**: Run OpenRouter capability smoke tests during this phase: verify vision input + structured output + bounding-box format ([y,x,y,x] normalized 0–1000 at the provider boundary, converted to `[0,1]` in application code) all work for the pinned model. Discuss-phase clarification also overrides the earlier VISION-02 wording: confident non-food photos still stop the pipeline, but the final Phase 2 result message is suppressed instead of sending a polite skip text.
 
 ---
 
@@ -116,7 +120,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation & Ingest | 5/5 | Complete   | 2026-05-26 |
-| 2. Vision Slice | 0/TBD | Not started | - |
+| 2. Vision Slice | 4/4 | In Progress|  |
 | 3. Embed & Match | 0/TBD | Not started | - |
 | 4. Reason, Interview & Learning Loop | 0/TBD | Not started | - |
 | 5. Agentic Grounding | 0/TBD | Not started | - |

@@ -79,7 +79,7 @@ completed: 2026-05-27
 2. **Task 2: Create detect-stage schemas and conservative parsing helpers** - `b8cde3d` (feat)
 3. **Task 3: Add detect worker slice for non-food completion and food handoff** - `af2e153` (feat)
 
-**Plan metadata:** `docs(02-01): complete 02-01-PLAN` (to be recorded in final plan metadata commit)
+**Plan metadata:** `3581b3b` (`docs(02-01): complete 02-01-PLAN.md plan`)
 
 ## Files Created/Modified
 

@@ -39,10 +39,10 @@ created: 2026-05-27
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
 | 03-W0-01 | TBD | 0 | MATCH-02 | T-03-01 | Embedding responses are validated for model, shape, and 1536 dimensions before any DB write. | unit + smoke | `rtk .venv/bin/python -m unittest tests.test_embedding_service` | No - W0 | pending |
-| 03-W0-02 | TBD | 0 | MATCH-02 | T-03-02 | Same-image self-similarity >= 0.99 and cross-modal sanity check pass before threshold matching is trusted. | smoke/manual | `rtk .venv/bin/python -m unittest tests.test_embedding_service` plus live calibration command | No - W0 | pending |
-| 03-MATCH-01 | TBD | 1 | MATCH-03 | T-03-03 | Similarity uses `1 - cosine_distance` and only accepts score >= 0.85 from seeded `FoodVisual` rows. | integration | `rtk .venv/bin/python -m unittest tests.test_match_flow` | No - W0 | pending |
+| 03-W0-02 | TBD | 0 | MATCH-02 | T-03-02 | Same-image self-similarity >= 0.99 and the cross-modal `rice and lentils` sanity check rank the daal chawal target above random food before threshold matching is trusted. | smoke/manual | `rtk .venv/bin/python -m unittest tests.test_embedding_service` plus `rtk .venv/bin/python scripts/embed_match_smoke.py --mode calibrate --sample sample_images/IMG_4583.HEIC --same-food-peer sample_images/IMG_4584.HEIC --cross-modal-text "rice and lentils" --random-food sample_images/IMG_4585.HEIC` | No - W0 | pending |
+| 03-MATCH-01 | TBD | 1 | MATCH-02, MATCH-03 | T-03-03 | Similarity uses `1 - cosine_distance`, only accepts score >= 0.85 from seeded `FoodVisual` rows, and persists the 1536-dimension `RETRIEVAL_QUERY` vector onto `MealSegment.embedding` before search. | integration | `rtk .venv/bin/python -m unittest tests.test_match_flow` | No - W0 | pending |
 | 03-MATCH-02 | TBD | 1 | MATCH-03 | T-03-04 | Any below-threshold segment moves meal to `REASONING` and creates no `DiaryEntry` or new `FoodVisual`. | integration | `rtk .venv/bin/python -m unittest tests.test_match_flow` | No - W0 | pending |
-| 03-VISUAL-01 | TBD | 2 | MATCH-04 | T-03-05 | Confirmed paths append a new `FoodVisual` row; confirming same food twice creates two rows. | integration | `rtk .venv/bin/python -m unittest tests.test_match_flow` | No - W0 | pending |
+| 03-VISUAL-01 | TBD | 2 | MATCH-04 | T-03-05 | Confirmed paths append a new `FoodVisual` row with a fresh `RETRIEVAL_DOCUMENT` write embedding; confirming same food twice creates two rows. | integration | `rtk .venv/bin/python -m unittest tests.test_match_flow` | No - W0 | pending |
 | 03-BOT-01 | TBD | 2 | Phase 3 SC-4 | T-03-06 | Telegram completion push is best-effort after committed meal completion and cannot roll back DB writes. | unit | `rtk .venv/bin/python -m unittest tests.test_bot_contract` | Yes | pending |
 
 *Status: pending / green / red / flaky*
@@ -52,9 +52,9 @@ created: 2026-05-27
 ## Wave 0 Requirements
 
 - [ ] `tests/test_embedding_service.py` - wrapper request shape, retry/error handling, vector-length validation, task type constants, and calibration helper behavior.
-- [ ] `tests/test_match_flow.py` - seeded `FoodVisual` search, all-or-nothing below-threshold branch, duplicate `FoodVisual` append, and atomic completion behavior.
+- [ ] `tests/test_match_flow.py` - seeded `FoodVisual` search, `MealSegment.embedding` persistence for `RETRIEVAL_QUERY`, all-or-nothing below-threshold branch, duplicate `FoodVisual` append, `RETRIEVAL_DOCUMENT` write-back, and atomic completion behavior.
 - [ ] DB test helper or fixture for seeded `FoodItem`, `FoodVisual`, `MealLog`, and accepted `MealSegment` rows.
-- [ ] Live or manually recorded calibration using local `sample_images/*.HEIC`, including same-image self-similarity >= 0.99 and a text-vs-image sanity ranking.
+- [ ] Live or manually recorded calibration using local `sample_images/*.HEIC`, including same-image self-similarity >= 0.99, an operator-selected same-food/different-photo pair, and the `rice and lentils` text-vs-image sanity ranking.
 - [ ] Explicit stop condition: if live calibration is degenerate, stop Phase 3 execution and evaluate alternate embedding model/dimensionality before implementing match flow.
 
 ---

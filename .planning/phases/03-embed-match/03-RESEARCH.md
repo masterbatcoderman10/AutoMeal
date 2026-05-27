@@ -433,22 +433,19 @@ async for attempt in AsyncRetrying(
 | A2 | A bounded `tenacity` policy with 3 attempts and exponential backoff is the right first-pass retry envelope for Phase 3 embeddings. [ASSUMED] | Code Examples, Common Pitfalls | Low - the exact retry counts can be tuned without changing the architecture. |
 | A3 | The match worker should be a separate handoff from the embed worker instead of one giant `EMBEDDING` stage. [ASSUMED] | Summary, Architecture Patterns | Medium - merging them is possible, but it weakens observability and phase verification. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Does OpenRouter currently require only `dimensions`, or does it also accept/normalize Gemini-style `outputDimensionality` and `task_type` for multimodal embeddings?**
-   - What we know: OpenRouter documents the multimodal `input[].content[]` shape and an OpenAI-compatible embeddings endpoint, while Google documents the Gemini task enums and reduced-dimensionality semantics. [CITED: https://openrouter.ai/docs/api/reference/embeddings] [CITED: https://ai.google.dev/api/embeddings]
-   - What's unclear: OpenRouter's public docs do not explicitly enumerate Gemini-specific embedding fields on the embeddings page.
-   - Recommendation: Make "live embed smoke against the real OpenRouter model id" the first executable Wave 0 task before deeper implementation. [ASSUMED]
+1. **OpenRouter embedding contract ambiguity is resolved as a Wave 0 live-smoke gate, not downstream implementation uncertainty.**
+   - What we know: OpenRouter documents the multimodal `input[].content[]` shape and OpenAI-compatible embeddings endpoint, while Google documents the Gemini task enums and reduced-dimensionality semantics. [CITED: https://openrouter.ai/docs/api/reference/embeddings] [CITED: https://ai.google.dev/api/embeddings]
+   - Resolution: Phase 03 must begin with a live OpenRouter smoke verification that exercises the real `google/gemini-embedding-2-preview` model id with `dimensions=1536` plus the intended `task_type` values, then blocks all threshold-match implementation if the provider rejects or normalizes them incorrectly. This is now a Wave 0 calibration blocker in planning, not an open research dependency. [VERIFIED: codebase grep] [ASSUMED]
 
-2. **Should `FoodItem.times_confirmed` be incremented on Phase 3 similarity confirmations?**
+2. **`FoodItem.times_confirmed` is explicitly out of Phase 3 scope.**
    - What we know: The column exists and semantically fits confirmation counting. [VERIFIED: codebase grep]
-   - What's unclear: No phase decision currently locks this behavior.
-   - Recommendation: Surface this in planning as a small explicit decision; default to incrementing on every successful confirmation if no contrary user guidance appears. [ASSUMED]
+   - Resolution: No locked decision in `.planning/phases/03-embed-match/03-CONTEXT.md`, `.planning/ROADMAP.md`, or `.planning/REQUIREMENTS.md` requires `times_confirmed` updates for MATCH-02 through MATCH-04, so Phase 03 should not plan or block on that field. If later phases want confirmation analytics, they can add it explicitly. [VERIFIED: codebase grep]
 
-3. **Do the six local HEICs provide at least one reliable same-food/different-photo pair for UAT?**
+3. **Same-food/different-photo HEIC coverage is resolved as an operator calibration input with a hard stop.**
    - What we know: The files are present in this checkout and the context allows 1-2 hardcoded demo `FoodItem` rows plus segmentation-based seeding. [VERIFIED: local command] [VERIFIED: codebase grep]
-   - What's unclear: The actual visual overlap between those photos has not been measured in this research step.
-   - Recommendation: Add a Wave 0 operator check that identifies the exact pair(s) used for threshold UAT before writing deterministic acceptance tests. [ASSUMED]
+   - Resolution: Wave 0 must require the operator to identify at least one usable same-food/different-photo pair from `sample_images/*.HEIC`, record the chosen pair for calibration, and stop Phase 03 execution if no pair supports the required UAT. That makes the sample-set question a calibration precondition, not an unresolved planning gap. [VERIFIED: local command] [ASSUMED]
 
 ## Environment Availability
 

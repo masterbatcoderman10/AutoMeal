@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, Mock, patch
 from app.models import MealProcessingStatus
 from app.services.embedding_service import (
     EMBEDDING_DIMENSION,
-    RETRIEVAL_DOCUMENT,
     RETRIEVAL_QUERY,
 )
 
@@ -438,11 +437,12 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
             patch.object(
                 polling.matching_service,
-                "match_segment_against_visual_corpus",
+                "match_segment_with_cached_embedding",
                 return_value=SimpleNamespace(
                     food_visual_id="visual-1",
                     food_item_id="item-1",
                     similarity=0.91,
+                    food_visual=SimpleNamespace(id="visual-1", food_item_id="item-1"),
                     is_match=True,
                     is_below_threshold=False,
                     query_embedding=[0.11] * EMBEDDING_DIMENSION,
@@ -452,7 +452,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 polling.matching_service,
                 "embed_segment_visual_embedding",
                 side_effect=[first_run_embedding, second_run_embedding],
-            ),
+            ) as embed_segment_visual_embedding,
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
@@ -469,7 +469,15 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(first_run_embedding, food_visual_payloads)
         self.assertIn(second_run_embedding, food_visual_payloads)
 
-        matching_service_args = polling.matching_service.embed_segment_visual_embedding.call_args_list
+        matching_service_args = embed_segment_visual_embedding.call_args_list
         self.assertEqual(len(matching_service_args), 2)
-        self.assertEqual(matching_service_args[0].kwargs["task_type"], RETRIEVAL_DOCUMENT)
-        self.assertEqual(matching_service_args[1].kwargs["task_type"], RETRIEVAL_DOCUMENT)
+        self.assertEqual(matching_service_args[0].kwargs["segment"], segment_one)
+        self.assertEqual(matching_service_args[1].kwargs["segment"], segment_one)
+        self.assertEqual(
+            matching_service_args[0].kwargs["embedding_model"],
+            matching_service.MATCHING_EMBEDDING_MODEL,
+        )
+        self.assertEqual(
+            matching_service_args[1].kwargs["embedding_model"],
+            matching_service.MATCHING_EMBEDDING_MODEL,
+        )

@@ -88,7 +88,9 @@ None - plan executed as written.
 
 ## Issues Encountered
 
-- Local runtime dependencies in this worktree did not allow executing the plan’s full verification commands.
+- Local runtime dependencies in this worktree did not allow executing the plan’s full verification commands before merge.
+- Post-merge verification in the primary checkout exposed one test-harness seam in `tests/test_match_flow.py`: the duplicate-confirmation regression test patched the wrong match helper branch for pre-populated segment embeddings and asserted a nonexistent `task_type` keyword on `embed_segment_visual_embedding()`.
+- The primary checkout now verifies the real completion path successfully: `rtk .venv/bin/python -m unittest tests.test_match_flow` passes, and `rtk .venv/bin/python scripts/embed_match_smoke.py --mode repeat-confirmation ...` confirms two successive `FoodVisual` appends with `committed_before_notification=true`.
 
 ## Threat Flags
 

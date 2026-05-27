@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 import math
+import mimetypes
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 from app.services.llm_client import OpenRouterClient
@@ -26,7 +29,21 @@ class SegmentDecision:
     confidence: float | None
 
 
+def _resolve_image_reference(image_url: str) -> str:
+    if image_url.startswith(("http://", "https://", "data:")):
+        return image_url
+
+    image_path = Path(image_url)
+    if not image_path.exists() or not image_path.is_file():
+        return image_url
+
+    mime_type, _ = mimetypes.guess_type(image_path.name)
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{mime_type or 'image/jpeg'};base64,{encoded}"
+
+
 def detect_prompt(image_url: str) -> list[dict[str, Any]]:
+    resolved_image_url = _resolve_image_reference(image_url)
     return [
         {
             "role": "user",
@@ -42,7 +59,7 @@ def detect_prompt(image_url: str) -> list[dict[str, Any]]:
                 },
                 {
                     "type": "image_url",
-                    "image_url": {"url": image_url},
+                    "image_url": {"url": resolved_image_url},
                 },
             ],
         }
@@ -69,6 +86,7 @@ def detect_response_format() -> dict[str, Any]:
 
 
 def segment_prompt(image_url: str) -> list[dict[str, Any]]:
+    resolved_image_url = _resolve_image_reference(image_url)
     return [
         {
             "role": "user",
@@ -90,7 +108,7 @@ def segment_prompt(image_url: str) -> list[dict[str, Any]]:
                 },
                 {
                     "type": "image_url",
-                    "image_url": {"url": image_url},
+                    "image_url": {"url": resolved_image_url},
                 },
             ],
         }
@@ -134,6 +152,7 @@ def segment_response_format() -> dict[str, Any]:
 
 
 def label_prompt(image_url: str) -> list[dict[str, Any]]:
+    resolved_image_url = _resolve_image_reference(image_url)
     return [
         {
             "role": "user",
@@ -149,7 +168,7 @@ def label_prompt(image_url: str) -> list[dict[str, Any]]:
                 },
                 {
                     "type": "image_url",
-                    "image_url": {"url": image_url},
+                    "image_url": {"url": resolved_image_url},
                 },
             ],
         }
@@ -362,7 +381,7 @@ async def label_food_segment(
     *,
     llm_client: OpenRouterClient,
     model: str,
-) -> str:
+) -> str | None:
     response = await llm_client.chat_completion(
         model=model,
         messages=label_prompt(image_url),
@@ -371,11 +390,11 @@ async def label_food_segment(
     content = _extract_message_content(response)
     payload = _normalize_payload(content)
     if payload is None:
-        return "food"
+        return None
 
     label = payload.get("label")
     if not isinstance(label, str) or not label.strip():
-        return "food"
+        return None
 
     return label.strip()
 

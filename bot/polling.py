@@ -133,9 +133,10 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
 
     try:
         while True:
+            meal: MealLog | None = None
+            created_crop_paths: list[Path] = []
             try:
                 async with session_factory() as session:
-                    meal: MealLog | None = None
                     statement = (
                         select(MealLog)
                         .where(MealLog.processing_status == MealProcessingStatus.SEGMENTING)
@@ -169,6 +170,7 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                             segment_id=segment_id,
                             normalized_box=segment.box_2d,
                         )
+                        created_crop_paths.append(crop_path)
                         segment_rows.append(
                             MealSegment(
                                 id=segment_id,
@@ -181,31 +183,45 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                     session.add_all(segment_rows)
 
                     for segment_row in segment_rows:
-                        segment_row.label = await label_food_segment(
+                        label = await label_food_segment(
                             segment_row.cropped_image_url,
                             llm_client=llm_client,
                             model=settings.LABEL_MODEL,
                         )
+                        if label is None:
+                            raise ValueError("segment label missing")
+                        segment_row.label = label
 
                     meal.processing_status = MealProcessingStatus.COMPLETED
                     await session.commit()
 
-                    await bot.send_message(
-                        chat_id=settings.TELEGRAM_CHAT_ID,
-                        text=format_result_sentence(
-                            [segment.label or "food" for segment in segment_rows]
-                        ),
-                    )
+                    try:
+                        await bot.send_message(
+                            chat_id=settings.TELEGRAM_CHAT_ID,
+                            text=format_result_sentence(
+                                [segment.label for segment in segment_rows if segment.label]
+                            ),
+                        )
+                    except Exception:
+                        logger.exception("Error sending segment result message")
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Error in poll_and_segment_food")
                 try:
-                    if meal is not None:
-                        meal.processing_status = MealProcessingStatus.FAILED
-                        await session.commit()
+                    async with session_factory() as session:
+                        await session.rollback()
+                        if meal is not None:
+                            meal.processing_status = MealProcessingStatus.FAILED
+                            await session.merge(meal)
+                            await session.commit()
                 except Exception:
                     logger.exception("Error while marking meal as FAILED in segmentation")
+                for crop_path in created_crop_paths:
+                    try:
+                        crop_path.unlink(missing_ok=True)
+                    except Exception:
+                        logger.exception("Error while deleting failed segment crop", extra={"path": str(crop_path)})
             await asyncio.sleep(interval)
     finally:
         await engine.dispose()

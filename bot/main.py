@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler
 
 from app.config import get_settings
 from bot.handlers import start
-from bot.polling import poll_and_acknowledge, poll_and_detect_food
+from bot.polling import poll_and_acknowledge, poll_and_detect_food, poll_and_segment_food
 
 
 async def post_init(application: Application) -> None:
@@ -27,12 +27,20 @@ async def post_init(application: Application) -> None:
             settings.BOT_POLL_INTERVAL,
         )
     )
+    application.bot_data["segment_task"] = asyncio.create_task(
+        poll_and_segment_food(
+            application.bot,
+            settings,
+            settings.BOT_POLL_INTERVAL,
+        )
+    )
 
 
 async def post_shutdown(application: Application) -> None:
     for task in [
         application.bot_data.get("poll_task"),
         application.bot_data.get("detect_task"),
+        application.bot_data.get("segment_task"),
     ]:
         if task is None:
             continue

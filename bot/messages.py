@@ -11,21 +11,16 @@ def format_error_message() -> str:
 
 
 def format_result_sentence(labels: list[str]) -> str:
-    distinct: list[str] = []
-    seen: set[str] = set()
+    cleaned: list[str] = []
     for raw_label in labels:
         if not raw_label:
             continue
         label = raw_label.strip()
         if not label:
             continue
-        lowered = label.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        distinct.append(label)
+        cleaned.append(label)
 
-    item_count = len(distinct)
+    item_count = len(cleaned)
     if item_count == 0:
         return "I see your meal."
-    return f"I see {item_count} items: {', '.join(distinct)}."
+    return f"I see {item_count} items: {', '.join(cleaned)}."

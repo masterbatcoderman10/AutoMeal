@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 from app.services.vision_service import (
@@ -29,6 +31,16 @@ class DetectPromptTests(unittest.TestCase):
         self.assertIn("meal is clearly present anywhere in the frame", prompt_text)
         self.assertIn("utens", prompt_text)
         self.assertIn("continue", prompt_text)
+
+    def test_detect_prompt_converts_local_file_path_to_data_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "meal.jpg"
+            image_path.write_bytes(b"jpeg-bytes")
+
+            prompt = detect_prompt(str(image_path))
+
+        image_url = prompt[0]["content"][1]["image_url"]["url"]
+        self.assertTrue(image_url.startswith("data:image/jpeg;base64,"))
 
     def test_detect_response_format_is_strict_json_schema(self) -> None:
         schema = detect_response_format()
@@ -136,6 +148,16 @@ class SegmentCandidateTests(unittest.TestCase):
         self.assertTrue(json_schema["additionalProperties"] is False)
         self.assertIn("label", json_schema["required"])
 
+    def test_label_prompt_converts_local_file_path_to_data_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "crop.jpg"
+            image_path.write_bytes(b"jpeg-bytes")
+
+            prompt = label_prompt(str(image_path))
+
+        image_url = prompt[0]["content"][1]["image_url"]["url"]
+        self.assertTrue(image_url.startswith("data:image/jpeg;base64,"))
+
 
 class DetectServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_detect_food_photo_uses_conservative_threshold(self) -> None:
@@ -186,3 +208,25 @@ class DetectServiceTests(unittest.IsolatedAsyncioTestCase):
             messages=detect_prompt("https://example.test/meal.jpg"),
             response_format=detect_response_format(),
         )
+
+    async def test_label_food_segment_fails_closed_on_malformed_payload(self) -> None:
+        from app.services.vision_service import label_food_segment
+
+        client = AsyncMock()
+        client.chat_completion.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps({"name": "not-a-label"}),
+                    },
+                },
+            ],
+        }
+
+        result = await label_food_segment(
+            "https://example.test/crop.jpg",
+            llm_client=client,
+            model="google/gemini-3-flash-preview",
+        )
+
+        self.assertIsNone(result)

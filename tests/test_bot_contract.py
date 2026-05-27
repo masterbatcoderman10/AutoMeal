@@ -36,7 +36,7 @@ class MessageTemplateTests(unittest.TestCase):
         from bot.messages import format_result_sentence
 
         self.assertEqual(
-            format_result_sentence(["Pita Bread", "Chicken Curry", "Chicken curry"]),
+            format_result_sentence(["Pita Bread", "Chicken Curry"]),
             "I see 2 items: Pita Bread, Chicken Curry.",
         )
 
@@ -413,6 +413,75 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         bot.send_message.assert_awaited_once()
         self.assertTrue(bot.send_message.await_args.kwargs["text"].startswith("I see "))
 
+    async def test_poll_segments_keeps_completed_state_when_message_send_fails(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            image_url="/data/uploads/meals/12345678-abcd-efgh.jpg",
+            processing_status=MealProcessingStatus.SEGMENTING,
+        )
+        session = AsyncMock()
+        session.add_all = Mock()
+        session.execute.return_value = Mock(
+            scalar_one_or_none=Mock(return_value=meal),
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock(side_effect=RuntimeError("telegram down")))
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            SEGMENT_MODEL="google/gemini-3-flash-preview",
+            LABEL_MODEL="google/gemini-3-flash-preview",
+            VISION_MAX_SEGMENTS=8,
+            TELEGRAM_CHAT_ID="999",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling.asyncio,
+                "sleep",
+                side_effect=asyncio.CancelledError,
+            ),
+            patch.object(
+                polling,
+                "segment_food_photo",
+                AsyncMock(return_value=[SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6])]),
+            ),
+            patch.object(
+                polling,
+                "save_segment_crop",
+                return_value=Path("/data/uploads/crops/aaa.jpg"),
+            ),
+            patch.object(
+                polling,
+                "label_food_segment",
+                AsyncMock(return_value="pita bread"),
+            ),
+            patch.object(
+                polling,
+                "get_llm_client",
+                return_value=SimpleNamespace(chat_completion=AsyncMock()),
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_segment_food(bot, settings, poll_interval=0.01)
+
+        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
+        session.commit.assert_awaited_once()
+        bot.send_message.assert_awaited_once()
+
     async def test_poll_segments_rejects_empty_segments_with_no_result_message(self) -> None:
         from bot import polling
 
@@ -494,6 +563,7 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot_main, "get_settings", return_value=settings),
             patch.object(bot_main, "poll_and_acknowledge", new=AsyncMock()) as poll_and_acknowledge,
             patch.object(bot_main, "poll_and_detect_food", new=AsyncMock()) as poll_and_detect_food,
+            patch.object(bot_main, "poll_and_segment_food", new=AsyncMock()) as poll_and_segment_food,
             patch.object(bot_main.asyncio, "create_task", side_effect=create_task) as create_task_mock,
         ):
             await bot_main.post_init(application)
@@ -508,10 +578,16 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             settings,
             settings.BOT_POLL_INTERVAL,
         )
+        poll_and_segment_food.assert_called_once_with(
+            application.bot,
+            settings,
+            settings.BOT_POLL_INTERVAL,
+        )
         create_task_mock.assert_called()
-        self.assertEqual(len(created_coroutines), 2)
+        self.assertEqual(len(created_coroutines), 3)
         self.assertIs(application.bot_data["poll_task"], fake_task)
         self.assertIs(application.bot_data["detect_task"], fake_task)
+        self.assertIs(application.bot_data["segment_task"], fake_task)
 
     async def test_post_shutdown_cancels_background_tasks(self) -> None:
         from bot import main as bot_main
@@ -529,7 +605,14 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
 
         poll_task = FakeTask()
         detect_task = FakeTask()
-        application = SimpleNamespace(bot_data={"poll_task": poll_task, "detect_task": detect_task})
+        segment_task = FakeTask()
+        application = SimpleNamespace(
+            bot_data={
+                "poll_task": poll_task,
+                "detect_task": detect_task,
+                "segment_task": segment_task,
+            }
+        )
 
         await bot_main.post_shutdown(application)
 
@@ -537,6 +620,8 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(poll_task.awaited)
         detect_task.cancel.assert_called_once_with()
         self.assertTrue(detect_task.awaited)
+        segment_task.cancel.assert_called_once_with()
+        self.assertTrue(segment_task.awaited)
 
     def test_main_builds_application_and_runs_polling(self) -> None:
         from bot import main as bot_main

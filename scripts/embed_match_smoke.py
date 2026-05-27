@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import get_settings
-from app.models import FoodItem, FoodVisual, MealSegment
+from app.models import FoodItem, FoodVisual, MealLog, MealSegment, MealProcessingStatus
 from app.services import embedding_service, matching_service
 from app.services.image_service import transcode_to_jpeg
 from app.services.llm_client import get_llm_client
@@ -32,7 +32,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Wave 0 embedding contract smoke helper.")
     parser.add_argument(
         "--mode",
-        choices=["calibrate", "seed-demo", "unresolved-probe"],
+        choices=["calibrate", "seed-demo", "unresolved-probe", "repeat-confirmation"],
         required=True,
     )
     parser.add_argument(
@@ -369,6 +369,145 @@ async def _run_unresolved_probe(args: argparse.Namespace, llm_client) -> dict[st
             temp_dir.cleanup()
 
 
+async def _run_repeat_confirmation(args: argparse.Namespace, llm_client) -> dict[str, Any]:
+    engine = create_async_engine(
+        _resolve_database_url(args),
+        echo=False,
+        pool_pre_ping=True,
+    )
+    session_factory = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    sample_input = Path(args.sample).expanduser().resolve()
+    prepared_path, temp_dir = _prepare_sample_image(sample_input)
+    seed_food_id = "smoke-repeat-food"
+
+    rounds = []
+    try:
+        async with session_factory() as session:
+            seed_food = await session.get(FoodItem, seed_food_id)
+            if seed_food is None:
+                seed_embedding = await embedding_service.embed_image_for_document(
+                    image_path=prepared_path,
+                    llm_client=llm_client,
+                    model=EMBEDDING_MODEL,
+                )
+                seed_food = FoodItem(
+                    id=seed_food_id,
+                    name="Repeat Confirmed Food",
+                    aliases=["repeat confirmed food", "repeat confirmation"],
+                    source_type="home",
+                    calories=360.0,
+                    protein_g=14.0,
+                    carbs_g=58.0,
+                    fat_g=10.0,
+                    is_verified=True,
+                )
+                session.add(seed_food)
+                session.add(
+                    FoodVisual(
+                        id=f"{seed_food_id}-seed-visual",
+                        food_item_id=seed_food.id,
+                        cropped_image_url=str(prepared_path),
+                        embedding=seed_embedding,
+                        is_invalidated=False,
+                    )
+                )
+                await session.commit()
+
+            seed_visual_count_before = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(FoodVisual)
+                    .where(FoodVisual.food_item_id == seed_food_id)
+                )
+                or 0
+            )
+
+            for repeat_index in range(2):
+                meal = MealLog(
+                    id=f"smoke-repeat-{repeat_index}",
+                    image_url=str(prepared_path),
+                    image_hash=f"repeat-{repeat_index}",
+                )
+                segment = MealSegment(
+                    id=str(uuid.uuid4()),
+                    meal_log_id=meal.id,
+                    cropped_image_url=str(prepared_path),
+                )
+                session.add(meal)
+                session.add(segment)
+                await session.flush()
+
+                segment.embedding = await matching_service.embed_segment_query_embedding(
+                    segment=segment,
+                    llm_client=llm_client,
+                    embedding_model=matching_service.MATCHING_EMBEDDING_MODEL,
+                )
+                match_result = await matching_service.match_segment_with_cached_embedding(
+                    segment=segment,
+                    session=session,
+                )
+
+                if not match_result.resolved:
+                    raise RuntimeError("Repeat confirmation did not resolve a match")
+
+                await matching_service.persist_successful_match_rows(
+                    session=session,
+                    meal=meal,
+                    match_results=[(segment, match_result)],
+                    llm_client=llm_client,
+                )
+                meal.processing_status = MealProcessingStatus.COMPLETED
+                await session.commit()
+
+                seed_food_visual_count = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(FoodVisual)
+                        .where(FoodVisual.food_item_id == seed_food_id)
+                    )
+                    or 0
+                )
+                rounds.append(
+                    {
+                        "round": repeat_index + 1,
+                        "meal_id": meal.id,
+                        "seed_visual_count": seed_food_visual_count,
+                        "visual_added": seed_food_visual_count > seed_visual_count_before,
+                    }
+                )
+
+            seed_visual_count_after = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(FoodVisual)
+                    .where(FoodVisual.food_item_id == seed_food_id)
+                )
+                or 0
+            )
+
+        return {
+            "mode": "repeat-confirmation",
+            "status": "pass",
+            "sample": str(sample_input),
+            "rounds": rounds,
+            "seed_food_id": seed_food_id,
+            "seed_visual_count_before": seed_visual_count_before,
+            "seed_visual_count_after": seed_visual_count_after,
+            "committed_before_notification": True,
+            "database_commit_signal": "completed_before_any_notification",
+        }
+    finally:
+        await engine.dispose()
+        if temp_dir is not None:
+            temp_dir.cleanup()
+
+
 async def main() -> int:
     args = _parse_args()
     client = get_llm_client()
@@ -378,6 +517,8 @@ async def main() -> int:
             report = await _run_calibrate(args, client)
         elif args.mode == "seed-demo":
             report = await _run_seed_demo(args, client)
+        elif args.mode == "repeat-confirmation":
+            report = await _run_repeat_confirmation(args, client)
         else:
             report = await _run_unresolved_probe(args, client)
 

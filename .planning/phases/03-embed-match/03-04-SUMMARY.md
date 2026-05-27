@@ -86,6 +86,8 @@ None - plan executed exactly as written.
 ## Issues Encountered
 
 - The runtime verification command from the plan (`rtk ...`) was not executed in this worktree due missing test/runtime dependencies in the isolated checkout.
+- Post-merge verification in the primary checkout exposed one real regression and one stale contract seam: `bot/polling.py` had dropped its `Path` import during later merges, and two older `tests/test_bot_contract.py` cases still expected Phase 02 to complete meals directly from segmentation instead of handing off to `EMBEDDING`.
+- After restoring the import and aligning those outdated bot-contract expectations with the Phase 03 pipeline, `rtk .venv/bin/python -m unittest tests.test_bot_contract` and the full test suite both pass in the primary checkout.
 
 ## Self-Check: PASSED
 

@@ -580,11 +580,10 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(segment.bounding_box)
             self.assertIn(segment.cropped_image_url, {"/data/uploads/crops/aaa.jpg", "/data/uploads/crops/bbb.jpg"})
             self.assertIsNotNone(segment.label)
-        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        bot.send_message.assert_awaited_once()
-        self.assertTrue(bot.send_message.await_args.kwargs["text"].startswith("I see "))
+        self.assertEqual(meal.processing_status, MealProcessingStatus.EMBEDDING)
+        bot.send_message.assert_not_awaited()
 
-    async def test_poll_segments_keeps_completed_state_when_message_send_fails(self) -> None:
+    async def test_poll_segments_keeps_embedding_handoff_when_message_send_fails(self) -> None:
         from bot import polling
 
         meal = SimpleNamespace(
@@ -651,9 +650,9 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_segment_food(bot, settings, poll_interval=0.01)
 
-        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.EMBEDDING)
         session.commit.assert_awaited_once()
-        bot.send_message.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
 
     async def test_poll_segments_rejects_empty_segments_with_no_result_message(self) -> None:
         from bot import polling

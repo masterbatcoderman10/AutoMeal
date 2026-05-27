@@ -322,6 +322,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
             MATCHING_MODEL="google/gemini-embedding-2-preview",
+            TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
         write_back_embeddings = [
@@ -340,6 +341,16 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                         food_visual_id="visual-1",
                         food_item_id="item-1",
                         similarity=0.92,
+                        food_visual=SimpleNamespace(
+                            food_item=SimpleNamespace(
+                                name="Pita Bread",
+                                calories=180.0,
+                                protein_g=6.0,
+                                carbs_g=35.0,
+                                fat_g=2.0,
+                                is_verified=True,
+                            )
+                        ),
                         is_match=True,
                         is_below_threshold=False,
                         query_embedding=[0.1] * EMBEDDING_DIMENSION,
@@ -348,6 +359,16 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                         food_visual_id="visual-2",
                         food_item_id="item-2",
                         similarity=0.9,
+                        food_visual=SimpleNamespace(
+                            food_item=SimpleNamespace(
+                                name="Chicken Curry",
+                                calories=320.0,
+                                protein_g=24.0,
+                                carbs_g=12.0,
+                                fat_g=20.0,
+                                is_verified=False,
+                            )
+                        ),
                         is_match=True,
                         is_below_threshold=False,
                         query_embedding=[0.2] * EMBEDDING_DIMENSION,
@@ -359,6 +380,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "embed_segment_visual_embedding",
                 side_effect=write_back_embeddings,
             ),
+            patch.object(polling, "format_match_completion_message", return_value="meal completed"),
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
@@ -378,7 +400,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn([0.101] * matching_service.EMBEDDING_DIMENSION, [row.embedding for row in food_visual_rows])
         self.assertIn([0.202] * matching_service.EMBEDDING_DIMENSION, [row.embedding for row in food_visual_rows])
-        bot.send_message.assert_not_awaited()
+        bot.send_message.assert_awaited_once_with(chat_id="999", text="meal completed")
 
     async def test_poll_and_match_reuses_new_retrieval_document_embedding_for_each_confirmation(self) -> None:
         from bot import polling
@@ -426,6 +448,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
             MATCHING_MODEL="google/gemini-embedding-2-preview",
+            TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
 
@@ -442,7 +465,18 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                     food_visual_id="visual-1",
                     food_item_id="item-1",
                     similarity=0.91,
-                    food_visual=SimpleNamespace(id="visual-1", food_item_id="item-1"),
+                    food_visual=SimpleNamespace(
+                        id="visual-1",
+                        food_item_id="item-1",
+                        food_item=SimpleNamespace(
+                            name="Pita Bread",
+                            calories=180.0,
+                            protein_g=6.0,
+                            carbs_g=35.0,
+                            fat_g=2.0,
+                            is_verified=True,
+                        ),
+                    ),
                     is_match=True,
                     is_below_threshold=False,
                     query_embedding=[0.11] * EMBEDDING_DIMENSION,
@@ -453,6 +487,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "embed_segment_visual_embedding",
                 side_effect=[first_run_embedding, second_run_embedding],
             ) as embed_segment_visual_embedding,
+            patch.object(polling, "format_match_completion_message", return_value="meal completed"),
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):

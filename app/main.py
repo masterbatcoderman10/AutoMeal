@@ -26,5 +26,5 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, default_response_class=ORJSONResponse)
-app.include_router(ingest.router)
-app.include_router(health.router)
+app.include_router(ingest)
+app.include_router(health)

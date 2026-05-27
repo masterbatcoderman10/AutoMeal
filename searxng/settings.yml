@@ -1,12 +1,13 @@
-use_types: true
+use_default_settings: true
 
 server:
-  secret_key: "${SEARXNG_SECRET:-changeme}"
+  secret_key: "changeme"
   limiter: false
 
 search:
-  formats: [html, json]
-  engines: [google, duckduckgo, bing, brave]
+  formats:
+    - html
+    - json
 
 general:
   instance_name: MealTracker SearXNG

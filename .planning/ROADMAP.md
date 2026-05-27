@@ -16,7 +16,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 ## Phase Details
 
 ### Phase 1: Foundation & Ingest
-**Goal**: The entire infrastructure stack runs correctly from day one — right schema, right vector dimensions, right time types — and a photo submitted via iOS Shortcut lands in the database and produces an immediate Telegram acknowledgement.
+**Goal**: As a single MealTracker user, I want to submit a meal photo and get an immediate Telegram acknowledgement, so that I can confirm photo ingest is working without manual database checks.
 **Mode:** mvp
 **Depends on**: Nothing (first phase)
 **Requirements**: INFRA-01, INFRA-02, INFRA-03, INFRA-05, INGEST-01, INGEST-02, INGEST-03, INGEST-04, INGEST-05, MATCH-01

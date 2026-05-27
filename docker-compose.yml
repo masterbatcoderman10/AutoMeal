@@ -29,7 +29,7 @@ services:
       FIRECRAWL_BASE_URL: http://firecrawl-api:3002
       SEARXNG_BASE_URL: http://searxng:8080
     ports:
-      - "127.0.0.1:8000:8000"
+      - "${API_HOST_BIND:-127.0.0.1}:${API_HOST_PORT:-8000}:8000"
     volumes:
       - uploads:/data/uploads
     depends_on:
@@ -65,7 +65,7 @@ services:
       SEARXNG_BASE_URL: http://searxng:8080/
       SEARXNG_SECRET: ${SEARXNG_SECRET:-changeme}
     volumes:
-      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./searxng/settings.yml:/etc/searxng/settings.yml
 
   firecrawl-api:
     image: ghcr.io/firecrawl/firecrawl:latest
@@ -74,34 +74,61 @@ services:
     environment: &firecrawl-env
       HOST: 0.0.0.0
       PORT: 3002
+      EXTRACT_WORKER_PORT: 3004
+      WORKER_PORT: 3005
+      ENV: local
       USE_DB_AUTHENTICATION: "false"
       REDIS_URL: redis://firecrawl-redis:6379
       REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
       PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      POSTGRES_USER: firecrawl
+      POSTGRES_PASSWORD: ${FIRECRAWL_PASSWORD}
+      POSTGRES_DB: firecrawl
+      POSTGRES_HOST: firecrawl-nuq-postgres
+      POSTGRES_PORT: 5432
       BULL_AUTH_KEY: ${FIRECRAWL_PASSWORD}
     depends_on:
       firecrawl-redis:
         condition: service_started
       firecrawl-playwright:
         condition: service_started
-
-  firecrawl-worker:
-    image: ghcr.io/firecrawl/firecrawl:latest
-    container_name: mealttracker-firecrawl-worker
-    command: node dist/src/harness.js --start-docker
-    environment:
-      <<: *firecrawl-env
-      PORT: 3005
-    depends_on:
-      firecrawl-redis:
-        condition: service_started
-      firecrawl-playwright:
-        condition: service_started
+      firecrawl-rabbitmq:
+        condition: service_healthy
+      firecrawl-nuq-postgres:
+        condition: service_healthy
 
   firecrawl-redis:
     image: redis:7-alpine
     container_name: mealttracker-firecrawl-redis
     command: redis-server --bind 0.0.0.0
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: mealttracker-firecrawl-rabbitmq
+    command: rabbitmq-server
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  firecrawl-nuq-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    container_name: mealttracker-firecrawl-nuq-postgres
+    command: postgres -c cron.database_name=firecrawl
+    environment:
+      POSTGRES_USER: firecrawl
+      POSTGRES_PASSWORD: ${FIRECRAWL_PASSWORD}
+      POSTGRES_DB: firecrawl
+    volumes:
+      - firecrawl_nuq_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U firecrawl -d firecrawl"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   firecrawl-playwright:
     image: ghcr.io/firecrawl/playwright-service:latest
@@ -113,3 +140,4 @@ services:
 volumes:
   postgres_data:
   uploads:
+  firecrawl_nuq_postgres:

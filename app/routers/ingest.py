@@ -21,7 +21,7 @@ router = APIRouter(prefix="/ingest", tags=["ingest"])
 @router.post("/photo")
 async def ingest_photo(
     picture: UploadFile = File(...),
-    x_ingest_secret: str = Header(..., alias="X-Ingest-Secret"),
+    x_ingest_secret: str | None = Header(default=None, alias="X-Ingest-Secret"),
     session: AsyncSession = Depends(get_session),
 ) -> IngestResponse:
     settings = get_settings()

@@ -1,0 +1,13 @@
+use_default_settings: true
+
+server:
+  secret_key: "changeme"
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+
+general:
+  instance_name: MealTracker SearXNG

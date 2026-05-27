@@ -1,3 +1,4 @@
+<!-- GSD:project-start source:PROJECT.md -->
 ## Project
 
 **MealTracker**
@@ -19,13 +20,21 @@ A photo-based personal meal tracker. An iOS Shortcut posts the most recently tak
 - **Single user:** endpoint authentication is a shared secret; Telegram chat is hard-pinned to one chat ID.
 - **Latency:** no hard SLA. Async pipeline; minutes is fine.
 
-### Subagent Model Routing
+### Subagent Model Routing (GSD Workflows)
 
 | Role | Primary | Fallback |
 |------|---------|----------|
-| **Execution subagents** | `zai glm-5.1` | `opencode-go glm-5.1` (when zai expires) |
-| **Review / verification subagents** | `openai-codex gpt-5.4` | — |
+| **Execution subagents** | `gpt-5.3-codex-spark` (`xhigh`) | `gpt-5.4` (`high`) |
+| **Code fixer subagents** | `gpt-5.4` (`high`) | inherited Codex default |
+| **Review / verification subagents** | `gpt-5.4` (`high`) | inherited Codex default |
 
+GSD execution must use worktree-isolated Codex subagents. Keep `workflow.use_worktrees=true`; do not disable it to bypass routing or cleanup issues.
+
+After spawning any GSD subagent, immediately inspect its Codex session metadata and verify the actual `turn_context.payload.model` and reasoning effort match the role table above. If the child inherited the parent/global model instead, stop that subagent before using its output, fix the agent TOML/config routing, and retry only after the route is verified.
+
+<!-- GSD:project-end -->
+
+<!-- GSD:stack-start source:research/STACK.md -->
 ## Technology Stack
 
 ## TL;DR — The Verified Critical Facts
@@ -241,16 +250,45 @@ A photo-based personal meal tracker. An iOS Shortcut posts the most recently tak
 ### iOS (MEDIUM confidence — Apple docs are sparse on exact trigger semantics)
 - [iOS Shortcuts personal automation intro](https://support.apple.com/guide/shortcuts/intro-to-personal-automation-apd690170742/ios)
 - [iOS Shortcuts — request your first API](https://support.apple.com/guide/shortcuts/request-your-first-api-apd58d46713f/ios)
+<!-- GSD:stack-end -->
+
+<!-- GSD:conventions-start source:CONVENTIONS.md -->
 ## Conventions
 
 Conventions not yet established. Will populate as patterns emerge during development.
 - During discussion and planning, use a single message without termination and ClarifyingQuestions instead.
+<!-- GSD:conventions-end -->
+
+<!-- GSD:architecture-start source:ARCHITECTURE.md -->
 ## Architecture
 
 Architecture not yet mapped. Follow existing patterns found in the codebase.
+<!-- GSD:architecture-end -->
+
+<!-- GSD:skills-start source:skills/ -->
 ## Project Skills
 
 No project skills found. Add skills to any of: `.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, `.github/skills/`, or `.codex/skills/` with a `SKILL.md` index file.
+<!-- GSD:skills-end -->
+
+<!-- GSD:workflow-start source:GSD defaults -->
+## GSD Workflow Enforcement
+
+Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync.
+
+Use these entry points:
+- `/gsd-quick` for small fixes, doc updates, and ad-hoc tasks
+- `/gsd-debug` for investigation and bug fixing
+- `/gsd-execute-phase` for planned phase work
+
+Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
+<!-- GSD:workflow-end -->
+
+
+
+<!-- GSD:profile-start -->
 ## Developer Profile
 
-> Profile not yet configured.
+> Profile not yet configured. Run `/gsd-profile-user` to generate your developer profile.
+> This section is managed by `generate-claude-profile` -- do not edit manually.
+<!-- GSD:profile-end -->

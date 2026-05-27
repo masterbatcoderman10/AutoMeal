@@ -1,0 +1,10 @@
+.git/
+.env
+__pycache__/
+.venv/
+.DS_Store
+.planning/
+.claude/
+.agents/
+node_modules/
+tests/

@@ -1,0 +1,12 @@
+{
+  "SessionStart": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" \"/Users/mali/Documents/Projects/MealTracker/.codex/hooks/gsd-check-update.js\""
+        }
+      ]
+    }
+  ]
+}

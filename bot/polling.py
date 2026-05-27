@@ -20,6 +20,8 @@ from app.services.vision_service import (
 from bot.messages import (
     format_ack_message,
     format_soft_failure_message,
+    CompletionItem,
+    format_match_completion_message,
     format_unresolved_match_message,
 )
 
@@ -401,8 +403,44 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                         llm_client=llm_client,
                     )
 
+                    completion_items = []
+                    for _segment, result in match_results:
+                        food_item = (
+                            result.food_visual.food_item
+                            if result.food_visual is not None
+                            else None
+                        )
+                        completion_items.append(
+                            CompletionItem(
+                                food_name=(
+                                    food_item.name
+                                    if food_item is not None and food_item.name
+                                    else "Unknown food"
+                                ),
+                                portion_bucket="STANDARD",
+                                identification_method="SIMILARITY",
+                                is_verified=(
+                                    bool(food_item.is_verified)
+                                    if food_item is not None and hasattr(food_item, "is_verified")
+                                    else False
+                                ),
+                                calories=getattr(food_item, "calories", None),
+                                protein_g=getattr(food_item, "protein_g", None),
+                                carbs_g=getattr(food_item, "carbs_g", None),
+                                fat_g=getattr(food_item, "fat_g", None),
+                            )
+                        )
+
                     meal.processing_status = MealProcessingStatus.COMPLETED
                     await session.commit()
+
+                    try:
+                        await bot.send_message(
+                            chat_id=settings.TELEGRAM_CHAT_ID,
+                            text=format_match_completion_message(completion_items),
+                        )
+                    except Exception:
+                        logger.exception("Error sending completion match message")
             except asyncio.CancelledError:
                 raise
             except Exception:

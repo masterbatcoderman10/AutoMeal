@@ -9,7 +9,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 - [x] **Phase 1: Foundation & Ingest** - Docker stack running, correct schema, iOS Shortcut posts a photo and gets a Telegram ack (completed 2026-05-26)
 - [ ] **Phase 2: Vision Slice** - Photo upload produces a bot message listing detected food items by name (no nutrition yet)
 - [ ] **Phase 3: Embed & Match** - Seeded foods matched by vector similarity produce DiaryEntries and a nutrition push
-- [ ] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes
+- [ ] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: segmented foods continue in bounded async parallel; unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes
 - [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
@@ -61,7 +61,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 
 ### Phase 3: Embed & Match
 
-**Goal**: Crops from accepted segments are embedded at 1536 dims via a thin httpx wrapper, searched against the FoodVisuals HNSW index, and high-similarity matches produce DiaryEntries and a Telegram nutrition push — proving the self-improving vocabulary loop works before adding reasoning or interview complexity.
+**Goal**: As a MealTracker user, I want to have accepted meal-segment crops auto-match against my seeded FoodVisual library and immediately produce DiaryEntries plus a Telegram nutrition push, so that repeat meals log themselves before I need any reasoning or interview flow.
 **Mode:** mvp
 **Depends on**: Phase 2
 **Requirements**: MATCH-02, MATCH-03, MATCH-04
@@ -85,21 +85,32 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 
 ### Phase 4: Reason, Interview & Learning Loop
 
-**Goal**: Unknown or low-confidence segments flow through LLM reasoning (top-3 candidates with multi-signal confidence gating) and a structured Telegram interview; user corrections cascade to FoodVisual invalidation; the pipeline is resilient to mid-stage crashes via a janitor job and FAILED status.
+**Goal**: Once segmentation is done, each segment continues through the remaining pipeline independently with bounded async parallelism; unknown or low-confidence segments flow through LLM reasoning (top-3 candidates with multi-signal confidence gating) and a structured Telegram interview; user corrections cascade to FoodVisual invalidation; the pipeline is resilient to mid-stage crashes via a janitor job and FAILED status.
 **Mode:** mvp
 **Depends on**: Phase 3
-**Requirements**: REASON-01, REASON-02, REASON-03, REASON-04, INTERVIEW-01, INTERVIEW-02, INTERVIEW-03, INTERVIEW-04, INTERVIEW-05, INTERVIEW-06, INFRA-04
+**Requirements**: REASON-01, REASON-02, REASON-03, REASON-04, PIPELINE-01, INTERVIEW-01, INTERVIEW-02, INTERVIEW-03, INTERVIEW-04, INTERVIEW-05, INTERVIEW-06, INFRA-04
 **Success Criteria** (what must be TRUE):
 
   1. A segment below the auto-match threshold triggers the LLM reasoning stage, which emits top-3 candidate identifications each with a confidence value and rationale — not a single guess; the reasoning trace is stored in `MealSegment.ai_reasoning`
   2. The escalation gate uses the vector similarity score AND the top-1-vs-top-2 margin from the LLM — not the raw self-reported confidence alone — and biases toward interview when signals disagree
-  3. A segment that fails the confidence gate triggers a structured Telegram interview walking INITIAL_QUESTION → FOOD_NAME → SOURCE_TYPE → (RESTAURANT_NAME | BRAND_NAME) → PORTION_CONTEXT → CONFIRMATION; completing the interview writes a FoodItem (or updates an existing one) and advances the pipeline
-  4. Portion estimates are discrete buckets (small / standard / large mapping to 0.5 / 1.0 / 1.5×), never a continuous multiplier; the per-meal message reads "~small portion" not "0.63×"
-  5. Sending `/fix <entry_id>` re-opens the interview for that segment and the user can correct the identification; a USER_CORRECTED event invalidates the previously written FoodVisual (`is_invalidated=true`) and writes a new one for the correct FoodItem
-  6. A MealLog stuck in any `*ING` status for longer than 10 minutes is automatically reset to PENDING or marked FAILED (after 3 retries) by the janitor job; killing the worker mid-stage and waiting 10 minutes results in the meal recovering and completing
+  3. Once segments exist, multiple segments in the same meal proceed through embed → match → reason → interview/confirmation → write-back asynchronously with a configurable semaphore; one slow or interview-bound segment does not block automated progress on sibling segments
+  4. A segment that fails the confidence gate triggers a structured Telegram interview walking INITIAL_QUESTION → FOOD_NAME → SOURCE_TYPE → (RESTAURANT_NAME | BRAND_NAME) → PORTION_CONTEXT → CONFIRMATION; completing the interview writes a FoodItem (or updates an existing one) and advances the pipeline
+  5. Portion estimates are discrete buckets (small / standard / large mapping to 0.5 / 1.0 / 1.5×), never a continuous multiplier; the per-meal message reads "~small portion" not "0.63×"
+  6. Sending `/fix <entry_id>` re-opens the interview for that segment and the user can correct the identification; a USER_CORRECTED event invalidates the previously written FoodVisual (`is_invalidated=true`) and writes a new one for the correct FoodItem
+  7. A MealLog stuck in any `*ING` status for longer than 10 minutes is automatically reset to PENDING or marked FAILED (after 3 retries) by the janitor job; killing the worker mid-stage and waiting 10 minutes results in the meal recovering and completing
 
-**Plans**: TBD
-**Phase note**: Research flag from SUMMARY.md — confidence calibration prompt patterns and multi-signal gating for Gemini 3 Flash are sparsely documented. Plan this phase with a mini-research pass before writing the confidence gate. INTERVIEW-03 includes a post-interview re-grounding pass with tools (SearXNG + Firecrawl) for PACKAGED/RESTAURANT items — tool infrastructure must be stubbed or minimally wired before this phase completes; full tool loop ships in Phase 5.
+**Plans**: 8 plansPlans:
+
+- [ ] `04-01-PLAN.md` — Wave 0 reasoning contract, gate, parallel-pipeline tests, and live cache/trace smoke coverage
+- [ ] `04-02-PLAN.md` — Wave 0 interview, `/fix`, and janitor test scaffolds including D-48 and D-49 confirmation-edit branches
+- [ ] `04-03-PLAN.md` — durable schema and ORM state surfaces for reasoning, quantity, interview, correction, and recovery
+- [ ] `04-04-PLAN.md` — shared runtime interfaces, editable taxonomy, Phase 4 config keys, and optional Langfuse tracing wrapper
+- [ ] `04-05-PLAN.md` — meal-level reasoning gate, top-3 trace persistence, and bounded parallel auto-confirm slice
+- [ ] `04-06-PLAN.md` — Telegram interview, confirmation edit loops, reminder, and minimal grounding-prep slice
+- [ ] `04-07-PLAN.md` — `/fix` correction, scoped invalidation, and correction history slice
+- [ ] `04-08-PLAN.md` — APScheduler janitor recovery, duplicate-notify suppression, and crash smoke slice
+
+**Phase note**: Research flag from SUMMARY.md — confidence calibration prompt patterns and multi-signal gating for Gemini 3 Flash are sparsely documented. Plan this phase with a mini-research pass before writing the confidence gate. INTERVIEW-03 includes a post-interview re-grounding pass with tools (SearXNG + Firecrawl) for PACKAGED/RESTAURANT items — tool infrastructure must be stubbed or minimally wired before this phase completes; full tool loop ships in Phase 5. Observability work such as Langfuse tracing and persisted per-stage timing metrics remains deferred to v2 OPS-02.
 
 ---
 

@@ -48,14 +48,18 @@ def _prepare_image_payload(image_path: Path) -> dict[str, Any]:
 
 
 def _prepare_image_content(image_path: str | Path) -> list[dict[str, Any]]:
-    path = Path(image_path)
+    image_reference: str | Path
+    if isinstance(image_path, str) and image_path.startswith(("http://", "https://", "data:")):
+        image_reference = image_path
+    else:
+        image_reference = Path(image_path)
     payload = [
         {
             "type": "text",
             "text": "Create a deterministic embedding for this food image crop.",
         },
     ]
-    payload.append(_prepare_image_payload(path))
+    payload.append(_prepare_image_payload(image_reference))
     return payload
 
 

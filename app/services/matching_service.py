@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
-from app.models import DiaryEntry, FoodVisual, MealSegment, MealLog
+from app.models import DiaryEntry, FoodVisual, MealLog, MealSegment
 from app.services import embedding_service, image_service
 from app.services.llm_client import OpenRouterClient
 
@@ -71,14 +73,18 @@ def _prepare_image_payload(image_path: Path) -> dict[str, Any]:
 
 
 def _prepare_query_content(image_path: str | Path) -> list[dict[str, Any]]:
-    path = Path(image_path)
+    image_reference: str | Path
+    if isinstance(image_path, str) and image_path.startswith(("http://", "https://", "data:")):
+        image_reference = image_path
+    else:
+        image_reference = Path(image_path)
     content = [
         {
             "type": "text",
             "text": "Create a deterministic embedding for this food image crop.",
         },
     ]
-    content.append(_prepare_image_payload(path))
+    content.append(_prepare_image_payload(image_reference))
     return content
 
 
@@ -98,9 +104,12 @@ def _validate_embedding(embedding: list[float], output_dimensionality: int) -> l
 def _coerce_embedding(values: object | None) -> list[float]:
     if values is None:
         raise MatchingError("segment embedding must be populated before matching")
-    if not isinstance(values, list):
-        raise MatchingError("segment embedding must be a list of floats")
-    return [float(value) for value in values]
+    if isinstance(values, (str, bytes, bytearray)):
+        raise MatchingError("segment embedding must be a numeric vector")
+    try:
+        return [float(value) for value in values]  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise MatchingError("segment embedding must be a numeric vector") from exc
 
 
 async def _embed_with_retry(
@@ -114,7 +123,7 @@ async def _embed_with_retry(
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(MAX_MATCHING_RETRIES),
         wait=wait_exponential_jitter(initial=0.4, max=1.8),
-        retry=retry_if_exception_type((TypeError, ValueError, RuntimeError)),
+        retry=retry_if_exception_type(httpx.HTTPError),
         reraise=True,
     ):
         with attempt:
@@ -180,6 +189,12 @@ async def persist_successful_match_rows(
             raise MatchingError(
                 f"resolved match for segment {segment.id} is missing food_item_id"
             )
+        food_item = result.food_visual.food_item if result.food_visual is not None else None
+        entry_is_verified = (
+            bool(food_item.is_verified)
+            if food_item is not None and hasattr(food_item, "is_verified")
+            else False
+        )
 
         segment_visual_embedding = await embed_segment_visual_embedding(
             segment=segment,
@@ -195,7 +210,7 @@ async def persist_successful_match_rows(
                 segment_id=segment.id,
                 portion_bucket="STANDARD",
                 identification_method="SIMILARITY",
-                is_verified=False,
+                is_verified=entry_is_verified,
             )
         )
         session.add(
@@ -217,7 +232,8 @@ async def _best_food_visual_match(
     distance_expr = cosine_distance(FoodVisual.embedding, query_embedding)
     statement = (
         select(FoodVisual, distance_expr.label("distance"))
-        .where(FoodVisual.is_invalidated == False)  # noqa: E712
+        .options(selectinload(FoodVisual.food_item))
+        .where(FoodVisual.is_invalidated.is_(False))
         .order_by(distance_expr)
         .limit(1)
     )

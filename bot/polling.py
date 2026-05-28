@@ -285,7 +285,11 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                     )
                     segments = list(segment_result.scalars().all())
                     if not segments:
-                        meal.processing_status = MealProcessingStatus.REASONING
+                        logger.error(
+                            "Embedding worker found meal %s without segments; marking FAILED",
+                            meal.id,
+                        )
+                        meal.processing_status = MealProcessingStatus.FAILED
                         await session.commit()
                         continue
 

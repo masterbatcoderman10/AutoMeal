@@ -3,9 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import mimetypes
+import re
 import sys
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -21,11 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.config import get_settings
 from app.models import FoodItem, FoodVisual, MealLog, MealSegment, MealProcessingStatus
 from app.services import embedding_service, matching_service
-from app.services.image_service import transcode_to_jpeg
 from app.services.llm_client import get_llm_client
 
 EMBEDDING_MODEL = "google/gemini-embedding-2-preview"
 EMBEDDING_TASK_MARGIN = 0.001
+SMOKE_ID_MAX_LENGTH = 36
+ALLOWED_CROP_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -37,18 +37,23 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--sample",
-        default="sample_images/IMG_4583.HEIC",
-        help="Sample image for calibration and seeded visual generation",
+        required=True,
+        help="Saved crop artifact for the smoke run (for example uploads/crops/seg-1.jpg)",
     )
     parser.add_argument(
         "--same-food-peer",
-        default="sample_images/IMG_4584.HEIC",
-        help="Same-food second image for self-rephoto check",
+        default=None,
+        help="Required for calibrate: a different saved crop artifact from a second photo of the same food",
     )
     parser.add_argument(
         "--random-food",
-        default="sample_images/IMG_4585.HEIC",
-        help="Random-food image for cross-modal sanity comparison",
+        default=None,
+        help="Optional saved crop artifact for cross-modal sanity comparison",
+    )
+    parser.add_argument(
+        "--second-sample",
+        default=None,
+        help="Optional second saved crop artifact for seeding a distinct demo FoodItem",
     )
     parser.add_argument(
         "--cross-modal-text",
@@ -75,19 +80,45 @@ def _load_raw_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _prepare_sample_image(sample_path: Path) -> tuple[Path, tempfile.TemporaryDirectory[str] | None]:
-    suffix = sample_path.suffix.lower()
-    if suffix not in {".heic", ".heif"}:
-        return sample_path, None
+def _resolve_crop_path(path_value: str | Path, *, flag_name: str) -> Path:
+    crop_path = Path(path_value).expanduser().resolve()
+    if not crop_path.exists() or not crop_path.is_file():
+        raise FileNotFoundError(f"{flag_name} crop artifact missing: {crop_path}")
 
-    mime_type, _ = mimetypes.guess_type(sample_path.name)
-    raw_bytes = _load_raw_bytes(sample_path)
-    jpeg_bytes = transcode_to_jpeg(raw_bytes, mime_type or "image/heic")
+    if "crops" not in {part.lower() for part in crop_path.parts}:
+        raise RuntimeError(
+            f"{flag_name} must point to a saved crop artifact under a 'crops' directory; "
+            f"whole-photo inputs like sample_images are not allowed: {crop_path}"
+        )
 
-    temp_dir = tempfile.TemporaryDirectory()
-    prepared_path = Path(temp_dir.name) / f"{sample_path.stem}.jpg"
-    prepared_path.write_bytes(jpeg_bytes)
-    return prepared_path, temp_dir
+    if crop_path.suffix.lower() not in ALLOWED_CROP_SUFFIXES:
+        allowed = ", ".join(sorted(ALLOWED_CROP_SUFFIXES))
+        raise RuntimeError(
+            f"{flag_name} must point to a durable crop image ({allowed}), got: {crop_path}"
+        )
+
+    return crop_path
+
+
+def _ensure_distinct_rephoto_pair(sample_path: Path, peer_path: Path) -> None:
+    if sample_path == peer_path:
+        raise RuntimeError(
+            "calibrate requires --same-food-peer to be a different crop artifact from --sample"
+        )
+    if _load_raw_bytes(sample_path) == _load_raw_bytes(peer_path):
+        raise RuntimeError(
+            "calibrate requires --same-food-peer to be a real re-photo crop, not a byte-identical copy"
+        )
+
+
+def _make_smoke_id(prefix: str, *, suffix_length: int = 12) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", prefix.lower()).strip("-")
+    suffix = uuid.uuid4().hex[:suffix_length]
+    prefix_budget = SMOKE_ID_MAX_LENGTH - suffix_length - 1
+    if prefix_budget <= 0:
+        raise RuntimeError("suffix length leaves no room for smoke ID prefix")
+    trimmed = normalized[:prefix_budget].rstrip("-") or "smoke"
+    return f"{trimmed}-{suffix}"
 
 
 def is_corpus_branch_valid(visual_count: int) -> bool:
@@ -110,86 +141,79 @@ async def _run_calibrate(args: argparse.Namespace, llm_client) -> dict[str, Any]
     if args.visual_corpus_size < 0:
         raise RuntimeError("visual corpus size must be >= 0")
 
-    sample_input = Path(args.sample).expanduser().resolve()
-    peer_input = Path(args.same_food_peer).expanduser().resolve()
-    random_input = Path(args.random_food).expanduser().resolve() if args.random_food else None
-
-    sample_path, sample_temp = _prepare_sample_image(sample_input)
-    peer_path, peer_temp = _prepare_sample_image(peer_input)
-    random_path, random_temp = (
-        _prepare_sample_image(random_input)
-        if random_input is not None
-        else (None, None)
+    sample_input = _resolve_crop_path(args.sample, flag_name="--sample")
+    if not args.same_food_peer:
+        raise RuntimeError(
+            "calibrate requires --same-food-peer pointing to a different saved crop artifact"
+        )
+    peer_input = _resolve_crop_path(args.same_food_peer, flag_name="--same-food-peer")
+    _ensure_distinct_rephoto_pair(sample_input, peer_input)
+    random_input = (
+        _resolve_crop_path(args.random_food, flag_name="--random-food")
+        if args.random_food
+        else None
     )
 
-    try:
-        sample_vector = await embedding_service.embed_image_for_document(
-            image_path=sample_path,
+    sample_vector = await embedding_service.embed_image_for_document(
+        image_path=sample_input,
+        llm_client=llm_client,
+        model=EMBEDDING_MODEL,
+    )
+    self_similarity = embedding_service.cosine_similarity(sample_vector, sample_vector)
+    if not embedding_service.passes_same_image_gate(self_similarity):
+        raise RuntimeError(
+            f"same-image similarity {self_similarity:.6f} below 0.99"
+        )
+
+    same_food_vector = await embedding_service.embed_image_for_document(
+        image_path=peer_input,
+        llm_client=llm_client,
+        model=EMBEDDING_MODEL,
+    )
+    same_food_similarity = embedding_service.cosine_similarity(sample_vector, same_food_vector)
+
+    query_similarity = None
+    random_similarity = None
+    if args.cross_modal_text and random_input is not None:
+        query_vector = await embedding_service.embed_text_for_query(
+            query_text=args.cross_modal_text,
             llm_client=llm_client,
             model=EMBEDDING_MODEL,
         )
-
-        same_food_similarity = None
-        if args.same_food_peer:
-            same_food_vector = await embedding_service.embed_image_for_document(
-                image_path=peer_path,
-                llm_client=llm_client,
-                model=EMBEDDING_MODEL,
+        random_vector = await embedding_service.embed_image_for_document(
+            image_path=random_input,
+            llm_client=llm_client,
+            model=EMBEDDING_MODEL,
+        )
+        query_similarity = embedding_service.cosine_similarity(query_vector, sample_vector)
+        random_similarity = embedding_service.cosine_similarity(query_vector, random_vector)
+        if not embedding_service.passes_cross_modal_gate(
+            query_to_target=query_similarity,
+            query_to_random=random_similarity,
+            minimum_margin=EMBEDDING_TASK_MARGIN,
+        ):
+            raise RuntimeError(
+                "cross-modal query is not closer to same-food target than random food"
             )
-            same_food_similarity = embedding_service.cosine_similarity(sample_vector, same_food_vector)
-            if not embedding_service.passes_same_image_gate(same_food_similarity):
-                raise RuntimeError(
-                    f"same-food/rephoto similarity {same_food_similarity:.6f} below 0.99"
-                )
 
-        query_similarity = None
-        random_similarity = None
-        if args.cross_modal_text and random_path is not None:
-            query_vector = await embedding_service.embed_text_for_query(
-                query_text=args.cross_modal_text,
-                llm_client=llm_client,
-                model=EMBEDDING_MODEL,
-            )
-            random_vector = await embedding_service.embed_image_for_document(
-                image_path=random_path,
-                llm_client=llm_client,
-                model=EMBEDDING_MODEL,
-            )
-            query_similarity = embedding_service.cosine_similarity(query_vector, sample_vector)
-            random_similarity = embedding_service.cosine_similarity(query_vector, random_vector)
-            if not embedding_service.passes_cross_modal_gate(
-                query_to_target=query_similarity,
-                query_to_random=random_similarity,
-                minimum_margin=EMBEDDING_TASK_MARGIN,
-            ):
-                raise RuntimeError(
-                    "cross-modal query is not closer to same-food target than random food"
-                )
-
-        return {
-            "mode": "calibrate",
-            "status": "pass",
-            "visual_corpus_size": args.visual_corpus_size,
-            "visual_corpus_acceptable": is_corpus_branch_valid(args.visual_corpus_size),
-            "sample": str(sample_input),
-            "same_food_peer": str(peer_input),
-            "same_food_similarity": same_food_similarity,
-            "cross_modal_text": args.cross_modal_text,
-            "cross_modal_target_similarity": query_similarity,
-            "cross_modal_random_similarity": random_similarity,
-            "cross_modal_margin": (
-                query_similarity - random_similarity
-                if query_similarity is not None and random_similarity is not None
-                else None
-            ),
-        }
-    finally:
-        if sample_temp is not None:
-            sample_temp.cleanup()
-        if peer_temp is not None:
-            peer_temp.cleanup()
-        if random_temp is not None:
-            random_temp.cleanup()
+    return {
+        "mode": "calibrate",
+        "status": "pass",
+        "visual_corpus_size": args.visual_corpus_size,
+        "visual_corpus_acceptable": is_corpus_branch_valid(args.visual_corpus_size),
+        "sample": str(sample_input),
+        "self_similarity": self_similarity,
+        "same_food_peer": str(peer_input),
+        "same_food_similarity": same_food_similarity,
+        "cross_modal_text": args.cross_modal_text,
+        "cross_modal_target_similarity": query_similarity,
+        "cross_modal_random_similarity": random_similarity,
+        "cross_modal_margin": (
+            query_similarity - random_similarity
+            if query_similarity is not None and random_similarity is not None
+            else None
+        ),
+    }
 
 
 async def _run_seed_demo(args: argparse.Namespace, llm_client) -> dict[str, Any]:
@@ -216,19 +240,22 @@ async def _run_seed_demo(args: argparse.Namespace, llm_client) -> dict[str, Any]
             "source_type": "home",
             "image": args.sample,
             "is_verified": True,
-        },
-        {
-            "name": "Chicken Biryani",
-            "aliases": ["chicken biryani"],
-            "calories": 520.0,
-            "protein_g": 28.0,
-            "carbs_g": 58.0,
-            "fat_g": 22.0,
-            "source_type": "home",
-            "image": args.sample,
-            "is_verified": False,
-        },
+        }
     ]
+    if args.second_sample:
+        demo_items.append(
+            {
+                "name": "Chicken Biryani",
+                "aliases": ["chicken biryani"],
+                "calories": 520.0,
+                "protein_g": 28.0,
+                "carbs_g": 58.0,
+                "fat_g": 22.0,
+                "source_type": "home",
+                "image": args.second_sample,
+                "is_verified": False,
+            }
+        )
 
     seeded = []
     try:
@@ -240,17 +267,12 @@ async def _run_seed_demo(args: argparse.Namespace, llm_client) -> dict[str, Any]
                 if existing_item is not None:
                     continue
 
-                image_path = Path(item["image"]).expanduser().resolve()
-                prepared_image, temp_dir = _prepare_sample_image(image_path)
-                try:
-                    embedding = await embedding_service.embed_image_for_document(
-                        image_path=prepared_image,
-                        llm_client=llm_client,
-                        model=EMBEDDING_MODEL,
-                    )
-                finally:
-                    if temp_dir is not None:
-                        temp_dir.cleanup()
+                image_path = _resolve_crop_path(item["image"], flag_name="--sample")
+                embedding = await embedding_service.embed_image_for_document(
+                    image_path=image_path,
+                    llm_client=llm_client,
+                    model=EMBEDDING_MODEL,
+                )
 
                 food_item = FoodItem(
                     id=str(item["name"]).lower().replace(" ", "-"),
@@ -268,7 +290,7 @@ async def _run_seed_demo(args: argparse.Namespace, llm_client) -> dict[str, Any]
                     FoodVisual(
                         id=f"{food_item.id}-visual",
                         food_item_id=food_item.id,
-                        cropped_image_url=str(prepared_image),
+                        cropped_image_url=str(image_path),
                         embedding=embedding,
                         is_invalidated=False,
                     )
@@ -299,12 +321,11 @@ async def _run_unresolved_probe(args: argparse.Namespace, llm_client) -> dict[st
         autoflush=False,
     )
 
-    sample_input = Path(args.sample).expanduser().resolve()
-    prepared_path, temp_dir = _prepare_sample_image(sample_input)
+    sample_input = _resolve_crop_path(args.sample, flag_name="--sample")
     probe_segment = MealSegment(
         id=str(uuid.uuid4()),
         meal_log_id="probe-meal",
-        cropped_image_url=str(prepared_path),
+        cropped_image_url=str(sample_input),
     )
 
     try:
@@ -322,7 +343,7 @@ async def _run_unresolved_probe(args: argparse.Namespace, llm_client) -> dict[st
                     .where(FoodVisual.is_invalidated == False)  # noqa: E712
                     .values(is_invalidated=True)
                 )
-                probe_food_item_id = f"probe-unresolved-item-{uuid.uuid4()}"
+                probe_food_item_id = _make_smoke_id("probe-unresolved-item")
                 probe_item = FoodItem(
                     id=probe_food_item_id,
                     name="Probe Unresolved",
@@ -336,9 +357,9 @@ async def _run_unresolved_probe(args: argparse.Namespace, llm_client) -> dict[st
                 )
                 session.add(
                     FoodVisual(
-                        id=f"{probe_food_item_id}-visual",
+                        id=_make_smoke_id("probe-unresolved-visual"),
                         food_item_id=probe_food_item_id,
-                        cropped_image_url=str(prepared_path),
+                        cropped_image_url=str(sample_input),
                         embedding=[-value for value in probe_embedding],
                         is_invalidated=False,
                     )
@@ -365,8 +386,6 @@ async def _run_unresolved_probe(args: argparse.Namespace, llm_client) -> dict[st
             }
     finally:
         await engine.dispose()
-        if temp_dir is not None:
-            temp_dir.cleanup()
 
 
 async def _run_repeat_confirmation(args: argparse.Namespace, llm_client) -> dict[str, Any]:
@@ -382,8 +401,7 @@ async def _run_repeat_confirmation(args: argparse.Namespace, llm_client) -> dict
         autoflush=False,
     )
 
-    sample_input = Path(args.sample).expanduser().resolve()
-    prepared_path, temp_dir = _prepare_sample_image(sample_input)
+    sample_input = _resolve_crop_path(args.sample, flag_name="--sample")
     seed_food_id = "smoke-repeat-food"
 
     rounds = []
@@ -392,7 +410,7 @@ async def _run_repeat_confirmation(args: argparse.Namespace, llm_client) -> dict
             seed_food = await session.get(FoodItem, seed_food_id)
             if seed_food is None:
                 seed_embedding = await embedding_service.embed_image_for_document(
-                    image_path=prepared_path,
+                    image_path=sample_input,
                     llm_client=llm_client,
                     model=EMBEDDING_MODEL,
                 )
@@ -412,7 +430,7 @@ async def _run_repeat_confirmation(args: argparse.Namespace, llm_client) -> dict
                     FoodVisual(
                         id=f"{seed_food_id}-seed-visual",
                         food_item_id=seed_food.id,
-                        cropped_image_url=str(prepared_path),
+                        cropped_image_url=str(sample_input),
                         embedding=seed_embedding,
                         is_invalidated=False,
                     )
@@ -428,16 +446,17 @@ async def _run_repeat_confirmation(args: argparse.Namespace, llm_client) -> dict
                 or 0
             )
 
+            previous_visual_count = seed_visual_count_before
             for repeat_index in range(2):
                 meal = MealLog(
-                    id=f"smoke-repeat-{repeat_index}",
-                    image_url=str(prepared_path),
-                    image_hash=f"repeat-{repeat_index}",
+                    id=_make_smoke_id(f"smoke-repeat-{repeat_index}"),
+                    image_url=str(sample_input),
+                    image_hash=f"repeat-{repeat_index}-{uuid.uuid4()}",
                 )
                 segment = MealSegment(
                     id=str(uuid.uuid4()),
                     meal_log_id=meal.id,
-                    cropped_image_url=str(prepared_path),
+                    cropped_image_url=str(sample_input),
                 )
                 session.add(meal)
                 session.add(segment)
@@ -478,9 +497,10 @@ async def _run_repeat_confirmation(args: argparse.Namespace, llm_client) -> dict
                         "round": repeat_index + 1,
                         "meal_id": meal.id,
                         "seed_visual_count": seed_food_visual_count,
-                        "visual_added": seed_food_visual_count > seed_visual_count_before,
+                        "visual_added": seed_food_visual_count > previous_visual_count,
                     }
                 )
+                previous_visual_count = seed_food_visual_count
 
             seed_visual_count_after = int(
                 await session.scalar(
@@ -504,8 +524,6 @@ async def _run_repeat_confirmation(args: argparse.Namespace, llm_client) -> dict
         }
     finally:
         await engine.dispose()
-        if temp_dir is not None:
-            temp_dir.cleanup()
 
 
 async def main() -> int:

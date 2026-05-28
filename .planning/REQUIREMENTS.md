@@ -34,6 +34,10 @@
 - [ ] **REASON-03**: Multi-signal confidence gate decides escalation using top-1-vs-top-2 margin AND the vector similarity score — not the LLM's self-reported confidence alone
 - [ ] **REASON-04**: Reasoning trace (top-3, scores, similarity, decision) is written to `MealSegment.ai_reasoning` for audit
 
+### Pipeline
+
+- [ ] **PIPELINE-01**: After segmentation completes, each `MealSegment` continues independently through the remaining pipeline stages (embed → match → reason → interview/confirmation → write-back) using bounded async parallelism with a semaphore; one slow segment must not block automated progress on sibling segments, and the meal completes only after all segments resolve
+
 ### Ground
 
 - [ ] **GROUND-01**: Reasoning stage and post-interview stage can call `searxng_search` and `firecrawl_fetch` as tools when the LLM needs brand/restaurant nutrition data
@@ -86,10 +90,10 @@ Deferred to a later milestone. Tracked but not in v1 roadmap.
 - **OUTPUT2-04**: `/find <food>` — search history by food name
 - **OUTPUT2-05**: Free-text conversational diary queries
 
-### Resilience
+### Operations & Observability
 
 - **OPS-01**: Interview-fatigue throttle — cap open interview sessions
-- **OPS-02**: Structured JSON logging + per-meal token + USD cost log
+- **OPS-02**: Observability v2 — Langfuse traces, per-stage timing metrics, structured JSON logging, and per-meal token + USD cost log
 
 ## Out of Scope
 
@@ -130,6 +134,7 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 | REASON-02 | Phase 4 | Pending |
 | REASON-03 | Phase 4 | Pending |
 | REASON-04 | Phase 4 | Pending |
+| PIPELINE-01 | Phase 4 | Pending |
 | GROUND-01 | Phase 5 | Pending |
 | GROUND-02 | Phase 5 | Pending |
 | GROUND-03 | Phase 5 | Pending |
@@ -154,10 +159,10 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 | INFRA-05 | Phase 1 | Complete |
 
 **Coverage:**
-- v1 requirements: 39 total
-- Mapped to phases: 39
+- v1 requirements: 40 total
+- Mapped to phases: 40
 - Unmapped: 0 (complete)
 
 ---
 *Requirements defined: 2026-05-24*
-*Last updated: 2026-05-27 — Vision retry + IoU dedupe completed in Phase 2 plan 02-03*
+*Last updated: 2026-05-28 — Phase 4 parallel segment continuation added; observability remains v2*

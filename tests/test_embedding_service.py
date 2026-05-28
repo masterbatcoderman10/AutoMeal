@@ -74,6 +74,10 @@ class EmbeddingServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["content"][0]["type"], "text")
         self.assertEqual(kwargs["content"][0]["text"], "rice and lentils")
 
+    def test_prepare_image_content_preserves_remote_url_inputs(self) -> None:
+        content = embedding_service._prepare_image_content("https://example.com/crop.jpg")
+        self.assertEqual(content[1]["image_url"]["url"], "https://example.com/crop.jpg")
+
     async def test_wrong_length_embedding_is_rejected_before_return(self) -> None:
         client = AsyncMock()
         client.embed_multimodal.return_value = [0.0, 0.1, 0.2]

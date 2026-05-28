@@ -5,6 +5,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
+import numpy as np
+
 from app.models import MealProcessingStatus
 from app.services.embedding_service import (
     EMBEDDING_DIMENSION,
@@ -17,6 +20,42 @@ async def _noop_sleep(*_args, **_kwargs) -> None:
 
 
 class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_match_accepts_pgvector_numpy_embeddings(self) -> None:
+        from app.services import matching_service
+
+        segment = SimpleNamespace(
+            id="segment-1",
+            embedding=np.array([0.12] * EMBEDDING_DIMENSION, dtype=np.float32),
+        )
+        food_visual = SimpleNamespace(id="fv-1", food_item_id="item-1")
+        session = AsyncMock()
+        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.05)))
+
+        result = await matching_service.match_segment_with_cached_embedding(
+            segment=segment,
+            session=session,
+        )
+
+        self.assertEqual(result.food_visual_id, "fv-1")
+        self.assertEqual(len(result.query_embedding), EMBEDDING_DIMENSION)
+        self.assertIsInstance(segment.embedding, list)
+
+    async def test_cached_match_query_eager_loads_food_item_relationship(self) -> None:
+        from app.services import matching_service
+
+        segment = SimpleNamespace(id="segment-1", embedding=[0.12] * EMBEDDING_DIMENSION)
+        food_visual = SimpleNamespace(id="fv-1", food_item_id="item-1")
+        session = AsyncMock()
+        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.05)))
+
+        await matching_service.match_segment_with_cached_embedding(
+            segment=segment,
+            session=session,
+        )
+
+        statement = session.execute.await_args.args[0]
+        self.assertTrue(statement._with_options, "expected eager-loading options on match query")
+
     async def test_match_segment_uses_retrieval_query_embedding_and_sets_segment_vector(self) -> None:
         from app.services import matching_service
 
@@ -50,6 +89,62 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["model"], "google/gemini-embedding-2-preview")
         self.assertEqual(kwargs["task_type"], RETRIEVAL_QUERY)
 
+    async def test_match_segment_accepts_similarity_exactly_at_threshold(self) -> None:
+        from app.services import matching_service
+
+        query_embedding = [0.12] * EMBEDDING_DIMENSION
+        segment = SimpleNamespace(id="segment-1", cropped_image_url="/data/uploads/crops/seg-1.jpg", embedding=None)
+        food_visual = SimpleNamespace(id="fv-1", food_item_id="item-1")
+        session = AsyncMock()
+        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.15)))
+        llm_client = AsyncMock()
+        llm_client.embed_multimodal.return_value = query_embedding
+
+        with (
+            patch.object(matching_service.Path, "read_bytes", return_value=b"\xff\xd8\xff"),
+            patch.object(matching_service, "_prepare_image_payload", return_value={"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}}),
+        ):
+            result = await matching_service.match_segment_against_visual_corpus(
+                segment=segment,
+                session=session,
+                llm_client=llm_client,
+                embedding_model="google/gemini-embedding-2-preview",
+            )
+
+        self.assertTrue(result.is_match)
+        self.assertFalse(result.is_below_threshold)
+        self.assertTrue(result.resolved)
+        self.assertEqual(result.food_visual_id, food_visual.id)
+        self.assertAlmostEqual(result.similarity or 0.0, matching_service.MATCH_THRESHOLD)
+
+    async def test_match_segment_rejects_similarity_just_below_threshold(self) -> None:
+        from app.services import matching_service
+
+        query_embedding = [0.12] * EMBEDDING_DIMENSION
+        segment = SimpleNamespace(id="segment-1", cropped_image_url="/data/uploads/crops/seg-1.jpg", embedding=None)
+        food_visual = SimpleNamespace(id="fv-1", food_item_id="item-1")
+        session = AsyncMock()
+        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.1501)))
+        llm_client = AsyncMock()
+        llm_client.embed_multimodal.return_value = query_embedding
+
+        with (
+            patch.object(matching_service.Path, "read_bytes", return_value=b"\xff\xd8\xff"),
+            patch.object(matching_service, "_prepare_image_payload", return_value={"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}}),
+        ):
+            result = await matching_service.match_segment_against_visual_corpus(
+                segment=segment,
+                session=session,
+                llm_client=llm_client,
+                embedding_model="google/gemini-embedding-2-preview",
+            )
+
+        self.assertFalse(result.is_match)
+        self.assertTrue(result.is_below_threshold)
+        self.assertFalse(result.resolved)
+        self.assertEqual(result.food_visual_id, food_visual.id)
+        self.assertLess(result.similarity or 0.0, matching_service.MATCH_THRESHOLD)
+
     async def test_match_segment_with_empty_corpus_returns_no_match(self) -> None:
         from app.services import matching_service
 
@@ -74,6 +169,85 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.is_match)
         self.assertIsNone(result.food_visual_id)
         self.assertIsNone(result.similarity)
+
+    def test_prepare_query_content_preserves_remote_url_inputs(self) -> None:
+        from app.services import matching_service
+
+        content = matching_service._prepare_query_content("https://example.com/crop.jpg")
+        self.assertEqual(content[1]["image_url"]["url"], "https://example.com/crop.jpg")
+
+    async def test_embed_with_retry_retries_http_errors(self) -> None:
+        from app.services import matching_service
+
+        llm_client = SimpleNamespace(
+            embed_multimodal=AsyncMock(
+                side_effect=[
+                    httpx.ConnectError("temporary failure"),
+                    [0.33] * EMBEDDING_DIMENSION,
+                ]
+            )
+        )
+
+        result = await matching_service._embed_with_retry(
+            llm_client=llm_client,
+            model="google/gemini-embedding-2-preview",
+            content=[{"type": "text", "text": "segment"}],
+            task_type="RETRIEVAL_QUERY",
+        )
+
+        self.assertEqual(result, [0.33] * EMBEDDING_DIMENSION)
+        self.assertEqual(llm_client.embed_multimodal.await_count, 2)
+
+    async def test_embed_with_retry_does_not_retry_validation_failures(self) -> None:
+        from app.services import matching_service
+
+        llm_client = SimpleNamespace(
+            embed_multimodal=AsyncMock(return_value=[0.33, 0.44])
+        )
+
+        with self.assertRaises(matching_service.MatchingError):
+            await matching_service._embed_with_retry(
+                llm_client=llm_client,
+                model="google/gemini-embedding-2-preview",
+                content=[{"type": "text", "text": "segment"}],
+                task_type="RETRIEVAL_QUERY",
+            )
+
+        self.assertEqual(llm_client.embed_multimodal.await_count, 1)
+
+    async def test_persist_successful_match_rows_does_not_mutate_confirmation_count(self) -> None:
+        from app.services import matching_service
+
+        food_item = SimpleNamespace(times_confirmed=1, is_verified=True)
+        result = SimpleNamespace(
+            food_item_id="item-1",
+            food_visual=SimpleNamespace(food_item=food_item),
+        )
+        segment = SimpleNamespace(id="segment-1", cropped_image_url="/data/uploads/crops/seg-1.jpg")
+        session = AsyncMock()
+        session.add = Mock()
+
+        with patch.object(
+            matching_service,
+            "embed_segment_visual_embedding",
+            return_value=[0.5] * matching_service.EMBEDDING_DIMENSION,
+        ):
+            await matching_service.persist_successful_match_rows(
+                session=session,
+                meal=SimpleNamespace(id="meal-1"),
+                match_results=[(segment, result)],
+                llm_client=AsyncMock(),
+            )
+
+        self.assertEqual(food_item.times_confirmed, 1)
+        self.assertEqual(session.add.call_count, 2)
+        diary_entries = [
+            call.args[0]
+            for call in session.add.call_args_list
+            if hasattr(call.args[0], "identification_method")
+        ]
+        self.assertEqual(len(diary_entries), 1)
+        self.assertTrue(diary_entries[0].is_verified)
 
 
 class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -139,7 +313,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meal.processing_status, MealProcessingStatus.MATCHING)
         session.commit.assert_awaited_once()
 
-    async def test_poll_and_embed_routes_meal_without_segments_to_reasoning(self) -> None:
+    async def test_poll_and_embed_marks_meal_without_segments_failed(self) -> None:
         from bot import polling
 
         meal = SimpleNamespace(
@@ -179,7 +353,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
 
-        self.assertEqual(meal.processing_status, MealProcessingStatus.REASONING)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.FAILED)
         session.commit.assert_awaited_once()
 
 

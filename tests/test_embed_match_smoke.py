@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import importlib.util
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+
+def _load_smoke_module():
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "embed_match_smoke.py"
+    spec = importlib.util.spec_from_file_location("embed_match_smoke", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load embed_match_smoke module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+smoke = _load_smoke_module()
+
+
+class SmokeHelperTests(unittest.TestCase):
+    def test_make_smoke_id_stays_within_schema_limit(self) -> None:
+        meal_id = smoke._make_smoke_id("smoke-repeat-0")
+        food_item_id = smoke._make_smoke_id("probe-unresolved-item")
+        food_visual_id = smoke._make_smoke_id("probe-unresolved-visual")
+
+        self.assertLessEqual(len(meal_id), 36)
+        self.assertLessEqual(len(food_item_id), 36)
+        self.assertLessEqual(len(food_visual_id), 36)
+        self.assertNotEqual(meal_id, food_item_id)
+
+    def test_resolve_crop_path_rejects_non_crop_input(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            whole_photo = tmp_path / "sample_images" / "IMG_4583.HEIC"
+            whole_photo.parent.mkdir(parents=True, exist_ok=True)
+            whole_photo.write_bytes(b"whole-photo")
+
+            with self.assertRaisesRegex(RuntimeError, "crop artifact"):
+                smoke._resolve_crop_path(whole_photo, flag_name="--sample")
+
+    def test_resolve_crop_path_accepts_existing_crop_artifact(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            crop_path = tmp_path / "uploads" / "crops" / "seg-1.jpg"
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
+            crop_path.write_bytes(b"crop")
+
+            resolved = smoke._resolve_crop_path(crop_path, flag_name="--sample")
+
+            self.assertEqual(resolved, crop_path.resolve())
+
+
+class SmokeCalibrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_calibrate_embeds_crop_artifacts(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            crop_dir = tmp_path / "uploads" / "crops"
+            crop_dir.mkdir(parents=True, exist_ok=True)
+            sample_path = crop_dir / "sample.jpg"
+            peer_path = crop_dir / "peer.jpg"
+            random_path = crop_dir / "random.jpg"
+            sample_path.write_bytes(b"sample")
+            peer_path.write_bytes(b"peer")
+            random_path.write_bytes(b"random")
+
+            args = SimpleNamespace(
+                sample=str(sample_path),
+                same_food_peer=str(peer_path),
+                random_food=str(random_path),
+                cross_modal_text="rice and lentils",
+                visual_corpus_size=0,
+            )
+
+            with (
+                patch.object(
+                    smoke.embedding_service,
+                    "embed_image_for_document",
+                    AsyncMock(side_effect=[[1.0], [0.5], [0.25]]),
+                ) as embed_image,
+                patch.object(
+                    smoke.embedding_service,
+                    "embed_text_for_query",
+                    AsyncMock(return_value=[0.75]),
+                ),
+                patch.object(
+                    smoke.embedding_service,
+                    "cosine_similarity",
+                    side_effect=[1.0, 0.5, 0.4, 0.1],
+                ),
+                patch.object(
+                    smoke.embedding_service,
+                    "passes_same_image_gate",
+                    return_value=True,
+                ),
+                patch.object(
+                    smoke.embedding_service,
+                    "passes_cross_modal_gate",
+                    return_value=True,
+                ),
+            ):
+                report = await smoke._run_calibrate(args, llm_client=AsyncMock())
+
+        self.assertEqual(
+            [
+                call.kwargs["image_path"]
+                for call in embed_image.await_args_list
+            ],
+            [sample_path.resolve(), peer_path.resolve(), random_path.resolve()],
+        )
+        self.assertEqual(report["sample"], str(sample_path.resolve()))
+
+    async def test_run_calibrate_uses_same_image_gate_for_sample_vector(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            crop_dir = tmp_path / "uploads" / "crops"
+            crop_dir.mkdir(parents=True, exist_ok=True)
+            sample_path = crop_dir / "sample.jpg"
+            peer_path = crop_dir / "peer.jpg"
+            sample_path.write_bytes(b"sample")
+            peer_path.write_bytes(b"peer")
+
+            args = SimpleNamespace(
+                sample=str(sample_path),
+                same_food_peer=str(peer_path),
+                random_food=None,
+                cross_modal_text=None,
+                visual_corpus_size=0,
+            )
+            sample_vector = [1.0] + [0.0] * 1535
+            peer_vector = [0.0, 1.0] + [0.0] * 1534
+
+            with (
+                patch.object(
+                    smoke.embedding_service,
+                    "embed_image_for_document",
+                    AsyncMock(side_effect=[sample_vector, peer_vector]),
+                ),
+                patch.object(
+                    smoke.embedding_service,
+                    "cosine_similarity",
+                    side_effect=[1.0, 0.12],
+                ),
+                patch.object(
+                    smoke.embedding_service,
+                    "passes_same_image_gate",
+                    return_value=True,
+                ) as passes_same_image_gate,
+            ):
+                report = await smoke._run_calibrate(args, llm_client=AsyncMock())
+
+        passes_same_image_gate.assert_called_once_with(1.0)
+        self.assertEqual(report["self_similarity"], 1.0)
+        self.assertEqual(report["same_food_similarity"], 0.12)
+        self.assertEqual(report["sample"], str(sample_path.resolve()))
+        self.assertEqual(report["same_food_peer"], str(peer_path.resolve()))
+
+    async def test_run_calibrate_requires_same_food_peer(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            crop_dir = tmp_path / "uploads" / "crops"
+            crop_dir.mkdir(parents=True, exist_ok=True)
+            sample_path = crop_dir / "sample.jpg"
+            sample_path.write_bytes(b"sample")
+
+            args = SimpleNamespace(
+                sample=str(sample_path),
+                same_food_peer=None,
+                random_food=None,
+                cross_modal_text=None,
+                visual_corpus_size=0,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "--same-food-peer"):
+                await smoke._run_calibrate(args, llm_client=AsyncMock())
+
+
+class SmokeSeedDemoTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_seed_demo_embeds_crop_artifact(self) -> None:
+        class FakeEngine:
+            async def dispose(self) -> None:
+                return None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.added: list[object] = []
+
+            async def __aenter__(self) -> "FakeSession":
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def scalar(self, statement) -> None:
+                return None
+
+            def add(self, item: object) -> None:
+                self.added.append(item)
+
+            async def commit(self) -> None:
+                return None
+
+        fake_engine = FakeEngine()
+        fake_session = FakeSession()
+        sample_path = Path("/tmp/uploads/crops/sample.jpg")
+        args = SimpleNamespace(
+            sample=str(sample_path),
+            second_sample=None,
+            database_url="postgresql://example",
+        )
+
+        with (
+            patch.object(smoke, "create_async_engine", return_value=fake_engine),
+            patch.object(smoke, "async_sessionmaker", return_value=lambda: fake_session),
+            patch.object(smoke, "_resolve_crop_path", return_value=sample_path),
+            patch.object(
+                smoke.embedding_service,
+                "embed_image_for_document",
+                AsyncMock(return_value=[0.1, 0.2]),
+            ) as embed_image,
+        ):
+            report = await smoke._run_seed_demo(args, llm_client=AsyncMock())
+
+        embed_image.assert_awaited_once()
+        self.assertEqual(embed_image.await_args.kwargs["image_path"], sample_path)
+        self.assertEqual(report["seeded_food_items"], ["daal-chawal"])
+        food_visual = next(
+            item for item in fake_session.added if isinstance(item, smoke.FoodVisual)
+        )
+        self.assertEqual(food_visual.cropped_image_url, str(sample_path))

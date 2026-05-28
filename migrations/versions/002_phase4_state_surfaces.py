@@ -91,8 +91,79 @@ def upgrade() -> None:
         sa.Column("invalidation_reason", sa.String(length=1024), nullable=True),
     )
 
+    op.create_table(
+        "interview_sessions",
+        sa.Column("id", sa.String(length=36), primary_key=True),
+        sa.Column("meal_log_id", sa.String(length=36), nullable=False),
+        sa.Column("chat_id", sa.String(length=64), nullable=False),
+        sa.Column("state_key", sa.String(length=64), nullable=False),
+        sa.Column("current_prompt_payload", sa.JSON(), nullable=True),
+        sa.Column("last_bot_message_id", sa.Integer(), nullable=True),
+        sa.Column("reminder_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("last_reminder_at", TIMESTAMPTZ(timezone=True), nullable=True),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default="true"),
+        sa.Column(
+            "created_at",
+            TIMESTAMPTZ(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at",
+            TIMESTAMPTZ(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+        ),
+        sa.ForeignKeyConstraint(["meal_log_id"], ["meal_logs.id"]),
+    )
+    op.create_table(
+        "interview_messages",
+        sa.Column("id", sa.String(length=36), primary_key=True),
+        sa.Column("session_id", sa.String(length=36), nullable=False),
+        sa.Column("role", sa.String(length=16), nullable=False),
+        sa.Column("payload", sa.JSON(), nullable=True),
+        sa.Column("message_id", sa.Integer(), nullable=True),
+        sa.Column(
+            "created_at",
+            TIMESTAMPTZ(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.ForeignKeyConstraint(["session_id"], ["interview_sessions.id"]),
+    )
+    op.create_table(
+        "correction_events",
+        sa.Column("id", sa.String(length=36), primary_key=True),
+        sa.Column("meal_log_id", sa.String(length=36), nullable=False),
+        sa.Column("diary_entry_id", sa.String(length=36), nullable=False),
+        sa.Column("before_json", sa.JSON(), nullable=False),
+        sa.Column("after_json", sa.JSON(), nullable=False),
+        sa.Column(
+            "visual_learning_eligible",
+            sa.Boolean(),
+            nullable=False,
+            server_default="false",
+        ),
+        sa.Column("trace_id", sa.String(length=64), nullable=True),
+        sa.Column("reason", sa.Text(), nullable=True),
+        sa.Column("food_visual_id", sa.String(length=36), nullable=True),
+        sa.Column(
+            "created_at",
+            TIMESTAMPTZ(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.ForeignKeyConstraint(["meal_log_id"], ["meal_logs.id"]),
+        sa.ForeignKeyConstraint(["diary_entry_id"], ["diary_entries.id"]),
+        sa.ForeignKeyConstraint(["food_visual_id"], ["food_visuals.id"]),
+    )
+
 
 def downgrade() -> None:
+    op.drop_table("correction_events")
+    op.drop_table("interview_messages")
+    op.drop_table("interview_sessions")
     op.drop_column("food_visuals", "invalidation_reason")
     op.drop_column("food_visuals", "invalidated_at")
     op.drop_column("diary_entries", "quantity_display")
@@ -111,4 +182,3 @@ def downgrade() -> None:
     op.drop_column("meal_logs", "recovery_attempt_count")
     op.drop_column("meal_logs", "last_stage_started_at")
     op.drop_column("meal_logs", "reasoning_state_json")
-

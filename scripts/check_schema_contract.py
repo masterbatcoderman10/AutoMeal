@@ -13,8 +13,11 @@ from app.config import Settings
 from app.models import (
     Base,
     FoodVisual,
+    InterviewMessage,
+    InterviewSession,
     MealLog,
     MealProcessingStatus,
+    CorrectionEvent,
     MealSegment,
     PortionBucket,
 )
@@ -116,6 +119,29 @@ def assert_model_contract() -> None:
     assert_timestamp("updated_at", "meal_logs")
     assert_timestamp("updated_at", "food_items")
 
+    interview_sessions = InterviewSession.__table__
+    assert isinstance(interview_sessions.c.chat_id.type, String)
+    assert interview_sessions.c.chat_id.type.length == 64
+    assert interview_sessions.c.state_key.type.length == 64
+    assert isinstance(interview_sessions.c.current_prompt_payload.type, JSON)
+    assert isinstance(interview_sessions.c.last_bot_message_id.type, Integer)
+    assert interview_sessions.c.reminder_count.default is not None
+    assert isinstance(interview_sessions.c.is_active.type, Boolean)
+    assert isinstance(interview_sessions.c.last_reminder_at.type, TIMESTAMPTZ)
+
+    interview_messages = InterviewMessage.__table__
+    assert isinstance(interview_messages.c.role.type, String)
+    assert interview_messages.c.role.type.length == 16
+    assert isinstance(interview_messages.c.payload.type, JSON)
+    assert isinstance(interview_messages.c.message_id.type, Integer)
+
+    correction_events = CorrectionEvent.__table__
+    assert isinstance(correction_events.c.before_json.type, JSON)
+    assert isinstance(correction_events.c.after_json.type, JSON)
+    assert isinstance(correction_events.c.visual_learning_eligible.type, Boolean)
+    assert isinstance(correction_events.c.trace_id.type, String)
+    assert correction_events.c.trace_id.type.length == 64
+
 
 def assert_migration_contract() -> None:
     initial_migration = Path("migrations/versions/001_initial_schema.py").read_text()
@@ -154,6 +180,11 @@ def assert_migration_contract() -> None:
     assert "quantity_display" in phase4_migration
     assert "invalidated_at" in phase4_migration
     assert "invalidation_reason" in phase4_migration
+    assert "interview_sessions" in phase4_migration
+    assert "interview_messages" in phase4_migration
+    assert "correction_events" in phase4_migration
+    assert "current_prompt_payload" in phase4_migration
+    assert "visual_learning_eligible" in phase4_migration
     def create_table_position(text: str, table_name: str) -> int:
         match = re.search(rf"op\.create_table\(\s*[\"']{table_name}[\"']", text)
         assert match is not None, f"missing create_table for {table_name}"

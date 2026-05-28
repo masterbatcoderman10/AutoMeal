@@ -55,6 +55,9 @@ def main() -> int:
     unexpected_passes: list[str] = []
     import_errors: list[str] = []
     unexpected_load_or_runtime: list[str] = []
+    if not expected_failing:
+        print("ERROR: pass at least one --expect test name")
+        return 1
 
     for test_name in expected_failing:
         status = _run_target(loader, test_name)

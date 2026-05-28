@@ -22,7 +22,7 @@ def _plan_stale_recovery(
     segments: list[dict[str, Any]] | None = None,
     interview_session: dict[str, Any] | None = None,
     now: datetime | None = None,
-    stale_minutes: int = 5,
+    stale_minutes: int = 10,
     max_recoveries: int = 3,
 ) -> dict[str, Any]:
     service = _recovery_service()
@@ -51,8 +51,8 @@ class JanitorTests(unittest.TestCase):
         meal = {
             "meal_id": "meal-1",
             "processing_status": MealProcessingStatus.REASONING.value,
-            "last_stage_started_at": now - timedelta(minutes=6),
-            "updated_at": now - timedelta(minutes=6),
+            "last_stage_started_at": now - timedelta(minutes=11),
+            "updated_at": now - timedelta(minutes=11),
             "recovery_attempt_count": 1,
             "reasoning_state_json": {
                 "meal_reasoning": {
@@ -85,8 +85,8 @@ class JanitorTests(unittest.TestCase):
         meal = {
             "meal_id": "meal-2",
             "processing_status": MealProcessingStatus.MATCHING.value,
-            "last_stage_started_at": now - timedelta(minutes=6),
-            "updated_at": now - timedelta(minutes=6),
+            "last_stage_started_at": now - timedelta(minutes=11),
+            "updated_at": now - timedelta(minutes=11),
             "recovery_attempt_count": 3,
             "last_recovery_notified_at": None,
         }
@@ -117,8 +117,8 @@ class JanitorTests(unittest.TestCase):
                     {
                         "meal_id": f"meal-{status.lower()}",
                         "processing_status": status,
-                        "last_stage_started_at": now - timedelta(minutes=8),
-                        "updated_at": now - timedelta(minutes=8),
+                        "last_stage_started_at": now - timedelta(minutes=12),
+                        "updated_at": now - timedelta(minutes=12),
                         "recovery_attempt_count": 0,
                     },
                     now=now,
@@ -132,8 +132,8 @@ class JanitorTests(unittest.TestCase):
         meal = {
             "meal_id": "meal-3",
             "processing_status": MealProcessingStatus.REASONING.value,
-            "last_stage_started_at": now - timedelta(minutes=7),
-            "updated_at": now - timedelta(minutes=7),
+            "last_stage_started_at": now - timedelta(minutes=11),
+            "updated_at": now - timedelta(minutes=11),
             "recovery_attempt_count": 0,
         }
         segments = [

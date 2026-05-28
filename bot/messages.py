@@ -37,17 +37,26 @@ def format_grounding_pending_message(meal_id: str) -> str:
     )
 
 
-def format_interview_confirmation_message(items: list[dict]) -> str:
+def format_interview_confirmation_message(items: list[dict], *, action: str = "log it") -> str:
     if not items:
-        return "Please confirm this meal before I write it. Reply `confirm` to log it."
-    lines = ["Confirm before I log:"]
+        return f"Please confirm before I write this. Reply `confirm` to {action}."
+    lines = ["Confirm before I write:"]
     for item in items:
         segment_id = item.get("segment_id") or "item"
         name = item.get("name") or "Unknown food"
         quantity = item.get("quantity_display")
-        suffix = f" ({quantity})" if quantity else ""
+        portion = _portion_phrase(str(item.get("portion_bucket") or "STANDARD"))
+        extra_bits = [portion]
+        source_type = str(item.get("source_type") or "").upper()
+        if source_type == "PACKAGED" and item.get("brand_name"):
+            extra_bits.append(str(item["brand_name"]))
+        elif source_type == "RESTAURANT" and item.get("restaurant_name"):
+            extra_bits.append(str(item["restaurant_name"]))
+        if quantity:
+            extra_bits.append(str(quantity))
+        suffix = f" ({' | '.join(extra_bits)})" if extra_bits else ""
         lines.append(f"{segment_id}: {name}{suffix}")
-    lines.append("Reply `confirm` to log it, or send corrections like `first is paneer, second is lentil soup`.")
+    lines.append(f"Reply `confirm` to {action}, or send corrections like `first is paneer, second is lentil soup`.")
     return "\n".join(lines)
 
 
@@ -105,6 +114,15 @@ def format_result_sentence(labels: list[str], weak_labels: set[str] | None = Non
 
 def _normalize_portion(portion_bucket: str) -> str:
     return portion_bucket.replace("PortionBucket.", "") if portion_bucket else "unknown"
+
+
+def _portion_phrase(portion_bucket: str) -> str:
+    normalized = _normalize_portion(portion_bucket).upper()
+    if normalized == "SMALL":
+        return "~small portion"
+    if normalized == "LARGE":
+        return "~large portion"
+    return "~standard portion"
 
 
 def _format_number(value: float) -> str:
@@ -176,9 +194,8 @@ def format_match_completion_message(items: list[CompletionItem]) -> str:
     lines: list[str] = []
     for item in items:
         lines.append(
-            f"{item.food_name} | portion={_normalize_portion(item.portion_bucket)} | "
+            f"{item.food_name} | {_portion_phrase(item.portion_bucket)} | "
             f"method={item.identification_method} | verified={str(item.is_verified).lower()}"
-            + (f" | qty={item.quantity_label}" if item.quantity_label else "")
         )
         lines.append(_format_item_nutrition(item))
 

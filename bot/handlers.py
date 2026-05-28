@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -24,6 +25,7 @@ get_interview_roadmap = interview_service.get_interview_roadmap
 is_pinned_chat_update = interview_service.is_pinned_chat_update
 current_target_question = interview_service.current_target_question
 complete_target_question = interview_service.complete_target_question
+confirmation_items_from_state = interview_service.confirmation_items_from_state
 parse_interview_text = interview_service.parse_interview_text
 should_send_single_reminder = interview_service.should_send_single_reminder
 build_best_effort_closeout = interview_service.build_best_effort_closeout
@@ -31,6 +33,7 @@ apply_confirmation_edits = interview_service.apply_confirmation_edits
 parse_confirmation_bulk_text = interview_service.parse_confirmation_bulk_text
 build_confirmation_message = interview_service.build_confirmation_message
 build_all_wrong_prompt = interview_service.build_all_wrong_prompt
+prepare_fix_interview_session = interview_service.prepare_fix_interview_session
 resolve_fix_target = correction_service.resolve_fix_target
 parse_fix_patch = correction_service.parse_fix_patch
 
@@ -68,12 +71,29 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if target["mode"] == "none":
         await update.message.reply_text("No recent entries available to fix.")
         return
-    context.bot_data["pending_fix"] = {"entry_id": target["entry_id"]}
-    choice = target.get("choice") or {}
-    short_id = choice.get("short_id") or correction_service.short_entry_id(target["entry_id"])
-    label = choice.get("food_name")
-    suffix = f" ({label})" if label else ""
-    await update.message.reply_text(f"Fix target: {short_id}{suffix}. Send the correction or cancel.")
+    chat_id = _chat_id_from_update(update)
+    if chat_id is None:
+        return
+
+    settings = get_settings()
+    engine, session_factory = _make_session_factory(settings)
+    try:
+        async with session_factory() as session:
+            entry = await session.get(DiaryEntry, target["entry_id"])
+            if entry is None:
+                await update.message.reply_text("I could not find that entry to fix.")
+                return
+            entry_context = await correction_service.build_entry_correction_context(session=session, entry=entry)
+            interview = await interview_service.prepare_fix_interview_session(
+                session=session,
+                entry=entry,
+                entry_context=entry_context,
+                chat_id=chat_id,
+            )
+            await session.commit()
+            await update.message.reply_text(interview_service.current_target_question(interview.current_prompt_payload or {})["prompt"])
+    finally:
+        await engine.dispose()
 
 
 def _make_session_factory(settings):
@@ -123,26 +143,48 @@ async def _load_active_interview(session, *, chat_id: str, meal_id: str | None =
 
 
 def _confirmation_items_from_state(state: dict) -> list[dict]:
-    items: list[dict] = []
-    for message in state.get("interview_messages") or []:
-        payload = message.get("payload") if isinstance(message, dict) else None
-        if isinstance(payload, dict):
-            items.append(interview_service.answer_to_confirmation_item(payload))
-    return items
+    return interview_service.confirmation_items_from_state(state)
 
 
 def _update_confirmation_state(state: dict, confirmation_items: list[dict]) -> dict:
     updated = dict(state)
     updated["roadmap_step"] = "CONFIRMATION"
     updated["current_target_index"] = len(updated.get("pending_targets") or [])
-    updated["interview_messages"] = [
-        {"role": "user", "payload": dict(item)}
-        for item in confirmation_items
-    ]
+    updated["answers_by_segment"] = [dict(item) for item in confirmation_items]
+    updated["confirmation_items"] = [dict(item) for item in confirmation_items]
     return updated
 
 
 async def _finalize_interview_confirmation(*, session, interview: InterviewSession) -> dict | None:
+    state = dict(interview.current_prompt_payload or {})
+    confirmation_items = _confirmation_items_from_state(state)
+    if str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL) == interview_service.SESSION_MODE_FIX:
+        entry_id = state.get("fix_entry_id")
+        entry = await session.get(DiaryEntry, entry_id) if entry_id else None
+        if entry is None:
+            return None
+        entry_context = await correction_service.build_entry_correction_context(session=session, entry=entry)
+        patch = _build_fix_patch(entry_context=entry_context, confirmation_items=confirmation_items)
+        if not patch:
+            return {
+                "mode": interview_service.SESSION_MODE_FIX,
+                "entry": entry,
+                "result": {"applied": False, "reason": "no_changes"},
+                "confirmation_items": confirmation_items,
+            }
+        result = await correction_service.apply_confirmed_entry_correction(
+            session=session,
+            entry=entry,
+            patch=patch,
+            reason="telegram /fix",
+        )
+        return {
+            "mode": interview_service.SESSION_MODE_FIX,
+            "entry": entry,
+            "result": result,
+            "confirmation_items": confirmation_items,
+        }
+
     meal_result = await session.execute(
         select(MealLog)
         .options(selectinload(MealLog.segments))
@@ -152,8 +194,6 @@ async def _finalize_interview_confirmation(*, session, interview: InterviewSessi
     meal = meal_result.scalar_one_or_none()
     if meal is None:
         return None
-    state = dict(interview.current_prompt_payload or {})
-    confirmation_items = _confirmation_items_from_state(state)
     result = await interview_service.finalize_confirmed_interview(
         session=session,
         meal=meal,
@@ -161,6 +201,7 @@ async def _finalize_interview_confirmation(*, session, interview: InterviewSessi
         segments=list(meal.segments),
     )
     return {
+        "mode": interview_service.SESSION_MODE_MEAL,
         "meal": meal,
         "result": result,
         "confirmation_items": confirmation_items,
@@ -204,56 +245,6 @@ def _mark_grounding_pending(interview: InterviewSession) -> None:
     interview.is_active = True
 
 
-async def _handle_pending_fix(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
-    pending = context.bot_data.get("pending_fix")
-    if not isinstance(pending, dict):
-        return False
-    if update.message is None:
-        return True
-
-    if text.strip().lower() in {"cancel", "/cancel"}:
-        context.bot_data.pop("pending_fix", None)
-        await update.message.reply_text("Fix cancelled.")
-        return True
-
-    settings = get_settings()
-    engine, session_factory = _make_session_factory(settings)
-    try:
-        async with session_factory() as session:
-            entry = await session.get(DiaryEntry, pending["entry_id"])
-            if entry is None:
-                context.bot_data.pop("pending_fix", None)
-                await update.message.reply_text("I could not find that entry to fix.")
-                return True
-
-            if text.strip().lower() == "confirm" and pending.get("patch"):
-                result = await correction_service.apply_confirmed_entry_correction(
-                    session=session,
-                    entry=entry,
-                    patch=pending["patch"],
-                    reason="telegram /fix",
-                )
-                await session.commit()
-                context.bot_data.pop("pending_fix", None)
-                await update.message.reply_text(correction_service.format_fix_summary(result))
-                return True
-
-            patch = correction_service.parse_fix_patch(text)
-            if not patch:
-                await update.message.reply_text("Send the correction text, or cancel.")
-                return True
-            pending["patch"] = patch
-            entry_context = await correction_service.build_entry_correction_context(session=session, entry=entry)
-            preview = correction_service.build_fix_confirmation_payload(
-                entry=entry_context,
-                patch=patch,
-            )
-            await update.message.reply_text(format_fix_confirmation_message(preview))
-            return True
-    finally:
-        await engine.dispose()
-
-
 async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.callback_query is None:
         return
@@ -277,6 +268,18 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return
             finalized = await _finalize_interview_confirmation(session=session, interview=interview)
             if finalized is None:
+                return
+            if finalized.get("mode") == interview_service.SESSION_MODE_FIX:
+                interview.is_active = False
+                session.add(interview)
+                await session.commit()
+                message = update.callback_query.message
+                if message is not None:
+                    result = dict(finalized.get("result") or {})
+                    if result.get("reason") == "no_changes":
+                        await message.reply_text("No changes detected, so I kept the existing entry.")
+                    else:
+                        await message.reply_text(correction_service.format_fix_summary(result))
                 return
             if finalized["result"].get("grounding_required"):
                 _mark_grounding_pending(interview)
@@ -314,8 +317,6 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if await _reject_unpinned_update(update):
         return
     text = update.message.text or ""
-    if await _handle_pending_fix(update, context, text):
-        return
 
     chat_id = _chat_id_from_update(update)
     if chat_id is None:
@@ -335,10 +336,27 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
             if state.get("roadmap_step") == "CONFIRMATION":
                 lowered = text.strip().lower()
+                mode = str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL)
+                if lowered in {"cancel", "/cancel"} and mode == interview_service.SESSION_MODE_FIX:
+                    interview.is_active = False
+                    session.add(interview)
+                    await session.commit()
+                    await update.message.reply_text("Fix cancelled.")
+                    return
                 if lowered == "confirm":
                     finalized = await _finalize_interview_confirmation(session=session, interview=interview)
                     if finalized is None:
                         await update.message.reply_text("I could not find that meal to confirm.")
+                        return
+                    if finalized.get("mode") == interview_service.SESSION_MODE_FIX:
+                        interview.is_active = False
+                        session.add(interview)
+                        await session.commit()
+                        result = dict(finalized.get("result") or {})
+                        if result.get("reason") == "no_changes":
+                            await update.message.reply_text("No changes detected, so I kept the existing entry.")
+                        else:
+                            await update.message.reply_text(correction_service.format_fix_summary(result))
                         return
                     if finalized["result"].get("grounding_required"):
                         _mark_grounding_pending(interview)
@@ -389,14 +407,20 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         )
                     )
                     await session.commit()
-                    await update.message.reply_text(interview_service.build_confirmation_message(updated_confirmation))
+                    action = "apply this fix" if mode == interview_service.SESSION_MODE_FIX else "log it"
+                    await update.message.reply_text(format_interview_confirmation_message(updated_confirmation, action=action))
                     return
 
-                await update.message.reply_text(format_interview_confirmation_message(confirmation_items))
+                action = "apply this fix" if mode == interview_service.SESSION_MODE_FIX else "log it"
+                await update.message.reply_text(format_interview_confirmation_message(confirmation_items, action=action))
                 return
             target = interview_service.current_target_question(state)
             answer = interview_service.parse_interview_text(text=text, context=target)
+            if answer.get("invalid"):
+                await update.message.reply_text(str(target.get("invalid_prompt") or target["prompt"]))
+                return
             state = interview_service.complete_target_question(state, answer)
+            state["last_prompted_at"] = datetime.now(UTC)
             interview.current_prompt_payload = state
             interview.state_key = str(state.get("roadmap_step") or interview.state_key)
             session.add(interview)
@@ -408,16 +432,53 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     payload=answer,
                 )
             )
+            if state.get("roadmap_step") != "CONFIRMATION":
+                next_prompt = interview_service.current_target_question(state)
+                session.add(
+                    InterviewMessage(
+                        id=str(uuid.uuid4()),
+                        session_id=interview.id,
+                        role="bot",
+                        payload={
+                            "type": "prompt",
+                            "prompt": next_prompt,
+                        },
+                    )
+                )
             await session.commit()
 
             if state.get("roadmap_step") == "CONFIRMATION":
+                action = (
+                    "apply this fix"
+                    if str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL) == interview_service.SESSION_MODE_FIX
+                    else "log it"
+                )
                 await update.message.reply_text(
-                    format_interview_confirmation_message(_confirmation_items_from_state(state))
+                    format_interview_confirmation_message(_confirmation_items_from_state(state), action=action)
                 )
             else:
-                await update.message.reply_text(interview_service.current_target_question(state)["prompt"])
+                await update.message.reply_text(next_prompt["prompt"])
     finally:
         await engine.dispose()
+
+
+def _build_fix_patch(*, entry_context: dict, confirmation_items: list[dict]) -> dict:
+    if not confirmation_items:
+        return {}
+    item = dict(confirmation_items[0])
+    patch: dict[str, object] = {}
+    comparisons = {
+        "food_name": (item.get("name"), entry_context.get("food_name")),
+        "source_type": (item.get("source_type"), entry_context.get("source_type")),
+        "brand_name": (item.get("brand_name"), entry_context.get("brand_name")),
+        "restaurant_name": (item.get("restaurant_name"), entry_context.get("restaurant_name")),
+        "portion_bucket": (item.get("portion_bucket"), entry_context.get("portion_bucket")),
+        "quantity_display": (item.get("quantity_display"), entry_context.get("quantity_display")),
+    }
+    for field, (new_value, existing_value) in comparisons.items():
+        if new_value != existing_value and new_value is not None:
+            patch[field] = new_value
+    return patch
 
 
 __all__ = [

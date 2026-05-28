@@ -73,6 +73,7 @@ class MessageTemplateTests(unittest.TestCase):
                     portion_bucket="STANDARD",
                     identification_method="SIMILARITY",
                     is_verified=False,
+                    quantity_label="0.63x",
                     calories=None,
                     protein_g=12.0,
                     carbs_g=None,
@@ -82,9 +83,9 @@ class MessageTemplateTests(unittest.TestCase):
         )
 
         expected = [
-            "Daal Chawal | portion=STANDARD | method=SIMILARITY | verified=true",
+            "Daal Chawal | ~standard portion | method=SIMILARITY | verified=true",
             "Calories: 420 kcal | Protein: 16 g | Carbs: 68 g | Fat: 12 g",
-            "Chicken Curry | portion=STANDARD | method=SIMILARITY | verified=false",
+            "Chicken Curry | ~standard portion | method=SIMILARITY | verified=false",
             "Protein: 12 g | Fat: 6 g",
             "Total | Calories: 420 kcal | Protein: 28 g | Carbs: 68 g | Fat: 18 g",
         ]
@@ -93,6 +94,7 @@ class MessageTemplateTests(unittest.TestCase):
         self.assertNotIn("default", message.lower())
         self.assertNotIn("assume", message.lower())
         self.assertNotIn("score", message.lower())
+        self.assertNotIn("0.63x", message)
 
     def test_match_completion_message_omits_internal_debug_fields(self) -> None:
         from bot.messages import CompletionItem, format_match_completion_message

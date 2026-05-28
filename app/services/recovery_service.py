@@ -393,7 +393,7 @@ async def run_meal_janitor(
 ) -> list[dict[str, Any]]:
     current_time = now or datetime.now(UTC)
     processed: list[dict[str, Any]] = []
-    stale_minutes = int(getattr(settings, "STALE_TIMEOUT_MINUTES", 5))
+    stale_minutes = int(getattr(settings, "STALE_TIMEOUT_MINUTES", 10))
     max_recoveries = int(getattr(settings, "MAX_RECOVERY_ATTEMPTS", MEAL_JANITOR_MAX_RECOVERIES))
 
     async with session_factory() as session:

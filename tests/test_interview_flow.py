@@ -42,32 +42,95 @@ class InterviewRoadmapTests(unittest.TestCase):
 
 
 class InterviewProgressionTests(unittest.TestCase):
-    def test_interview_proceeds_one_target_at_a_time(self) -> None:
+    def test_interview_proceeds_through_structured_steps_before_confirmation(self) -> None:
         from bot import handlers
 
         state = {
             "meal_id": "meal-1",
-            "roadmap_step": "CONFIRMATION",
-            "pending_targets": [
-                {"segment_id": "seg-1", "label": "Dal"},
-                {"segment_id": "seg-2", "label": "Chickpea Curry"},
-            ],
+            "roadmap_step": "INITIAL_QUESTION",
+            "pending_targets": [{"segment_id": "seg-1", "label": "Dal"}],
             "current_target_index": 0,
+            "answers_by_segment": [],
             "interview_messages": [],
         }
 
         first = handlers.current_target_question(state)
         self.assertEqual(first["segment_id"], "seg-1")
+        self.assertEqual(first["roadmap_step"], "INITIAL_QUESTION")
 
         state = handlers.complete_target_question(
             state,
             {
                 "segment_id": "seg-1",
-                "value": {"confirmed": True, "quantity_text": "1 serving"},
+                "roadmap_step": "INITIAL_QUESTION",
+                "name": "Dal Tadka",
+            },
+        )
+        self.assertEqual(state["roadmap_step"], "FOOD_NAME")
+        self.assertEqual(state["current_target_index"], 0)
+
+        state = handlers.complete_target_question(
+            state,
+            {
+                "segment_id": "seg-1",
+                "roadmap_step": "FOOD_NAME",
+                "name": "Dal Tadka",
+            },
+        )
+        self.assertEqual(state["roadmap_step"], "SOURCE_TYPE")
+
+        state = handlers.complete_target_question(
+            state,
+            {
+                "segment_id": "seg-1",
+                "roadmap_step": "SOURCE_TYPE",
+                "source_type": "HOME",
+            },
+        )
+        self.assertEqual(state["roadmap_step"], "PORTION_CONTEXT")
+
+        state = handlers.complete_target_question(
+            state,
+            {
+                "segment_id": "seg-1",
+                "roadmap_step": "PORTION_CONTEXT",
+                "portion_bucket": "SMALL",
+                "quantity_display": "small bowl",
+            },
+        )
+        self.assertEqual(state["roadmap_step"], "CONFIRMATION")
+        self.assertEqual(state["confirmation_items"][0]["source_type"], "HOME")
+        self.assertEqual(state["confirmation_items"][0]["portion_bucket"], "SMALL")
+
+    def test_interview_moves_to_next_target_only_after_portion_context(self) -> None:
+        from bot import handlers
+
+        state = {
+            "meal_id": "meal-1",
+            "roadmap_step": "PORTION_CONTEXT",
+            "pending_targets": [
+                {"segment_id": "seg-1", "label": "Dal"},
+                {"segment_id": "seg-2", "label": "Chickpea Curry"},
+            ],
+            "current_target_index": 0,
+            "answers_by_segment": [
+                {"segment_id": "seg-1", "name": "Dal", "source_type": "HOME"},
+            ],
+            "interview_messages": [],
+        }
+
+        state = handlers.complete_target_question(
+            state,
+            {
+                "segment_id": "seg-1",
+                "roadmap_step": "PORTION_CONTEXT",
+                "portion_bucket": "STANDARD",
+                "quantity_display": "1 bowl",
             },
         )
 
         self.assertEqual(state["current_target_index"], 1)
+        self.assertEqual(state["roadmap_step"], "INITIAL_QUESTION")
         self.assertEqual(state["pending_targets"][state["current_target_index"]]["segment_id"], "seg-2")
 
     def test_free_text_parser_falls_back_before_failing(self) -> None:
@@ -195,6 +258,29 @@ class InterviewConfirmationEditTests(unittest.TestCase):
 
 
 class InterviewPersistencePrepTests(unittest.TestCase):
+    def test_confirmation_items_are_built_from_structured_answers(self) -> None:
+        from app.services import interview_service
+
+        items = interview_service.confirmation_items_from_state(
+            {
+                "pending_targets": [{"segment_id": "seg-1", "label": "Bar"}],
+                "answers_by_segment": [
+                    {
+                        "segment_id": "seg-1",
+                        "name": "Protein Bar",
+                        "source_type": "PACKAGED",
+                        "brand_name": "Acme",
+                        "portion_bucket": "SMALL",
+                        "quantity_display": "1 bar",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(items[0]["name"], "Protein Bar")
+        self.assertEqual(items[0]["brand_name"], "Acme")
+        self.assertEqual(items[0]["portion_bucket"], "SMALL")
+
     def test_grounding_handoff_state_preserves_confirmation_context(self) -> None:
         from app.services import interview_service
 

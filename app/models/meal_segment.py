@@ -5,7 +5,7 @@ from enum import Enum as PyEnum
 from typing import TYPE_CHECKING
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Enum, ForeignKey, JSON, String, Text, func
+from sqlalchemy import Enum, ForeignKey, JSON, String, func
 from sqlalchemy.dialects.postgresql import TIMESTAMP as TIMESTAMPTZ
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,7 +30,9 @@ class MealSegment(Base):
     bounding_box: Mapped[list | None] = mapped_column(JSON, nullable=True)
     cropped_image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-    ai_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_reasoning: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    match_candidates_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reasoning_trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     portion_bucket: Mapped[PortionBucket | None] = mapped_column(
         Enum(PortionBucket, name="portion_bucket", create_type=True),
         nullable=True,

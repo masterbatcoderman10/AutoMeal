@@ -32,7 +32,7 @@ def format_interview_reminder_message(meal_id: str) -> str:
 
 def format_interview_confirmation_message(items: list[dict]) -> str:
     if not items:
-        return "Please confirm this meal before I write it."
+        return "Please confirm this meal before I write it. Reply `confirm` to log it."
     lines = ["Confirm before I log:"]
     for item in items:
         segment_id = item.get("segment_id") or "item"
@@ -40,6 +40,7 @@ def format_interview_confirmation_message(items: list[dict]) -> str:
         quantity = item.get("quantity_display")
         suffix = f" ({quantity})" if quantity else ""
         lines.append(f"{segment_id}: {name}{suffix}")
+    lines.append("Reply `confirm` to log it, or send corrections like `first is paneer, second is lentil soup`.")
     return "\n".join(lines)
 
 

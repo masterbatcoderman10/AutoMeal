@@ -121,6 +121,42 @@ def _confirmation_items_from_state(state: dict) -> list[dict]:
     return items
 
 
+def _update_confirmation_state(state: dict, confirmation_items: list[dict]) -> dict:
+    updated = dict(state)
+    updated["roadmap_step"] = "CONFIRMATION"
+    updated["current_target_index"] = len(updated.get("pending_targets") or [])
+    updated["interview_messages"] = [
+        {"role": "user", "payload": dict(item)}
+        for item in confirmation_items
+    ]
+    return updated
+
+
+async def _finalize_interview_confirmation(*, session, interview: InterviewSession) -> dict | None:
+    meal_result = await session.execute(
+        select(MealLog)
+        .options(selectinload(MealLog.segments))
+        .where(MealLog.id == interview.meal_log_id)
+        .limit(1)
+    )
+    meal = meal_result.scalar_one_or_none()
+    if meal is None:
+        return None
+    state = dict(interview.current_prompt_payload or {})
+    confirmation_items = _confirmation_items_from_state(state)
+    result = await interview_service.finalize_confirmed_interview(
+        session=session,
+        meal=meal,
+        confirmation_items=confirmation_items,
+        segments=list(meal.segments),
+    )
+    return {
+        "meal": meal,
+        "result": result,
+        "confirmation_items": confirmation_items,
+    }
+
+
 async def _handle_pending_fix(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
     pending = context.bot_data.get("pending_fix")
     if not isinstance(pending, dict):
@@ -198,23 +234,9 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             interview = await _load_active_interview(session, chat_id=chat_id, meal_id=meal_id)
             if interview is None:
                 return
-            meal_result = await session.execute(
-                select(MealLog)
-                .options(selectinload(MealLog.segments))
-                .where(MealLog.id == interview.meal_log_id)
-                .limit(1)
-            )
-            meal = meal_result.scalar_one_or_none()
-            if meal is None:
+            finalized = await _finalize_interview_confirmation(session=session, interview=interview)
+            if finalized is None:
                 return
-            state = dict(interview.current_prompt_payload or {})
-            confirmation_items = _confirmation_items_from_state(state)
-            await interview_service.finalize_confirmed_interview(
-                session=session,
-                meal=meal,
-                confirmation_items=confirmation_items,
-                segments=list(meal.segments),
-            )
             interview.is_active = False
             session.add(interview)
             await session.commit()
@@ -247,6 +269,49 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text("Got it. I'll update the meal confirmation.")
                 return
             state = dict(interview.current_prompt_payload or {})
+            if state.get("roadmap_step") == "CONFIRMATION":
+                lowered = text.strip().lower()
+                if lowered == "confirm":
+                    finalized = await _finalize_interview_confirmation(session=session, interview=interview)
+                    if finalized is None:
+                        await update.message.reply_text("I could not find that meal to confirm.")
+                        return
+                    interview.is_active = False
+                    session.add(interview)
+                    await session.commit()
+                    await update.message.reply_text("Meal confirmation saved.")
+                    return
+
+                confirmation_items = _confirmation_items_from_state(state)
+                edits = interview_service.parse_confirmation_bulk_text(
+                    text=text,
+                    confirmation_items=confirmation_items,
+                )
+                if edits.get("applied_bulk"):
+                    updated_confirmation = interview_service.apply_confirmation_edits(
+                        confirmation_items,
+                        edits["updates"],
+                    )
+                    interview.current_prompt_payload = _update_confirmation_state(state, updated_confirmation)
+                    session.add(interview)
+                    session.add(
+                        InterviewMessage(
+                            id=str(uuid.uuid4()),
+                            session_id=interview.id,
+                            role="user",
+                            payload={
+                                "type": "confirmation_edit",
+                                "text": text,
+                                "updates": edits["updates"],
+                            },
+                        )
+                    )
+                    await session.commit()
+                    await update.message.reply_text(interview_service.build_confirmation_message(updated_confirmation))
+                    return
+
+                await update.message.reply_text(format_interview_confirmation_message(confirmation_items))
+                return
             target = interview_service.current_target_question(state)
             answer = interview_service.parse_interview_text(text=text, context=target)
             state = interview_service.complete_target_question(state, answer)

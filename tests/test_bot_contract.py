@@ -166,6 +166,54 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
 
         callback_query.answer.assert_awaited_once_with("Unauthorized chat.", show_alert=True)
 
+    async def test_interview_text_confirm_finishes_confirmation_state(self) -> None:
+        from bot.handlers import interview_text
+
+        interview = SimpleNamespace(
+            id="interview-1",
+            meal_log_id="meal-1",
+            is_active=True,
+            current_prompt_payload={
+                "roadmap_step": "CONFIRMATION",
+                "interview_messages": [
+                    {"payload": {"segment_id": "seg-1", "name": "Dal"}}
+                ],
+            },
+        )
+        meal = SimpleNamespace(id="meal-1", segments=[SimpleNamespace(id="seg-1")])
+        session = AsyncMock()
+        session.add = Mock()
+        session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            message=SimpleNamespace(chat=SimpleNamespace(id="999"), text="confirm", reply_text=reply_text),
+            callback_query=None,
+        )
+        context = SimpleNamespace(bot_data={})
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value={"grounding_required": False})) as finalize,
+        ):
+            await interview_text(update, context)
+
+        finalize.assert_awaited_once()
+        self.assertFalse(interview.is_active)
+        reply_text.assert_awaited_once_with("Meal confirmation saved.")
+        session.commit.assert_awaited_once()
+        engine.dispose.assert_awaited_once()
+
 
 class OpenRouterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_chat_completion_forwards_multimodal_payload_and_extra_body(self) -> None:

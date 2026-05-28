@@ -33,6 +33,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
     if update.message is None:
         return
+    if await _reject_unpinned_update(update):
+        return
 
     await update.message.reply_text(format_start_message())
 
@@ -40,6 +42,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
     if update.message is None:
+        return
+    if await _reject_unpinned_update(update):
         return
 
     await update.message.reply_text(
@@ -49,6 +53,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
+        return
+    if await _reject_unpinned_update(update):
         return
     text = getattr(update.message, "text", "") or "/fix"
     recent_entries = context.bot_data.get("recent_entries", []) if hasattr(context, "bot_data") else []
@@ -76,6 +82,18 @@ def _chat_id_from_update(update: Update) -> str | None:
     elif update.callback_query is not None and update.callback_query.message is not None:
         chat = update.callback_query.message.chat
     return str(getattr(chat, "id", "")) if chat is not None else None
+
+
+async def _reject_unpinned_update(update: Update) -> bool:
+    chat_id = _chat_id_from_update(update)
+    if chat_id is None:
+        return True
+    if chat_id == str(get_settings().TELEGRAM_CHAT_ID):
+        return False
+    callback_query = getattr(update, "callback_query", None)
+    if callback_query is not None:
+        await callback_query.answer("Unauthorized chat.", show_alert=True)
+    return True
 
 
 async def _load_active_interview(session, *, chat_id: str, meal_id: str | None = None):
@@ -159,7 +177,10 @@ async def _handle_pending_fix(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    del context
     if update.callback_query is None:
+        return
+    if await _reject_unpinned_update(update):
         return
     await update.callback_query.answer()
     data = update.callback_query.data or ""
@@ -206,6 +227,8 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
+        return
+    if await _reject_unpinned_update(update):
         return
     text = update.message.text or ""
     if await _handle_pending_fix(update, context, text):

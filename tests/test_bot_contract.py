@@ -120,23 +120,51 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         from bot.messages import format_start_message
 
         reply_text = AsyncMock()
-        update = SimpleNamespace(message=SimpleNamespace(reply_text=reply_text))
+        update = SimpleNamespace(message=SimpleNamespace(chat=SimpleNamespace(id="999"), reply_text=reply_text))
 
-        await start(update, SimpleNamespace())
+        with patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999")):
+            await start(update, SimpleNamespace())
 
         reply_text.assert_awaited_once_with(format_start_message())
+
+    async def test_start_ignores_unpinned_chat(self) -> None:
+        from bot.handlers import start
+
+        reply_text = AsyncMock()
+        update = SimpleNamespace(message=SimpleNamespace(chat=SimpleNamespace(id="111"), reply_text=reply_text))
+
+        with patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999")):
+            await start(update, SimpleNamespace())
+
+        reply_text.assert_not_awaited()
 
     async def test_help_replies_with_shortcut_hint(self) -> None:
         from bot.handlers import help_command
 
         reply_text = AsyncMock()
-        update = SimpleNamespace(message=SimpleNamespace(reply_text=reply_text))
+        update = SimpleNamespace(message=SimpleNamespace(chat=SimpleNamespace(id="999"), reply_text=reply_text))
 
-        await help_command(update, SimpleNamespace())
+        with patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999")):
+            await help_command(update, SimpleNamespace())
 
         reply_text.assert_awaited_once_with(
             "Send a meal photo via the iOS Shortcut. I'll process it and tell you what I found."
         )
+
+    async def test_interview_callback_rejects_unpinned_chat_before_mutation(self) -> None:
+        from bot.handlers import interview_callback
+
+        callback_query = SimpleNamespace(
+            data="confirm:meal-1",
+            answer=AsyncMock(),
+            message=SimpleNamespace(chat=SimpleNamespace(id="111"), reply_text=AsyncMock()),
+        )
+        update = SimpleNamespace(callback_query=callback_query, message=None)
+
+        with patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999")):
+            await interview_callback(update, SimpleNamespace())
+
+        callback_query.answer.assert_awaited_once_with("Unauthorized chat.", show_alert=True)
 
 
 class OpenRouterContractTests(unittest.IsolatedAsyncioTestCase):

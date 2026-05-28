@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.models import MealSegment, MealLog, MealProcessingStatus
+from app.models import InterviewSession, MealSegment, MealLog, MealProcessingStatus
 from app.services.llm_client import get_llm_client
 from app.services import matching_service
 from app.services.image_service import save_segment_crop
@@ -20,15 +21,19 @@ from app.services.vision_service import (
 )
 from app.services import reasoning_service
 from bot.messages import (
-    format_ack_message,
-    format_soft_failure_message,
     CompletionItem,
+    format_ack_message,
+    format_interview_reminder_message,
     format_match_completion_message,
+    format_soft_failure_message,
     format_unresolved_match_message,
 )
 
 logger = logging.getLogger(__name__)
-_poll_sleep = asyncio.sleep
+
+
+async def _poll_sleep(delay: float) -> None:
+    await asyncio.sleep(delay)
 
 
 def _normalize_portion_bucket(value: str | None) -> str:
@@ -91,6 +96,59 @@ async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None
                     except Exception:
                         logger.exception("Error recovering acknowledged meal state")
 
+            await _poll_sleep(interval)
+    finally:
+        await engine.dispose()
+
+
+async def poll_interview_reminders(bot, settings, poll_interval: float | None = None) -> None:
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        pool_pre_ping=True,
+    )
+    session_factory = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    interval = poll_interval or settings.BOT_POLL_INTERVAL
+    delay_seconds = int(getattr(settings, "INTERVIEW_REMINDER_DELAY_SECONDS", 600))
+
+    try:
+        while True:
+            try:
+                async with session_factory() as session:
+                    cutoff = datetime.now(UTC) - timedelta(seconds=delay_seconds)
+                    statement = (
+                        select(InterviewSession)
+                        .where(
+                            InterviewSession.is_active.is_(True),
+                            InterviewSession.last_reminder_at.is_(None),
+                            InterviewSession.updated_at <= cutoff,
+                        )
+                        .order_by(InterviewSession.updated_at.asc())
+                        .limit(1)
+                        .with_for_update(skip_locked=True)
+                    )
+                    result = await session.execute(statement)
+                    interview = result.scalar_one_or_none()
+                    if interview is None:
+                        await _poll_sleep(interval)
+                        continue
+
+                    await bot.send_message(
+                        chat_id=interview.chat_id,
+                        text=format_interview_reminder_message(interview.meal_log_id),
+                    )
+                    interview.last_reminder_at = datetime.now(UTC)
+                    interview.reminder_count = int(interview.reminder_count or 0) + 1
+                    await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error in poll_interview_reminders")
             await _poll_sleep(interval)
     finally:
         await engine.dispose()

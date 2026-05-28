@@ -192,3 +192,42 @@ class InterviewConfirmationEditTests(unittest.TestCase):
         self.assertIn("seg-2", prompt)
         self.assertIn("Chicken Curry", prompt)
         self.assertIn("grilled chicken chunks", prompt)
+
+
+class InterviewPersistencePrepTests(unittest.TestCase):
+    def test_packaged_answer_creates_grounding_prep_resolution(self) -> None:
+        from app.services import interview_service
+
+        resolution = interview_service.final_resolution_from_confirmation(
+            item={
+                "segment_id": "seg-1",
+                "name": "Protein Bar",
+                "source_type": "PACKAGED",
+                "brand_name": "Acme",
+                "quantity_display": "1 bar",
+            },
+        )
+
+        self.assertEqual(resolution.food.canonical_name, "Protein Bar")
+        self.assertEqual(resolution.food.source_type, "PACKAGED")
+        self.assertEqual(resolution.food.brand_name, "Acme")
+        self.assertTrue(resolution.food.needs_grounding)
+        self.assertEqual(resolution.food.llm_reasoning, "NEEDS_GROUNDING")
+        self.assertEqual(resolution.quantity_json["grounding_prep"]["status"], "NEEDS_GROUNDING")
+
+    def test_existing_food_item_id_is_preserved_for_resolution_reuse(self) -> None:
+        from app.services import interview_service
+
+        resolution = interview_service.final_resolution_from_confirmation(
+            item={
+                "segment_id": "seg-2",
+                "food_item_id": "food-123",
+                "name": "Dal",
+                "source_type": "HOME",
+                "portion_bucket": "large",
+            },
+        )
+
+        self.assertEqual(resolution.food.food_item_id, "food-123")
+        self.assertEqual(resolution.portion_bucket, "LARGE")
+        self.assertEqual(resolution.identification_method, "INTERVIEW")

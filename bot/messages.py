@@ -22,8 +22,25 @@ def format_soft_failure_message() -> str:
 def format_unresolved_match_message(meal_id: str) -> str:
     return (
         f"I see your meal (ID: {meal_id[:8]}), but I don't yet recognize it. "
-        "I flagged it for follow-up identification."
+        "I need one quick follow-up before I log it."
     )
+
+
+def format_interview_reminder_message(meal_id: str) -> str:
+    return f"Still need your reply for meal {meal_id[:8]} before I can finish logging it."
+
+
+def format_interview_confirmation_message(items: list[dict]) -> str:
+    if not items:
+        return "Please confirm this meal before I write it."
+    lines = ["Confirm before I log:"]
+    for item in items:
+        segment_id = item.get("segment_id") or "item"
+        name = item.get("name") or "Unknown food"
+        quantity = item.get("quantity_display")
+        suffix = f" ({quantity})" if quantity else ""
+        lines.append(f"{segment_id}: {name}{suffix}")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -151,6 +168,8 @@ __all__ = [
     "CompletionItem",
     "format_ack_message",
     "format_error_message",
+    "format_interview_confirmation_message",
+    "format_interview_reminder_message",
     "format_match_completion_message",
     "format_result_sentence",
     "format_soft_failure_message",

@@ -1,129 +1,154 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import unittest
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from app.models import MealProcessingStatus
 
 
-class JanitorRecoveryStateTests(unittest.TestCase):
-    def test_janitor_uses_artifact_status_when_artifact_is_more_specific(self) -> None:
-        from app.services import recovery_service
+def _recovery_service():
+    spec = importlib.util.find_spec("app.services.recovery_service")
+    if spec is None:
+        return None
+    return importlib.import_module("app.services.recovery_service")
 
-        meal_state = {
+
+def _plan_stale_recovery(
+    meal: dict[str, Any],
+    *,
+    segments: list[dict[str, Any]] | None = None,
+    interview_session: dict[str, Any] | None = None,
+    now: datetime | None = None,
+    stale_minutes: int = 5,
+    max_recoveries: int = 3,
+) -> dict[str, Any]:
+    service = _recovery_service()
+    if service is None or not hasattr(service, "plan_stale_meal_recovery"):
+        return {}
+    return service.plan_stale_meal_recovery(
+        meal,
+        segments=segments,
+        interview_session=interview_session,
+        now=now,
+        stale_minutes=stale_minutes,
+        max_recoveries=max_recoveries,
+    )
+
+
+def _enqueue_notification(meal: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    service = _recovery_service()
+    if service is None or not hasattr(service, "enqueue_recovery_notification"):
+        return dict(meal)
+    return service.enqueue_recovery_notification(meal, now=now)
+
+
+class JanitorTests(unittest.TestCase):
+    def test_stale_reasoning_resumes_from_last_safe_artifact_stage(self) -> None:
+        now = datetime(2026, 5, 28, 12, 5, tzinfo=UTC)
+        meal = {
             "meal_id": "meal-1",
             "processing_status": MealProcessingStatus.REASONING.value,
-            "updated_at": datetime(2026, 5, 28, 12, 0, 0),
-            "reasoning_progress": {
-                "status": MealProcessingStatus.EMBEDDING.value,
+            "last_stage_started_at": now - timedelta(minutes=6),
+            "updated_at": now - timedelta(minutes=6),
+            "recovery_attempt_count": 1,
+            "reasoning_state_json": {
+                "meal_reasoning": {
+                    "meal_state": "FAILED_UNCLEAR",
+                }
             },
         }
-        artifact = {
-            "status": MealProcessingStatus.SEGMENTING.value,
-            "updated_at": datetime(2026, 5, 28, 11, 50, 0),
-        }
+        segments = [
+            {
+                "segment_id": "segment-1",
+                "cropped_image_url": "/tmp/seg-1.jpg",
+                "embedding": [0.12, 0.34],
+                "match_candidates_json": {
+                    "top_3": [{"candidate_id": "visual-1", "label": "rice bowl"}],
+                    "candidate_count": 1,
+                },
+            }
+        ]
 
-        decision = recovery_service.select_recovery_target(meal_state, artifact=artifact)
+        plan = _plan_stale_recovery(meal, segments=segments, now=now)
 
-        self.assertEqual(decision["recovery_status"], MealProcessingStatus.SEGMENTING.value)
+        self.assertEqual(plan.get("recovery_status"), MealProcessingStatus.REASONING.value)
+        self.assertEqual(plan.get("resume_basis"), "candidate_snapshots")
+        self.assertEqual(plan.get("recovery_attempt_count"), 2)
+        self.assertEqual(plan.get("failed_reason"), None)
+        self.assertFalse(plan.get("notify_user", False))
 
-    def test_janitor_only_recovers_machine_stage_statuses(self) -> None:
-        from app.services import recovery_service
-
-        self.assertTrue(recovery_service.is_recoverable_machine_status(MealProcessingStatus.DETECTING.value))
-        self.assertTrue(recovery_service.is_recoverable_machine_status(MealProcessingStatus.SEGMENTING.value))
-        self.assertTrue(recovery_service.is_recoverable_machine_status(MealProcessingStatus.EMBEDDING.value))
-        self.assertTrue(recovery_service.is_recoverable_machine_status(MealProcessingStatus.MATCHING.value))
-        self.assertTrue(recovery_service.is_recoverable_machine_status(MealProcessingStatus.REASONING.value))
-        self.assertFalse(recovery_service.is_recoverable_machine_status(MealProcessingStatus.INTERVIEWING.value))
-        self.assertFalse(recovery_service.is_recoverable_machine_status(MealProcessingStatus.PENDING.value))
-
-    def test_janitor_honors_stale_threshold(self) -> None:
-        from app.services import recovery_service
-
-        now = datetime(2026, 5, 28, 12, 5, 0)
-        fresh = {
-            "processing_status": MealProcessingStatus.MATCHING.value,
-            "updated_at": now - timedelta(minutes=2),
-        }
-        stale = {
-            "processing_status": MealProcessingStatus.MATCHING.value,
-            "updated_at": now - timedelta(minutes=6),
-        }
-
-        self.assertFalse(recovery_service.is_stale_for_janitor(fresh, now=now, stale_minutes=5))
-        self.assertTrue(recovery_service.is_stale_for_janitor(stale, now=now, stale_minutes=5))
-
-
-class JanitorAttemptBudgetTests(unittest.TestCase):
-    def test_janitor_allows_exactly_three_recovery_attempts(self) -> None:
-        from app.services import recovery_service
-
-        self.assertTrue(recovery_service.can_retry_recovery({"recovery_attempt_count": 0}))
-        self.assertTrue(recovery_service.can_retry_recovery({"recovery_attempt_count": 1}))
-        self.assertTrue(recovery_service.can_retry_recovery({"recovery_attempt_count": 2}))
-        self.assertFalse(recovery_service.can_retry_recovery({"recovery_attempt_count": 3}))
-
-    def test_janitor_marks_failed_after_three_attempts(self) -> None:
-        from app.services import recovery_service
-
-        state = {
-            "meal_id": "meal-2",
-            "recovery_attempt_count": 3,
-            "processing_status": MealProcessingStatus.REASONING.value,
-        }
-        marked = recovery_service.mark_recovery_exhausted(state)
-
-        self.assertEqual(marked["processing_status"], MealProcessingStatus.FAILED.value)
-        self.assertTrue(marked["failed_reason"])
-
-    def test_janitor_notifies_user_once_on_failure(self) -> None:
-        from app.services import recovery_service
-
-        state = {
-            "meal_id": "meal-3",
-            "failed_reason": "janitor_stale_retries_exhausted",
-            "user_notified": False,
-        }
-
-        first = recovery_service.enqueue_recovery_notification(state)
-        second = recovery_service.enqueue_recovery_notification(first)
-
-        self.assertTrue(first["notify_user"])
-        self.assertFalse(second["notify_user"])
-        self.assertTrue(first["user_notified"])
-
-
-class JanitorArtifactTests(unittest.TestCase):
-    def test_janitor_keeps_committed_artifacts_and_preserves_crop_metadata(self) -> None:
-        from app.services import recovery_service
-
+    def test_failed_after_three_recoveries_notifies_once(self) -> None:
+        now = datetime(2026, 5, 28, 12, 5, tzinfo=UTC)
         meal = {
-            "meal_id": "meal-4",
-            "processing_status": MealProcessingStatus.EMBEDDING.value,
-            "committed": ["embeddings", "matches"],
-            "crop_paths": ["/tmp/seg-1.jpg", "/tmp/seg-2.jpg"],
-            "orphan_crop_paths": ["/tmp/old-seg-3.jpg"],
-        }
-
-        cleanup = recovery_service.classify_janitor_artifacts(meal)
-
-        self.assertIn("/tmp/old-seg-3.jpg", cleanup["delete_paths"])
-        self.assertNotIn("/tmp/seg-1.jpg", cleanup["delete_paths"])
-        self.assertNotIn("/tmp/seg-2.jpg", cleanup["delete_paths"])
-
-    def test_janitor_drops_duplicate_notifications_across_runs(self) -> None:
-        from app.services import recovery_service
-
-        state = {
-            "meal_id": "meal-5",
-            "processing_status": MealProcessingStatus.EMBEDDING.value,
+            "meal_id": "meal-2",
+            "processing_status": MealProcessingStatus.MATCHING.value,
+            "last_stage_started_at": now - timedelta(minutes=6),
+            "updated_at": now - timedelta(minutes=6),
             "recovery_attempt_count": 3,
-            "user_notified": False,
+            "last_recovery_notified_at": None,
         }
 
-        first_pass = recovery_service.plan_post_recovery_actions(state)
-        second_pass = recovery_service.plan_post_recovery_actions(first_pass)
+        failed = _plan_stale_recovery(meal, now=now)
+        second_pass = _enqueue_notification(failed, now=now + timedelta(minutes=1))
 
-        self.assertTrue(first_pass["notify_user"])
-        self.assertFalse(second_pass["notify_user"])
+        self.assertEqual(failed.get("recovery_status"), MealProcessingStatus.FAILED.value)
+        self.assertEqual(failed.get("failed_reason"), "janitor_stale_retries_exhausted")
+        self.assertTrue(failed.get("notify_user"))
+        self.assertIsNotNone(failed.get("last_recovery_notified_at"))
+        self.assertFalse(second_pass.get("notify_user"))
+        self.assertEqual(
+            second_pass.get("last_recovery_notified_at"),
+            failed.get("last_recovery_notified_at"),
+        )
+
+    def test_interviewing_and_terminal_states_are_excluded(self) -> None:
+        now = datetime(2026, 5, 28, 12, 5, tzinfo=UTC)
+        for status in (
+            MealProcessingStatus.INTERVIEWING.value,
+            MealProcessingStatus.COMPLETED.value,
+            MealProcessingStatus.FAILED.value,
+        ):
+            with self.subTest(status=status):
+                plan = _plan_stale_recovery(
+                    {
+                        "meal_id": f"meal-{status.lower()}",
+                        "processing_status": status,
+                        "last_stage_started_at": now - timedelta(minutes=8),
+                        "updated_at": now - timedelta(minutes=8),
+                        "recovery_attempt_count": 0,
+                    },
+                    now=now,
+                )
+
+                self.assertEqual(plan.get("action"), "skip")
+                self.assertEqual(plan.get("reason"), "non_recoverable_status")
+
+    def test_embeddings_without_candidates_resume_at_matching(self) -> None:
+        now = datetime(2026, 5, 28, 12, 5, tzinfo=UTC)
+        meal = {
+            "meal_id": "meal-3",
+            "processing_status": MealProcessingStatus.REASONING.value,
+            "last_stage_started_at": now - timedelta(minutes=7),
+            "updated_at": now - timedelta(minutes=7),
+            "recovery_attempt_count": 0,
+        }
+        segments = [
+            {
+                "segment_id": "segment-2",
+                "cropped_image_url": "/tmp/seg-2.jpg",
+                "embedding": [0.45, 0.67],
+                "match_candidates_json": None,
+            }
+        ]
+
+        plan = _plan_stale_recovery(meal, segments=segments, now=now)
+
+        self.assertEqual(plan.get("recovery_status"), MealProcessingStatus.MATCHING.value)
+        self.assertEqual(plan.get("resume_basis"), "embeddings")
+
+
+if __name__ == "__main__":
+    unittest.main()

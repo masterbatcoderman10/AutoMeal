@@ -12,20 +12,18 @@ Lowest-friction meal logging for one person: snap a photo, get logged nutrition 
 
 ### Validated
 
-(None yet — ship to validate)
+- [x] REASON-01..04, PIPELINE-01, INTERVIEW-01..06, INFRA-04 — Validated in Phase 04: Reason, Interview & Learning Loop.
 
 ### Active
 
 - [ ] iOS Shortcut posts the last-taken photo to an authenticated endpoint and receives an immediate ack
 - [ ] Pipeline runs detect → segment → embed → pgvector match for every meal photo
 - [ ] Self-improving food library: every confirmed segment writes a `FoodVisual` so future matches hit similarity threshold
-- [ ] LLM stages self-report confidence; below threshold flags a segment for Telegram interview
-- [ ] Reasoning and post-interview stages can call SearXNG and Firecrawl tools to ground branded/restaurant items
-- [ ] Structured Telegram interview captures food name, source type, restaurant/brand, portion context, confirmation
 - [ ] Bot pushes a per-meal result message once a `MealLog` is fully resolved
 - [ ] Daily summary message at a configurable time (default 03:00 local) covering the previous day
 - [ ] On-demand slash commands: `/today`, `/week`, `/summary`
 - [ ] User can override an identification post-hoc (sets `USER_CORRECTED`)
+- [ ] SearXNG + Firecrawl grounding used in uncertain cases during reasoning and post-interview re-grounding
 - [ ] Entire stack runs as a single `docker-compose` on the Mac mini and is portable to a VM
 - [ ] All LLM calls go through OpenRouter via the OpenAI SDK with a swapped `base_url`
 
@@ -48,6 +46,7 @@ Lowest-friction meal logging for one person: snap a photo, get logged nutrition 
 - **Hosting:** Mac mini for v1; docker-compose-clean so it lifts to any VM later.
 - **LLM gateway:** OpenRouter is the single inference vendor; we use the OpenAI SDK and only change `base_url`. Model assignments per stage are pinned as Key Decisions below.
 - **Grounding stack:** local SearXNG (search) + local Firecrawl (fetch & extract) exposed to LLMs as tools — used agentically when the model isn't confident about a brand or restaurant menu item.
+- **Phase status:** Phase 04 (Reason, Interview & Learning Loop) is complete with all listed requirements marked validated; Phase 05 is ready to discuss and plan next.
 
 ## Constraints
 
@@ -95,4 +94,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-24 after initialization*
+*Last updated: 2026-05-28*

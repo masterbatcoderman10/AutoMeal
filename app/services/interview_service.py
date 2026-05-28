@@ -170,7 +170,7 @@ def build_confirmation_message(confirmation_items: list[Mapping[str, Any]]) -> s
             lines.append(f"{segment_id}: {previous} -> {name}")
         else:
             lines.append(f"{segment_id}: {name}")
-    lines.append("Confirm or edit before I write this meal.")
+    lines.append("Confirm or edit before I log this.")
     return "\n".join(lines)
 
 
@@ -179,7 +179,11 @@ def build_all_wrong_prompt(*, segment: Mapping[str, Any], evidence: str | None =
     label = segment.get("label") or "unknown item"
     prefix = f"{segment_id}: I had this as {label}."
     if evidence:
-        prefix += f" I see {evidence}."
+        evidence_text = str(evidence).strip()
+        if evidence_text.lower().startswith(("i see", "i only see")):
+            prefix += f" {evidence_text}."
+        else:
+            prefix += f" I see {evidence_text}."
     return f"{prefix} What should I call it instead?"
 
 

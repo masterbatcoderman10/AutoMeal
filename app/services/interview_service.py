@@ -302,6 +302,30 @@ def final_resolution_from_confirmation(
     )
 
 
+def build_grounding_reasoning_state(
+    *,
+    confirmation_items: list[Mapping[str, Any]],
+    status: str,
+    prior_state: Mapping[str, Any] | None = None,
+    updated_at: datetime | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    state = dict(prior_state or {})
+    state.update(
+        {
+            "completed_by": "interview_service",
+            "grounding_required": True,
+            "post_interview_grounding": True,
+            "grounding_status": status,
+            "confirmation_items": [dict(item) for item in confirmation_items],
+            "updated_at": (updated_at or datetime.now(UTC)).isoformat(),
+        }
+    )
+    if extra:
+        state.update({key: value for key, value in extra.items() if value is not None})
+    return state
+
+
 async def finalize_confirmed_interview(
     *,
     session,
@@ -321,13 +345,11 @@ async def finalize_confirmed_interview(
     ]
     if any(resolution.food.needs_grounding for resolution in final_segments):
         meal.processing_status = MealProcessingStatus.INTERVIEWING
-        meal.reasoning_state_json = {
-            "completed_by": "interview_service",
-            "grounding_required": True,
-            "grounding_status": "PENDING_HANDOFF",
-            "confirmation_items": [dict(item) for item in confirmation_items],
-            "updated_at": datetime.now(UTC).isoformat(),
-        }
+        meal.reasoning_state_json = build_grounding_reasoning_state(
+            confirmation_items=confirmation_items,
+            status="PENDING_HANDOFF",
+            extra={"handoff_target": "poll_post_interview_grounding"},
+        )
         if hasattr(meal, "last_stage_started_at"):
             meal.last_stage_started_at = None
         session.add(meal)
@@ -402,6 +424,7 @@ __all__ = [
     "build_all_wrong_prompt",
     "build_best_effort_closeout",
     "build_confirmation_message",
+    "build_grounding_reasoning_state",
     "complete_target_question",
     "current_target_question",
     "final_resolution_from_confirmation",

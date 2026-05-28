@@ -195,6 +195,28 @@ class InterviewConfirmationEditTests(unittest.TestCase):
 
 
 class InterviewPersistencePrepTests(unittest.TestCase):
+    def test_grounding_handoff_state_preserves_confirmation_context(self) -> None:
+        from app.services import interview_service
+
+        state = interview_service.build_grounding_reasoning_state(
+            confirmation_items=[
+                {
+                    "segment_id": "seg-1",
+                    "name": "Protein Bar",
+                    "source_type": "PACKAGED",
+                    "brand_name": "Acme",
+                }
+            ],
+            status="PENDING_HANDOFF",
+            prior_state={"existing": "keep"},
+        )
+
+        self.assertEqual(state["existing"], "keep")
+        self.assertTrue(state["grounding_required"])
+        self.assertTrue(state["post_interview_grounding"])
+        self.assertEqual(state["grounding_status"], "PENDING_HANDOFF")
+        self.assertEqual(state["confirmation_items"][0]["brand_name"], "Acme")
+
     def test_packaged_answer_creates_grounding_prep_resolution(self) -> None:
         from app.services import interview_service
 

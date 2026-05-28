@@ -197,6 +197,8 @@ def _mark_grounding_pending(interview: InterviewSession) -> None:
     payload = dict(interview.current_prompt_payload or {})
     payload["roadmap_step"] = "GROUNDING_PENDING"
     payload["grounding_handoff_pending"] = True
+    payload["grounding_required"] = True
+    payload["grounding_status"] = "PENDING_HANDOFF"
     interview.current_prompt_payload = payload
     interview.state_key = "GROUNDING_PENDING"
     interview.is_active = True

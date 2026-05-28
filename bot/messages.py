@@ -32,6 +32,7 @@ class CompletionItem:
     portion_bucket: str
     identification_method: str
     is_verified: bool
+    quantity_label: str | None = None
     calories: float | None = None
     protein_g: float | None = None
     carbs_g: float | None = None
@@ -135,6 +136,7 @@ def format_match_completion_message(items: list[CompletionItem]) -> str:
         lines.append(
             f"{item.food_name} | portion={_normalize_portion(item.portion_bucket)} | "
             f"method={item.identification_method} | verified={str(item.is_verified).lower()}"
+            + (f" | qty={item.quantity_label}" if item.quantity_label else "")
         )
         lines.append(_format_item_nutrition(item))
 

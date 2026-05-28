@@ -231,3 +231,106 @@ class SmokeSeedDemoTests(unittest.IsolatedAsyncioTestCase):
             item for item in fake_session.added if isinstance(item, smoke.FoodVisual)
         )
         self.assertEqual(food_visual.cropped_image_url, str(sample_path))
+
+
+class SmokeReasoningProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_reasoning_probe_reuses_matching_and_reasoning_services(self) -> None:
+        class FakeEngine:
+            async def dispose(self) -> None:
+                return None
+
+        class FakeSession:
+            async def __aenter__(self) -> "FakeSession":
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            sample_path = tmp_path / "sample_images" / "IMG_4583.HEIC"
+            sample_path.parent.mkdir(parents=True, exist_ok=True)
+            sample_path.write_bytes(b"whole-photo")
+
+            args = SimpleNamespace(
+                sample=str(sample_path),
+                database_url="postgresql+asyncpg://example",
+            )
+            fake_session = FakeSession()
+            llm_client = object()
+            candidate_payloads = [
+                {
+                    "candidate_id": f"candidate-{idx}",
+                    "label": "rice and curry",
+                    "identity_confidence": 0.96 - (idx * 0.05),
+                    "quantity_confidence": 0.86,
+                    "match_consistency_confidence": 0.9,
+                    "visual_evidence": ["stored visual candidate"],
+                    "missing_evidence": [],
+                    "specificity": "high",
+                    "nutrition_relevance": "medium",
+                    "source": "vector_match",
+                    "decision_rationale": "stable match",
+                    "nutrition_impact": 0.1,
+                }
+                for idx in range(3)
+            ]
+            match_result = smoke.matching_service.SegmentMatchResult(
+                food_visual_id="visual-1",
+                food_item_id="food-1",
+                similarity=0.96,
+                food_visual=None,
+                query_embedding=[0.1] * smoke.matching_service.EMBEDDING_DIMENSION,
+                is_match=True,
+                is_below_threshold=False,
+                candidate_payloads=candidate_payloads,
+            )
+
+            with (
+                patch.object(smoke, "create_async_engine", return_value=FakeEngine()),
+                patch.object(smoke, "async_sessionmaker", return_value=lambda: fake_session),
+                patch.object(
+                    smoke,
+                    "get_settings",
+                    return_value=SimpleNamespace(
+                        DATABASE_URL="postgresql+asyncpg://example",
+                        REASONING_MODEL="google/gemini-3-flash-preview",
+                    ),
+                ),
+                patch.object(
+                    smoke.matching_service,
+                    "match_segment_against_visual_corpus",
+                    AsyncMock(return_value=match_result),
+                ) as match_segment,
+                patch.object(
+                    smoke.reasoning_service,
+                    "run_reasoning_request",
+                    AsyncMock(
+                        return_value=(
+                            {
+                                "action": "AUTO_CONFIRM",
+                                "meal_state": "READY_TO_WRITE",
+                                "gate_reason": "",
+                                "decision_rationale": "Auto-confirm pass",
+                                "trace_id": "trace-123",
+                                "top_3": candidate_payloads,
+                            },
+                            {"cached_tokens": 42, "trace_id": "trace-123"},
+                        )
+                    ),
+                ) as run_reasoning,
+            ):
+                report = await smoke._run_reasoning_probe(args, llm_client=llm_client)
+
+        match_segment.assert_awaited_once()
+        self.assertEqual(match_segment.await_args.kwargs["llm_client"], llm_client)
+        self.assertEqual(
+            match_segment.await_args.kwargs["segment"].cropped_image_url,
+            str(sample_path.resolve()),
+        )
+        run_reasoning.assert_awaited_once()
+        self.assertEqual(run_reasoning.await_args.kwargs["llm_client"], llm_client)
+        self.assertEqual(report["meal_state"], "READY_TO_WRITE")
+        self.assertTrue(report["gate_auto_confirmed"])
+        self.assertEqual(report["cached_tokens"], 42)
+        self.assertEqual(report["match"]["candidate_count"], 3)

@@ -15,7 +15,7 @@ class MatchingThresholdTests(unittest.IsolatedAsyncioTestCase):
         )
         food_visual = SimpleNamespace(id="fv-1", food_item_id="item-1")
         session = AsyncMock()
-        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.15)))
+        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.10)))
 
         result = await matching_service.match_segment_with_cached_embedding(
             segment=segment,
@@ -37,7 +37,7 @@ class MatchingThresholdTests(unittest.IsolatedAsyncioTestCase):
         )
         food_visual = SimpleNamespace(id="fv-1", food_item_id="item-1")
         session = AsyncMock()
-        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.1501)))
+        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.1001)))
 
         result = await matching_service.match_segment_with_cached_embedding(
             segment=segment,

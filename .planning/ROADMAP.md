@@ -107,7 +107,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 - [ ] `04-04-PLAN.md` — shared runtime interfaces, editable taxonomy, Phase 4 config keys, and optional Langfuse tracing wrapper
 - [x] `04-05-PLAN.md` — meal-level reasoning gate, top-3 trace persistence, and bounded parallel auto-confirm slice
 - [x] `04-06-PLAN.md` — Telegram interview, confirmation edit loops, reminder, and minimal grounding-prep slice
-- [ ] `04-07-PLAN.md` — `/fix` correction, scoped invalidation, and correction history slice
+- [x] `04-07-PLAN.md` — `/fix` correction, scoped invalidation, and correction history slice
 - [ ] `04-08-PLAN.md` — APScheduler janitor recovery, duplicate-notify suppression, and crash smoke slice
 
 **Phase note**: Research flag from SUMMARY.md — confidence calibration prompt patterns and multi-signal gating for Gemini 3 Flash are sparsely documented. Plan this phase with a mini-research pass before writing the confidence gate. INTERVIEW-03 includes a post-interview re-grounding pass with tools (SearXNG + Firecrawl) for PACKAGED/RESTAURANT items — tool infrastructure must be stubbed or minimally wired before this phase completes; full tool loop ships in Phase 5. Observability work such as Langfuse tracing and persisted per-stage timing metrics remains deferred to v2 OPS-02.

@@ -22,6 +22,11 @@ class FoodVisual(Base):
     cropped_image_url: Mapped[str] = mapped_column(String(512), nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(1536), nullable=False)
     is_invalidated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    invalidated_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMPTZ(timezone=True),
+        nullable=True,
+    )
+    invalidation_reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ(timezone=True),
         nullable=False,

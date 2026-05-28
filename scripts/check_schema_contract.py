@@ -6,7 +6,8 @@ import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from sqlalchemy import Boolean, Enum, String
+from sqlalchemy import Boolean, Enum, JSON, Integer, String
+from sqlalchemy.dialects.postgresql import TIMESTAMP as TIMESTAMPTZ
 
 from app.config import Settings
 from app.models import (
@@ -70,15 +71,27 @@ def assert_model_contract() -> None:
     assert "ix_meal_logs_image_hash_created" in {
         index.name for index in meal_logs.indexes
     }
+    assert isinstance(meal_logs.c.reasoning_state_json.type, JSON)
+    assert isinstance(meal_logs.c.last_stage_started_at.type, TIMESTAMPTZ)
+    assert isinstance(meal_logs.c.last_recovery_notified_at.type, TIMESTAMPTZ)
+    assert isinstance(meal_logs.c.recovery_attempt_count.type, Integer)
+    assert meal_logs.c.recovery_attempt_count.default is not None
 
     meal_segments = MealSegment.__table__
     assert getattr(meal_segments.c.embedding.type, "dim", None) == 1536
     assert isinstance(meal_segments.c.portion_bucket.type, Enum)
+    assert isinstance(meal_segments.c.ai_reasoning.type, JSON)
+    assert isinstance(meal_segments.c.match_candidates_json.type, JSON)
+    assert isinstance(meal_segments.c.reasoning_trace_id.type, String)
+    assert meal_segments.c.reasoning_trace_id.type.length == 64
     assert "quantity_multiplier" not in meal_segments.c
 
     food_visuals = FoodVisual.__table__
     assert getattr(food_visuals.c.embedding.type, "dim", None) == 1536
     assert isinstance(food_visuals.c.is_invalidated.type, Boolean)
+    assert isinstance(food_visuals.c.invalidated_at.type, TIMESTAMPTZ)
+    assert isinstance(food_visuals.c.invalidation_reason.type, String)
+    assert food_visuals.c.invalidation_reason.type.length == 1024
     hnsw_index = next(
         index
         for index in food_visuals.indexes
@@ -97,35 +110,61 @@ def assert_model_contract() -> None:
         "diary_entries",
     ):
         assert_timestamp("created_at", table_name)
+    assert isinstance(Base.metadata.tables["diary_entries"].c.quantity_json.type, JSON)
+    assert isinstance(Base.metadata.tables["diary_entries"].c.quantity_display.type, String)
+    assert Base.metadata.tables["diary_entries"].c.quantity_display.type.length == 128
     assert_timestamp("updated_at", "meal_logs")
     assert_timestamp("updated_at", "food_items")
 
 
 def assert_migration_contract() -> None:
-    migration_path = Path("migrations/versions/001_initial_schema.py")
-    text = migration_path.read_text()
+    initial_migration = Path("migrations/versions/001_initial_schema.py").read_text()
+    phase4_migration = Path(
+        "migrations/versions/002_phase4_state_surfaces.py"
+    ).read_text()
 
-    extension_pos = text.index("CREATE EXTENSION IF NOT EXISTS vector")
+    extension_pos = initial_migration.index("CREATE EXTENSION IF NOT EXISTS vector")
     vector_positions = [
-        pos for pos in (text.find("Vector(1536)"), text.find("vector(1536)")) if pos >= 0
+        pos
+        for pos in (
+            initial_migration.find("Vector(1536)"),
+            initial_migration.find("vector(1536)"),
+        )
+        if pos >= 0
     ]
     assert vector_positions, "migration must declare vector(1536)"
     assert extension_pos < min(vector_positions)
-    assert "FAILED" in text
-    assert "USING hnsw" in text
-    assert "USING ivfflat" not in text.lower()
-    assert "m=16" in text
-    assert "ef_construction=64" in text
-    assert "portion_bucket" in text
-    assert "image_hash" in text
-    assert "is_invalidated" in text
-    def create_table_position(table_name: str) -> int:
+    assert "FAILED" in initial_migration
+    assert "USING hnsw" in initial_migration
+    assert "USING ivfflat" not in initial_migration.lower()
+    assert "m=16" in initial_migration
+    assert "ef_construction=64" in initial_migration
+    assert "portion_bucket" in initial_migration
+    assert "image_hash" in initial_migration
+    assert "is_invalidated" in initial_migration
+
+    assert "reasoning_state_json" in phase4_migration
+    assert "last_stage_started_at" in phase4_migration
+    assert "recovery_attempt_count" in phase4_migration
+    assert "last_recovery_notified_at" in phase4_migration
+    assert "match_candidates_json" in phase4_migration
+    assert "reasoning_trace_id" in phase4_migration
+    assert "ai_reasoning" in phase4_migration and "alter_column" in phase4_migration
+    assert "quantity_json" in phase4_migration
+    assert "quantity_display" in phase4_migration
+    assert "invalidated_at" in phase4_migration
+    assert "invalidation_reason" in phase4_migration
+    def create_table_position(text: str, table_name: str) -> int:
         match = re.search(rf"op\.create_table\(\s*[\"']{table_name}[\"']", text)
         assert match is not None, f"missing create_table for {table_name}"
         return match.start()
 
-    assert create_table_position("food_items") < create_table_position("food_visuals")
-    assert create_table_position("meal_logs") < create_table_position("meal_segments")
+    assert create_table_position(initial_migration, "food_items") < create_table_position(
+        initial_migration, "food_visuals"
+    )
+    assert create_table_position(initial_migration, "meal_logs") < create_table_position(
+        initial_migration, "meal_segments"
+    )
 
 
 def main() -> None:

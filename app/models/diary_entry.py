@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, ForeignKey, String, func
+from sqlalchemy import Boolean, JSON, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import TIMESTAMP as TIMESTAMPTZ
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -28,6 +28,8 @@ class DiaryEntry(Base):
     portion_bucket: Mapped[str] = mapped_column(String(32), nullable=False)
     identification_method: Mapped[str] = mapped_column(String(32), nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    quantity_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    quantity_display: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ(timezone=True),
         nullable=False,

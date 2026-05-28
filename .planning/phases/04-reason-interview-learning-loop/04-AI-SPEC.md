@@ -128,7 +128,7 @@ Phase 4 is not a generic autonomous-agent product. It is a bounded, stateful mul
 
 ### Installation
 ```bash
-uv add "openai>=1.55,<2" "pydantic>=2.9,<3" "httpx>=0.27,<1" "tenacity>=8,<10" "python-telegram-bot>=22.7,<23" "langfuse>=3,<4"
+uv add "openai>=1.55,<2" "pydantic>=2.9,<3" "httpx>=0.27,<1" "tenacity>=8,<10" "python-telegram-bot>=22.7,<23" "langfuse==4.7.0"
 ```
 
 ### Core Imports
@@ -487,7 +487,7 @@ Langfuse is the tracing default for Phase 4 because the phase context explicitly
 
 **Setup:**
 ```bash
-uv add "langfuse>=3,<4"
+uv add "langfuse==4.7.0"
 npm install --save-dev promptfoo
 ```
 

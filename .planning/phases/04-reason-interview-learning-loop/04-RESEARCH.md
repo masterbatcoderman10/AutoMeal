@@ -135,7 +135,7 @@
 | PIPELINE-01 | Segments continue independently with bounded async parallelism and meal-level completion gating. [VERIFIED: codebase grep] | Summary, Architecture Patterns Pattern 1, Environment Availability, Common Pitfalls 2 and 4. [VERIFIED: codebase grep] [ASSUMED] |
 | INTERVIEW-01 | Low-confidence items start a Telegram interview session. [VERIFIED: codebase grep] | Summary, Standard Stack, Architecture Patterns Pattern 2, Code Examples 2. [CITED: https://docs.python-telegram-bot.org/en/v22.7/telegram.ext.conversationhandler.html] [CITED: https://docs.python-telegram-bot.org/en/stable/telegram.ext.basepersistence.html] |
 | INTERVIEW-02 | Interview follows the structured backbone flow. [VERIFIED: codebase grep] | Summary, Architecture Patterns Pattern 2, Code Examples 2, Common Pitfalls 3. [VERIFIED: codebase grep] |
-| INTERVIEW-03 | Interview answers create/update `FoodItem`; packaged/restaurant answers support minimal re-grounding preparation. [VERIFIED: codebase grep] | Summary, Architecture Patterns Pattern 2, Open Questions 2, Security Domain. [VERIFIED: codebase grep] [CITED: https://openrouter.ai/docs/guides/features/tool-calling] [ASSUMED] |
+| INTERVIEW-03 | Interview answers create/update `FoodItem`; packaged/restaurant answers support minimal re-grounding preparation. [VERIFIED: codebase grep] | Summary, Architecture Patterns Pattern 2, Resolved Questions 2, Security Domain. [VERIFIED: codebase grep] [CITED: https://openrouter.ai/docs/guides/features/tool-calling] [ASSUMED] |
 | INTERVIEW-04 | Best-effort unresolved post-interview writes are allowed; no infinite loop. [VERIFIED: codebase grep] | Summary, Common Pitfalls 5, Validation Architecture. [VERIFIED: codebase grep] [ASSUMED] |
 | INTERVIEW-05 | User can override an existing identification. [VERIFIED: codebase grep] | Summary, Architecture Patterns Pattern 3, Common Pitfalls 5, Security Domain. [VERIFIED: codebase grep] |
 | INTERVIEW-06 | `USER_CORRECTED` invalidates only the offending `FoodVisual` and writes a corrected one. [VERIFIED: codebase grep] | Summary, Architecture Patterns Pattern 3, Common Pitfalls 5, Security Domain. [VERIFIED: codebase grep] |
@@ -160,7 +160,7 @@ The architecture should stay aligned with the existing worker pattern: per-segme
 
 The sparsest documentation area is the multi-signal confidence gate. Current official docs support structured outputs, multi-image prompts, and tool wiring, but they do not prescribe a nutrition-specific escalation formula for Gemini 3.5 Flash. [CITED: https://openrouter.ai/docs/guides/features/structured-outputs] [CITED: https://openrouter.ai/docs/guides/features/tool-calling] [CITED: https://ai.google.dev/gemini-api/docs/image-understanding] The safest planning stance is to make the gate deterministic and inspectable: compare vector similarity, candidate margin, missing evidence, and nutrition-impact uncertainty explicitly instead of trusting the LLM’s self-confidence field. [VERIFIED: codebase grep] [ASSUMED]
 
-**Primary recommendation:** Plan Phase 4 as four tightly-coupled waves: schema and state surfaces, meal-level reasoning plus gate, Telegram interview and `/fix`, then janitor and optional Langfuse tracing. [VERIFIED: codebase grep] [ASSUMED]
+**Primary recommendation:** Plan Phase 4 as six tightly-coupled waves: Wave 0 validation scaffolding, schema/state surfaces, shared runtime interfaces, meal-level reasoning, Telegram interview, then `/fix` plus janitor recovery. [VERIFIED: codebase grep] [ASSUMED]
 
 ## Architectural Responsibility Map
 
@@ -538,24 +538,24 @@ scheduler.add_job(
 | A3 | PTB should persist only minimal conversation routing state while domain truth lives in Postgres. | Architecture Patterns Pattern 2 | A richer PTB persistence implementation might be chosen instead, affecting scope and complexity. |
 | A4 | The janitor job should use `coalesce=True`, `max_instances=1`, and `misfire_grace_time=300` as the practical Phase 4 defaults. | Architecture Patterns Pattern 4, Common Pitfalls 4 | Different deployment behavior could require tighter or looser scheduling semantics. |
 | A5 | Gemini prompt caching for `google/gemini-3.5-flash` should be treated as opportunistic until live-tested. | Summary, Common Pitfalls 6 | If the model reliably caches in practice, the planner may be leaving cost savings unused; if it does not, this recommendation prevents a brittle dependency. |
-| A6 | The optional Langfuse install should be `langfuse==4.7.0` if tracing is enabled now. | Standard Stack, Package Legitimacy Audit | If the team prefers the 3.x line from older planning artifacts, a pin decision is still needed before install. |
+| A6 | The optional Langfuse install is reconciled on `langfuse==4.7.0` if tracing is enabled now. | Standard Stack, Package Legitimacy Audit | Older `>=3,<4` guidance from earlier artifacts should be treated as superseded for this phase. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does `google/gemini-3.5-flash` actually return prompt-cache hits for the intended reasoning prompt shape on OpenRouter?**
    - What we know: OpenRouter documents Gemini caching behavior, explicit `cache_control` breakpoints, and stable-opening-message sticky routing. [CITED: https://openrouter.ai/docs/guides/best-practices/prompt-caching]
    - What's unclear: The `google/gemini-3.5-flash` model page does not explicitly advertise cache support the way the general prompt-caching docs describe Gemini families. [CITED: https://openrouter.ai/google/gemini-3.5-flash/api]
-   - Recommendation: Add one live smoke task in Wave 0 that checks `usage.prompt_tokens_details.cached_tokens` on two identical reasoning requests with a large static taxonomy block. [CITED: https://openrouter.ai/docs/guides/best-practices/prompt-caching] [ASSUMED]
+   - Resolution: Treat prompt caching as opportunistic rather than a contract. Wave 0 must add a live smoke helper that issues two identical reasoning requests with a stable taxonomy block, records `usage.prompt_tokens_details.cached_tokens`, and reports the result for tuning, but no Phase 4 task may depend on cache hits for correctness. [CITED: https://openrouter.ai/docs/guides/best-practices/prompt-caching] [ASSUMED]
 
 2. **How minimal can the Phase 4 grounding stub be while still honoring `INTERVIEW-03`?**
    - What we know: The roadmap note says full SearXNG plus Firecrawl tool looping ships in Phase 5, but packaged and restaurant re-grounding must be stubbed or minimally wired before Phase 4 completes. [VERIFIED: codebase grep]
    - What's unclear: Whether the planner should implement only `NEEDS_GROUNDING` persistence and thin interfaces, or also a one-shot post-interview fetch for branded items. [VERIFIED: codebase grep]
-   - Recommendation: Keep full iterative tool orchestration out of scope, but introduce stable request and result interfaces plus a minimal no-op or single-shot service boundary that Phase 5 can extend without schema churn. [VERIFIED: codebase grep] [ASSUMED]
+   - Resolution: Keep all real search/fetch execution out of Phase 4. The interview slice should create or update `FoodItem`, persist a minimal `NEEDS_GROUNDING` payload plus `grounding_stub.py` request/result interfaces, and stop there so Phase 5 can extend the boundary without schema churn. [VERIFIED: codebase grep] [ASSUMED]
 
 3. **Should optional Langfuse multimodal capture be on by default in self-hosted mode?**
    - What we know: Langfuse auto-handles base64 data URIs and external URLs, but self-hosted multimodal attachments require `LANGFUSE_S3_MEDIA_UPLOAD_*` and a publicly resolvable bucket hostname. [CITED: https://langfuse.com/docs/observability/features/multi-modality]
    - What's unclear: Whether the operator wants image payloads uploaded at all in the local single-user deployment. [VERIFIED: codebase grep]
-   - Recommendation: Default tracing to metadata-only when self-hosted media storage env vars are missing; expose an explicit opt-in toggle for image capture. [CITED: https://langfuse.com/docs/observability/features/multi-modality] [ASSUMED]
+   - Resolution: Default tracing to metadata-only. Phase 4 may enable image capture only behind an explicit config toggle and only when the self-hosted media storage env vars are present; otherwise the tracing wrapper must return trace IDs without uploading image payloads. [CITED: https://langfuse.com/docs/observability/features/multi-modality] [ASSUMED]
 
 ## Environment Availability
 
@@ -611,15 +611,11 @@ scheduler.add_job(
 - **Per wave merge:** `rtk .venv/bin/python -m unittest` [ASSUMED]
 - **Phase gate:** Full suite green plus one live smoke of reasoning, interview, and janitor recovery before `$gsd-verify-work`. [VERIFIED: codebase grep] [ASSUMED]
 
-### Wave 0 Gaps
+### Wave 0 Plan Coverage
 
-- [ ] `tests/test_reasoning_contract.py` - strict schema contract, unknown action handling, and retry-on-invalid behavior. [ASSUMED]
-- [ ] `tests/test_reasoning_gate.py` - deterministic gate matrix for similarity, margin, missing evidence, and nutrition impact. [ASSUMED]
-- [ ] `tests/test_reasoning_flow.py` - end-to-end `MATCHING -> REASONING -> READY_TO_WRITE|PENDING_*` behavior. [ASSUMED]
-- [ ] `tests/test_interview_flow.py` - callback plus free-text backbone, final confirmation, reminder behavior, and best-effort unresolved closeout. [ASSUMED]
-- [ ] `tests/test_fix_flow.py` - `/fix` item selection, side-effect diff, invalidation scoping, and correction history. [ASSUMED]
-- [ ] `tests/test_janitor.py` - stale-stage recovery, duplicate-notify suppression, and artifact-first reset logic. [ASSUMED]
-- [ ] Live smoke helper for prompt caching and Langfuse trace capture decisions. [ASSUMED]
+- `04-01-PLAN.md` creates `tests/test_reasoning_contract.py`, `tests/test_reasoning_gate.py`, `tests/test_reasoning_flow.py`, `tests/test_parallel_pipeline.py`, and extends the live reasoning smoke helper to record prompt-cache and trace metadata. [ASSUMED]
+- `04-02-PLAN.md` creates `tests/test_interview_flow.py`, `tests/test_fix_flow.py`, and `tests/test_janitor.py`, including final-confirmation edit loops per D-48 and D-49. [ASSUMED]
+- Later implementation plans must depend on Wave 0 so every Phase 4 slice lands on top of executable targeted coverage rather than creating tests ad hoc. [ASSUMED]
 
 ## Security Domain
 

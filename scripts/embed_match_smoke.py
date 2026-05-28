@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import re
 import sys
@@ -32,7 +33,13 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Wave 0 embedding contract smoke helper.")
     parser.add_argument(
         "--mode",
-        choices=["calibrate", "seed-demo", "unresolved-probe", "repeat-confirmation"],
+        choices=[
+            "calibrate",
+            "seed-demo",
+            "unresolved-probe",
+            "repeat-confirmation",
+            "reasoning-probe",
+        ],
         required=True,
     )
     parser.add_argument(
@@ -119,6 +126,222 @@ def _make_smoke_id(prefix: str, *, suffix_length: int = 12) -> str:
         raise RuntimeError("suffix length leaves no room for smoke ID prefix")
     trimmed = normalized[:prefix_budget].rstrip("-") or "smoke"
     return f"{trimmed}-{suffix}"
+
+
+def _resolve_reasoning_model() -> str:
+    settings = get_settings()
+    return (
+        getattr(settings, "REASONING_MODEL", None)
+        or getattr(settings, "LABEL_MODEL", "google/gemini-3.5-flash")
+    )
+
+
+def _mime_type_for_path(path: Path) -> str:
+    if path.suffix.lower() == ".png":
+        return "image/png"
+    if path.suffix.lower() == ".webp":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _base64_image_payload(path: Path) -> dict[str, Any]:
+    media_type = _mime_type_for_path(path)
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+    }
+
+
+def _reasoning_probe_schema() -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "reasoning_contract_probe",
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["action", "meal_state", "top_3", "decision_rationale"],
+                "properties": {
+                    "action": {"type": "string"},
+                    "meal_state": {"type": "string"},
+                    "trace_id": {"type": "string"},
+                    "decision_rationale": {"type": "string"},
+                    "gate_reason": {"type": "string"},
+                    "segment_count": {"type": "integer"},
+                    "top_3": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "candidate_id",
+                                "label",
+                                "identity_confidence",
+                                "quantity_confidence",
+                                "match_consistency_confidence",
+                                "visual_evidence",
+                                "missing_evidence",
+                                "specificity",
+                                "nutrition_relevance",
+                                "source",
+                                "decision_rationale",
+                            ],
+                            "properties": {
+                                "candidate_id": {"type": "string"},
+                                "label": {"type": "string"},
+                                "identity_confidence": {"type": "number"},
+                                "quantity_confidence": {"type": "number"},
+                                "match_consistency_confidence": {"type": "number"},
+                                "visual_evidence": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "missing_evidence": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "specificity": {"type": "string"},
+                                "nutrition_relevance": {"type": "string"},
+                                "source": {"type": "string"},
+                                "decision_rationale": {"type": "string"},
+                                "nutrition_impact": {"type": "number"},
+                            },
+                        },
+                        "minItems": 3,
+                        "maxItems": 3,
+                    },
+                },
+            },
+        },
+    }
+
+
+def _extract_reasoning_metadata(response: Any) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "trace_id": None,
+        "cached_tokens": None,
+    }
+    cached_values: list[int] = []
+    trace_values: list[str] = []
+
+    def walk_node(node: Any) -> None:
+        if node is None:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                key_lower = str(key).lower()
+                if key_lower in {"trace_id", "trace-id", "traceid", "x-trace-id"}:
+                    if isinstance(value, str) and value:
+                        trace_values.append(value)
+                    elif isinstance(value, int | float):
+                        trace_values.append(str(value))
+                if key_lower == "cached_tokens" and isinstance(value, (int, float)):
+                    cached_values.append(int(value))
+                walk_node(value)
+        elif isinstance(node, (list, tuple, set)):
+            for item in node:
+                walk_node(item)
+        elif hasattr(node, "__dict__"):
+            walk_node(vars(node))
+
+    walk_node(response)
+
+    metadata["trace_id"] = trace_values[0] if trace_values else None
+    if cached_values:
+        metadata["cached_tokens"] = max(cached_values)
+    return metadata
+
+
+def _parse_llm_json_response(response: Any) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(response, dict):
+        return None, "response is not a mapping"
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None, "no choices returned"
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    if not isinstance(message, dict):
+        return None, "first choice message is malformed"
+    content = message.get("content")
+    if not isinstance(content, str):
+        return None, "first choice content is not text"
+    try:
+        return json.loads(content), None
+    except json.JSONDecodeError as exc:
+        return None, f"failed to parse JSON: {exc}"
+
+
+async def _run_reasoning_probe(args: argparse.Namespace, llm_client) -> dict[str, Any]:
+    sample_input = _resolve_crop_path(args.sample, flag_name="--sample")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a meal reasoning model. Return strict JSON for meal reasoning. "
+                "Use the provided top-3 output format and keep action as an open string."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Meal image and stable taxonomy probe."
+                        " Use these 3 stable candidate entries and rank best 3."
+                    ),
+                },
+                _base64_image_payload(sample_input),
+            ],
+        },
+    ]
+    response_format = _reasoning_probe_schema()
+    model = _resolve_reasoning_model()
+
+    probe_runs = []
+    for run_index in (1, 2):
+        response = await llm_client.chat_completion(
+            model=model,
+            messages=messages,
+            response_format=response_format,
+        )
+        parsed_response, parse_error = _parse_llm_json_response(response)
+        metadata = _extract_reasoning_metadata(response)
+        probe_runs.append(
+            {
+                "run": run_index,
+                "status": "pass" if parse_error is None else "warn",
+                "trace_id": metadata["trace_id"] or (parsed_response or {}).get(
+                    "trace_id",
+                ),
+                "cached_tokens": metadata["cached_tokens"],
+                "parse_error": parse_error,
+                "response": parsed_response,
+            }
+        )
+
+    cached_tokens: list[int | None] = [
+        run["cached_tokens"] for run in probe_runs
+    ]
+    return {
+        "mode": "reasoning-probe",
+        "status": "pass",
+        "sample": str(sample_input),
+        "model": model,
+        "runs": probe_runs,
+        "cached_tokens_by_run": cached_tokens,
+        "cached_tokens_same_as_prior": len(
+            {
+                run["cached_tokens"]
+                for run in probe_runs
+                if run["cached_tokens"] is not None
+            }
+        )
+        == 1
+        if len([run for run in probe_runs if run["cached_tokens"] is not None]) >= 2
+        else None,
+        "trace_ids": [run["trace_id"] for run in probe_runs],
+    }
 
 
 def is_corpus_branch_valid(visual_count: int) -> bool:
@@ -537,6 +760,8 @@ async def main() -> int:
             report = await _run_seed_demo(args, client)
         elif args.mode == "repeat-confirmation":
             report = await _run_repeat_confirmation(args, client)
+        elif args.mode == "reasoning-probe":
+            report = await _run_reasoning_probe(args, client)
         else:
             report = await _run_unresolved_probe(args, client)
 

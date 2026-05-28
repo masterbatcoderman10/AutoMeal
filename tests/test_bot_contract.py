@@ -113,6 +113,20 @@ class MessageTemplateTests(unittest.TestCase):
         self.assertNotIn("embedding", message)
         self.assertNotIn("cropped_image_url", message)
 
+    def test_recent_fix_targets_message_exposes_shortcuts(self) -> None:
+        from bot.messages import format_recent_fix_targets
+
+        message = format_recent_fix_targets(
+            [
+                {"id": "entry-1", "short_id": "entry-1", "food_name": "Dal", "quantity_display": "1 bowl"},
+                {"id": "entry-2", "short_id": "entry-2", "food_name": "Rice", "quantity_display": None},
+            ]
+        )
+
+        self.assertIn("Fix targets:", message)
+        self.assertIn("1. entry-1 Dal (1 bowl)", message)
+        self.assertIn("Use /fix 1 or /fix <id>.", message)
+
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_replies_with_start_message(self) -> None:
@@ -1040,6 +1054,109 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order, ["commit", "commit", "send"])
         self.assertEqual(session.commit.await_count, 2)
 
+    async def test_poll_match_tracks_recent_entries_for_fix_followups(self) -> None:
+        from bot import polling
+
+        segment = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=[0.1] * 1536,
+        )
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            processing_status=MealProcessingStatus.MATCHING,
+        )
+        session = AsyncMock()
+        meal_result = Mock(scalar_one_or_none=Mock(return_value=meal))
+        segments_result = Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[segment]))))
+        session.execute.side_effect = [meal_result, segments_result]
+        session.add = Mock()
+        session.add_all = Mock()
+        session.commit = AsyncMock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        bot_data: dict[str, object] = {}
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            TELEGRAM_CHAT_ID="999",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        match_result = SimpleNamespace(
+            food_visual_id="visual-1",
+            food_item_id="item-1",
+            is_match=True,
+            is_below_threshold=False,
+            food_visual=SimpleNamespace(
+                food_item=SimpleNamespace(
+                    name="Daal Chawal",
+                    calories=420.0,
+                    protein_g=16.0,
+                    carbs_g=68.0,
+                    fat_g=12.0,
+                    is_verified=True,
+                )
+            ),
+            query_embedding=[0.1] * 1536,
+            similarity=0.92,
+        )
+
+        async def _finalize_meal(**_kwargs):
+            meal.processing_status = MealProcessingStatus.COMPLETED
+            await session.commit()
+            return {
+                "finalized": True,
+                "meal_resolution": SimpleNamespace(
+                    meal_entries=[
+                        SimpleNamespace(
+                            id="entry-1",
+                            segment_id="segment-1",
+                            portion_bucket="STANDARD",
+                            quantity_display="1 bowl",
+                        )
+                    ]
+                ),
+            }
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling,
+                "_is_rejection_threshold_reached",
+                new=AsyncMock(return_value=match_result),
+            ),
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(
+                polling.reasoning_service,
+                "run_reasoning_request",
+                AsyncMock(return_value=({"action": "AUTO_CONFIRM", "meal_state": "READY_TO_WRITE"}, None)),
+            ),
+            patch.object(
+                polling.reasoning_service,
+                "finalize_meal_from_reasoning",
+                AsyncMock(side_effect=_finalize_meal),
+            ),
+            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01, bot_data=bot_data)
+
+        self.assertEqual(bot_data["recent_entries"][0]["id"], "entry-1")
+        sent_text = bot.send_message.await_args.kwargs["text"]
+        self.assertIn("Fix targets:", sent_text)
+        self.assertIn("/fix 1", sent_text)
+
 class MainWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_post_init_starts_background_polling_task(self) -> None:
         from bot import main as bot_main
@@ -1090,6 +1207,7 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             application.bot,
             settings,
             settings.BOT_POLL_INTERVAL,
+            application.bot_data,
         )
         poll_interview_reminders.assert_called_once_with(
             application.bot,

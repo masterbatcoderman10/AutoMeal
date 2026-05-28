@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.models import InterviewSession, MealSegment, MealLog, MealProcessingStatus
 from app.services.llm_client import get_llm_client
-from app.services import interview_service, matching_service
+from app.services import correction_service, interview_service, matching_service
 from app.services.image_service import save_segment_crop
 from app.services.vision_service import (
     dedupe_overlapping_segments,
@@ -25,6 +25,7 @@ from bot.messages import (
     format_ack_message,
     format_interview_reminder_message,
     format_match_completion_message,
+    format_recent_fix_targets,
     format_soft_failure_message,
     format_unresolved_match_message,
 )
@@ -502,7 +503,45 @@ def _completion_items_from_meal_resolution(
     return completion_items
 
 
-async def poll_and_match_food_segments(bot, settings, poll_interval: float | None = None) -> None:
+def _recent_entries_from_meal_resolution(
+    *,
+    meal_id: str,
+    match_results: list[tuple[MealSegment, matching_service.SegmentMatchResult]],
+    meal_resolution: object,
+) -> list[dict]:
+    entries_by_segment = {
+        getattr(entry, "segment_id", None): entry
+        for entry in getattr(meal_resolution, "meal_entries", [])
+    }
+    recent_entries: list[dict] = []
+    for segment, result in match_results:
+        entry = entries_by_segment.get(getattr(segment, "id", None))
+        if entry is None or getattr(entry, "id", None) is None:
+            continue
+        food_item = result.food_visual.food_item if getattr(result, "food_visual", None) is not None else None
+        recent_entries.append(
+            correction_service.build_recent_entry_record(
+                entry_id=entry.id,
+                food_name=getattr(food_item, "name", None),
+                quantity_display=getattr(entry, "quantity_display", None),
+                meal_id=meal_id,
+            )
+        )
+    return recent_entries
+
+
+def _remember_recent_entry_context(bot_data: dict | None, new_entries: list[dict]) -> list[dict]:
+    if bot_data is None:
+        return new_entries
+    recent_entries = correction_service.remember_recent_entries(
+        bot_data.get("recent_entries"),
+        new_entries,
+    )
+    bot_data["recent_entries"] = recent_entries
+    return recent_entries
+
+
+async def poll_and_match_food_segments(bot, settings, poll_interval: float | None = None, bot_data: dict | None = None) -> None:
     engine = create_async_engine(
         settings.DATABASE_URL,
         echo=False,
@@ -598,9 +637,21 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
 
                     try:
                         if finalization.get("finalized"):
+                            recent_entries = _remember_recent_entry_context(
+                                bot_data,
+                                _recent_entries_from_meal_resolution(
+                                    meal_id=meal.id,
+                                    match_results=match_results,
+                                    meal_resolution=finalization.get("meal_resolution"),
+                                ),
+                            )
+                            text = format_match_completion_message(completion_items)
+                            fix_targets = format_recent_fix_targets(recent_entries)
+                            if fix_targets:
+                                text = f"{text}\n\n{fix_targets}"
                             await bot.send_message(
                                 chat_id=settings.TELEGRAM_CHAT_ID,
-                                text=format_match_completion_message(completion_items),
+                                text=text,
                             )
                         else:
                             await bot.send_message(

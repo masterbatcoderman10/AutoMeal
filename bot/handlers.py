@@ -11,7 +11,12 @@ from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog
 from app.services import interview_service
 from app.services import correction_service
 
-from bot.messages import format_fix_confirmation_message, format_interview_confirmation_message, format_start_message
+from bot.messages import (
+    format_fix_confirmation_message,
+    format_interview_confirmation_message,
+    format_recent_fix_targets,
+    format_start_message,
+)
 
 
 get_interview_roadmap = interview_service.get_interview_roadmap
@@ -63,7 +68,11 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("No recent entries available to fix.")
         return
     context.bot_data["pending_fix"] = {"entry_id": target["entry_id"]}
-    await update.message.reply_text(f"Fix target: {target['entry_id']}. Send the correction or cancel.")
+    choice = target.get("choice") or {}
+    short_id = choice.get("short_id") or correction_service.short_entry_id(target["entry_id"])
+    label = choice.get("food_name")
+    suffix = f" ({label})" if label else ""
+    await update.message.reply_text(f"Fix target: {short_id}{suffix}. Send the correction or cancel.")
 
 
 def _make_session_factory(settings):
@@ -157,6 +166,32 @@ async def _finalize_interview_confirmation(*, session, interview: InterviewSessi
     }
 
 
+def _recent_entries_from_confirmation(*, meal_id: str, meal_entries: list[DiaryEntry], confirmation_items: list[dict]) -> list[dict]:
+    names_by_segment = {
+        str(item.get("segment_id") or ""): item.get("name")
+        for item in confirmation_items
+    }
+    return [
+        correction_service.build_recent_entry_record(
+            entry_id=entry.id,
+            food_name=names_by_segment.get(str(getattr(entry, "segment_id", "") or "")),
+            quantity_display=getattr(entry, "quantity_display", None),
+            meal_id=meal_id,
+        )
+        for entry in meal_entries
+        if getattr(entry, "id", None)
+    ]
+
+
+def _remember_recent_entry_context(bot_data: dict, new_entries: list[dict]) -> list[dict]:
+    recent_entries = correction_service.remember_recent_entries(
+        bot_data.get("recent_entries"),
+        new_entries,
+    )
+    bot_data["recent_entries"] = recent_entries
+    return recent_entries
+
+
 async def _handle_pending_fix(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
     pending = context.bot_data.get("pending_fix")
     if not isinstance(pending, dict):
@@ -196,14 +231,9 @@ async def _handle_pending_fix(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await update.message.reply_text("Send the correction text, or cancel.")
                 return True
             pending["patch"] = patch
+            entry_context = await correction_service.build_entry_correction_context(session=session, entry=entry)
             preview = correction_service.build_fix_confirmation_payload(
-                entry={
-                    "id": entry.id,
-                    "food_item_id": entry.food_item_id,
-                    "portion_bucket": entry.portion_bucket,
-                    "quantity_json": entry.quantity_json,
-                    "quantity_display": entry.quantity_display,
-                },
+                entry=entry_context,
                 patch=patch,
             )
             await update.message.reply_text(format_fix_confirmation_message(preview))
@@ -213,7 +243,6 @@ async def _handle_pending_fix(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
     if update.callback_query is None:
         return
     if await _reject_unpinned_update(update):
@@ -242,7 +271,19 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await session.commit()
             message = update.callback_query.message
             if message is not None:
-                await message.reply_text("Meal confirmation saved.")
+                recent_entries = _remember_recent_entry_context(
+                    context.bot_data,
+                    _recent_entries_from_confirmation(
+                        meal_id=finalized["meal"].id,
+                        meal_entries=list(finalized["result"].get("meal_entries", [])),
+                        confirmation_items=list(finalized["confirmation_items"]),
+                    ),
+                )
+                reply = "Meal confirmation saved."
+                fix_targets = format_recent_fix_targets(recent_entries)
+                if fix_targets:
+                    reply = f"{reply}\n\n{fix_targets}"
+                await message.reply_text(reply)
     finally:
         await engine.dispose()
 
@@ -279,7 +320,19 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     interview.is_active = False
                     session.add(interview)
                     await session.commit()
-                    await update.message.reply_text("Meal confirmation saved.")
+                    recent_entries = _remember_recent_entry_context(
+                        context.bot_data,
+                        _recent_entries_from_confirmation(
+                            meal_id=finalized["meal"].id,
+                            meal_entries=list(finalized["result"].get("meal_entries", [])),
+                            confirmation_items=list(finalized["confirmation_items"]),
+                        ),
+                    )
+                    reply = "Meal confirmation saved."
+                    fix_targets = format_recent_fix_targets(recent_entries)
+                    if fix_targets:
+                        reply = f"{reply}\n\n{fix_targets}"
+                    await update.message.reply_text(reply)
                     return
 
                 confirmation_items = _confirmation_items_from_state(state)

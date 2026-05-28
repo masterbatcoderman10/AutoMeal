@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 
 class FixEntryResolutionTests(unittest.TestCase):
@@ -32,6 +33,34 @@ class FixEntryResolutionTests(unittest.TestCase):
 
         self.assertEqual(resolved["mode"], "recent")
         self.assertEqual(resolved["entry_id"], "recent-1")
+
+    def test_fix_command_supports_recent_short_id_selection(self) -> None:
+        from app.services import correction_service
+
+        resolved = correction_service.resolve_fix_target(
+            "/fix abcd1234",
+            recent_entries=[
+                {"id": "abcd1234-1111", "short_id": "abcd1234"},
+                {"id": "efgh5678-2222", "short_id": "efgh5678"},
+            ],
+        )
+
+        self.assertEqual(resolved["mode"], "recent")
+        self.assertEqual(resolved["entry_id"], "abcd1234-1111")
+
+    def test_fix_command_supports_recent_numeric_selection(self) -> None:
+        from app.services import correction_service
+
+        resolved = correction_service.resolve_fix_target(
+            "/fix 2",
+            recent_entries=[
+                {"id": "recent-1", "short_id": "recent-1"},
+                {"id": "recent-2", "short_id": "recent-2"},
+            ],
+        )
+
+        self.assertEqual(resolved["mode"], "recent")
+        self.assertEqual(resolved["entry_id"], "recent-2")
 
     def test_fix_diff_preview_shows_before_and_after_state(self) -> None:
         from app.services import correction_service
@@ -181,3 +210,90 @@ class FixDiffPreviewTests(unittest.TestCase):
         self.assertEqual(preview["status"], "pending_confirmation")
         self.assertEqual(preview["diff"]["before"]["source_name"], "Old Cafe")
         self.assertEqual(preview["diff"]["after"]["food_name"], "New")
+
+
+class RecentEntryTrackingTests(unittest.TestCase):
+    def test_recent_entries_are_prepended_and_deduplicated(self) -> None:
+        from app.services import correction_service
+
+        recent = correction_service.remember_recent_entries(
+            existing=[
+                {"id": "older-1", "short_id": "older-1"},
+                {"id": "older-2", "short_id": "older-2"},
+            ],
+            new_entries=[
+                {"id": "new-1", "short_id": "new-1"},
+                {"id": "older-1", "short_id": "older-1"},
+            ],
+        )
+
+        self.assertEqual([entry["id"] for entry in recent], ["new-1", "older-1", "older-2"])
+
+
+class CorrectionContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_apply_confirmed_entry_correction_uses_stored_visual_context(self) -> None:
+        from app.models import DiaryEntry
+        from app.services import correction_service
+
+        entry = DiaryEntry(
+            id="entry-1",
+            meal_log_id="meal-1",
+            food_item_id="food-old",
+            segment_id="segment-1",
+            portion_bucket="STANDARD",
+            identification_method="AUTO_CONFIRM",
+            is_verified=True,
+            quantity_json={"portion_bucket": "STANDARD"},
+            quantity_display="1 bowl",
+        )
+        linked_visual = SimpleNamespace(
+            is_invalidated=False,
+            invalidated_at=None,
+            invalidation_reason=None,
+        )
+        session = SimpleNamespace(
+            get=AsyncMock(return_value=linked_visual),
+            add=Mock(),
+        )
+
+        with (
+            patch.object(
+                correction_service,
+                "build_entry_correction_context",
+                AsyncMock(
+                    return_value={
+                        "id": entry.id,
+                        "food_name": "Protein Bar",
+                        "food_item_id": entry.food_item_id,
+                        "portion_bucket": entry.portion_bucket,
+                        "quantity_json": entry.quantity_json,
+                        "quantity_display": entry.quantity_display,
+                        "source_type": "PACKAGED",
+                        "brand_name": "Acme",
+                        "restaurant_name": None,
+                        "food_visual_id": "visual-1",
+                        "visual_learning_eligible": True,
+                    }
+                ),
+            ),
+            patch.object(
+                correction_service,
+                "resolve_or_create_food_item",
+                AsyncMock(return_value=SimpleNamespace(id="food-new")),
+            ) as resolve_food,
+        ):
+            result = await correction_service.apply_confirmed_entry_correction(
+                session=session,
+                entry=entry,
+                patch={"food_name": "Better Protein Bar"},
+                reason="manual fix",
+            )
+
+        self.assertEqual(result["invalidated_visual_ids"], ["visual-1"])
+        self.assertTrue(linked_visual.is_invalidated)
+        self.assertEqual(linked_visual.invalidation_reason, "manual fix")
+        self.assertEqual(entry.food_item_id, "food-new")
+        self.assertTrue(result["write_visual_back"])
+        resolved_food = resolve_food.await_args.kwargs["food"]
+        self.assertEqual(resolved_food.source_type, "PACKAGED")
+        self.assertEqual(resolved_food.brand_name, "Acme")

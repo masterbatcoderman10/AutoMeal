@@ -182,6 +182,21 @@ def format_match_completion_message(items: list[CompletionItem]) -> str:
     return "\n".join(lines)
 
 
+def format_recent_fix_targets(recent_entries: list[dict]) -> str:
+    if not recent_entries:
+        return ""
+
+    lines = ["Fix targets:"]
+    for index, entry in enumerate(recent_entries, start=1):
+        label = entry.get("food_name") or "Unknown food"
+        quantity = entry.get("quantity_display")
+        suffix = f" ({quantity})" if quantity else ""
+        short_id = entry.get("short_id") or str(entry.get("id") or "")[:8]
+        lines.append(f"{index}. {short_id} {label}{suffix}")
+    lines.append("Use /fix 1 or /fix <id>.")
+    return "\n".join(lines)
+
+
 __all__ = [
     "CompletionItem",
     "format_ack_message",
@@ -190,6 +205,7 @@ __all__ = [
     "format_interview_reminder_message",
     "format_fix_confirmation_message",
     "format_match_completion_message",
+    "format_recent_fix_targets",
     "format_result_sentence",
     "format_soft_failure_message",
     "format_start_message",

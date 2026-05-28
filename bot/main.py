@@ -54,6 +54,7 @@ async def post_init(application: Application) -> None:
             application.bot,
             settings,
             settings.BOT_POLL_INTERVAL,
+            application.bot_data,
         )
     )
     application.bot_data["interview_reminder_task"] = asyncio.create_task(

@@ -6,21 +6,75 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Mapping
 
-from app.models import CorrectionEvent, DiaryEntry, FoodVisual
+from sqlalchemy import select
+
+from app.models import CorrectionEvent, DiaryEntry, FoodItem, FoodVisual, MealSegment
 from app.services.grounding_stub import build_grounding_prep, normalize_source_type
 from app.services.meal_resolution_service import ResolvedFoodInput, resolve_or_create_food_item
 
 
 IDENTITY_FIELDS = {"food_name", "name", "canonical_name", "food_item_id", "source_type", "brand_name", "restaurant_name"}
 QUANTITY_FIELDS = {"portion_bucket", "quantity", "quantity_json", "quantity_display", "serving_size_g"}
+RECENT_ENTRY_LIMIT = 8
+
+
+def short_entry_id(entry_id: object) -> str:
+    return str(entry_id or "").strip()[:8]
+
+
+def build_recent_entry_record(
+    *,
+    entry_id: str,
+    food_name: str | None = None,
+    quantity_display: str | None = None,
+    meal_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": entry_id,
+        "short_id": short_entry_id(entry_id),
+        "food_name": food_name,
+        "quantity_display": quantity_display,
+        "meal_id": meal_id,
+    }
+
+
+def remember_recent_entries(
+    existing: list[Mapping[str, Any]] | None,
+    new_entries: list[Mapping[str, Any]] | None,
+    *,
+    limit: int = RECENT_ENTRY_LIMIT,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in (list(new_entries or []), list(existing or [])):
+        for entry in source:
+            entry_id = str(entry.get("id") or "").strip()
+            if not entry_id or entry_id in seen:
+                continue
+            seen.add(entry_id)
+            merged.append(dict(entry))
+            if len(merged) >= limit:
+                return merged
+    return merged
 
 
 def resolve_fix_target(command_text: str, *, recent_entries: list[Mapping[str, Any]]) -> dict[str, Any]:
     tokens = command_text.strip().split()
     if len(tokens) > 1 and tokens[1].strip():
-        return {"mode": "direct", "entry_id": tokens[1].strip()}
+        selector = tokens[1].strip()
+        if selector.isdigit():
+            index = int(selector) - 1
+            if 0 <= index < len(recent_entries):
+                choice = dict(recent_entries[index])
+                return {"mode": "recent", "entry_id": choice.get("id"), "choices": list(recent_entries), "choice": choice}
+        for entry in recent_entries:
+            if selector in {str(entry.get("id") or ""), str(entry.get("short_id") or "")}:
+                choice = dict(entry)
+                return {"mode": "recent", "entry_id": choice.get("id"), "choices": list(recent_entries), "choice": choice}
+        return {"mode": "direct", "entry_id": selector}
     if recent_entries:
-        return {"mode": "recent", "entry_id": recent_entries[0].get("id"), "choices": list(recent_entries)}
+        choice = dict(recent_entries[0])
+        return {"mode": "recent", "entry_id": choice.get("id"), "choices": list(recent_entries), "choice": choice}
     return {"mode": "none", "entry_id": None, "choices": []}
 
 
@@ -158,6 +212,7 @@ async def apply_confirmed_entry_correction(
     reason: str | None = None,
     trace_id: str | None = None,
 ) -> dict[str, Any]:
+    entry_context = await build_entry_correction_context(session=session, entry=entry)
     before = {
         "food_item_id": entry.food_item_id,
         "portion_bucket": entry.portion_bucket,
@@ -165,26 +220,24 @@ async def apply_confirmed_entry_correction(
         "quantity_display": entry.quantity_display,
     }
     result = apply_fix(
-        entry={
-            "id": entry.id,
-            "food_item_id": entry.food_item_id,
-            "portion_bucket": entry.portion_bucket,
-            "quantity_json": entry.quantity_json,
-            "quantity_display": entry.quantity_display,
-            "food_visual_id": patch.get("food_visual_id"),
-            "visual_learning_eligible": patch.get("visual_learning_eligible", False),
-        },
+        entry=entry_context,
         patch=patch,
         confirm=True,
     )
 
     if is_identity_fix(patch):
+        updated_identity = {**entry_context, **dict(patch)}
         food = ResolvedFoodInput(
-            canonical_name=str(patch.get("food_name") or patch.get("name") or patch.get("canonical_name") or "Unknown food"),
-            food_item_id=patch.get("food_item_id"),
-            source_type=normalize_source_type(patch.get("source_type")),
-            brand_name=patch.get("brand_name"),
-            restaurant_name=patch.get("restaurant_name"),
+            canonical_name=str(
+                updated_identity.get("food_name")
+                or updated_identity.get("name")
+                or updated_identity.get("canonical_name")
+                or "Unknown food"
+            ),
+            food_item_id=updated_identity.get("food_item_id"),
+            source_type=normalize_source_type(updated_identity.get("source_type")),
+            brand_name=updated_identity.get("brand_name"),
+            restaurant_name=updated_identity.get("restaurant_name"),
             is_verified=False,
             needs_grounding=result.get("grounding_prep") is not None,
             llm_reasoning="NEEDS_GROUNDING" if result.get("grounding_prep") else None,
@@ -227,16 +280,56 @@ async def apply_confirmed_entry_correction(
     return {**result, "correction_event": event}
 
 
+async def build_entry_correction_context(
+    *,
+    session,
+    entry: DiaryEntry,
+) -> dict[str, Any]:
+    food_item = await session.get(FoodItem, entry.food_item_id)
+    segment = await session.get(MealSegment, entry.segment_id) if entry.segment_id else None
+    linked_visual = None
+    if segment is not None and getattr(segment, "cropped_image_url", None):
+        linked_visual_result = await session.execute(
+            select(FoodVisual)
+            .where(
+                FoodVisual.food_item_id == entry.food_item_id,
+                FoodVisual.cropped_image_url == segment.cropped_image_url,
+                FoodVisual.is_invalidated.is_(False),
+            )
+            .order_by(FoodVisual.created_at.desc())
+            .limit(1)
+        )
+        linked_visual = linked_visual_result.scalar_one_or_none()
+
+    return {
+        "id": entry.id,
+        "food_name": getattr(food_item, "name", None),
+        "food_item_id": entry.food_item_id,
+        "portion_bucket": entry.portion_bucket,
+        "quantity_json": copy.deepcopy(entry.quantity_json),
+        "quantity_display": entry.quantity_display,
+        "source_type": getattr(food_item, "source_type", None),
+        "brand_name": getattr(food_item, "brand_name", None),
+        "restaurant_name": getattr(food_item, "restaurant_name", None),
+        "food_visual_id": getattr(linked_visual, "id", None),
+        "visual_learning_eligible": linked_visual is not None,
+    }
+
+
 __all__ = [
     "apply_confirmed_entry_correction",
     "apply_fix",
+    "build_entry_correction_context",
     "build_correction_history_entry",
     "build_fix_confirmation_payload",
     "build_fix_diff",
+    "build_recent_entry_record",
     "format_fix_summary",
     "is_identity_fix",
     "is_quantity_only_fix",
     "parse_fix_patch",
+    "remember_recent_entries",
     "resolve_fix_target",
+    "short_entry_id",
     "visual_learning_eligible_for_relearn",
 ]

@@ -383,11 +383,8 @@ async def _run_reasoning_parser_retry(
     app_settings,
     response_payload: Mapping[str, Any] | dict[str, Any],
 ) -> dict[str, Any] | None:
-    parser_model = getattr(
-        app_settings,
-        "REASONING_PARSER_MODEL",
-        "google/gemini-3.1-flash-lite",
-    )
+    parser_model = getattr(app_settings, "REASONING_PARSER_MODEL", "google/gemini-3.1-flash-lite")
+    fallback_model = getattr(app_settings, "REASONING_PARSER_FALLBACK_MODEL", parser_model)
     repair_messages = [
         {
             "role": "system",
@@ -403,12 +400,25 @@ async def _run_reasoning_parser_retry(
         },
     ]
 
-    repaired = await llm_client.chat_completion(
-        model=parser_model,
-        messages=repair_messages,
-        response_format={"type": "json_object"},
-    )
-    return _parse_reasoning_message(repaired)
+    models_to_try = [parser_model]
+    if fallback_model and fallback_model != parser_model:
+        models_to_try.append(fallback_model)
+
+    for index, model in enumerate(models_to_try):
+        try:
+            repaired = await llm_client.chat_completion(
+                model=model,
+                messages=repair_messages,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            if index == len(models_to_try) - 1:
+                raise
+            continue
+        parsed = _parse_reasoning_message(repaired)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 async def _run_reasoning_model(
@@ -421,6 +431,11 @@ async def _run_reasoning_model(
     response_format = reasoning_response_format()
     messages = _build_reasoning_prompt(meal=meal, match_results=match_results)
     trace_metadata: dict[str, int | str | None] = {"trace_id": None, "cached_tokens": None}
+    reasoning_model = getattr(app_settings, "REASONING_MODEL", "google/gemini-3.5-flash")
+    fallback_model = getattr(app_settings, "REASONING_FALLBACK_MODEL", reasoning_model)
+    models_to_try = [reasoning_model]
+    if fallback_model and fallback_model != reasoning_model:
+        models_to_try.append(fallback_model)
 
     with tracing_service.maybe_start_trace(
         name="meal_reasoning",
@@ -428,12 +443,23 @@ async def _run_reasoning_model(
         metadata={"meal_id": meal.id},
         span_name="meal_reasoning",
     ) as trace:
-        response = await llm_client.chat_completion(
-            model=getattr(app_settings, "REASONING_MODEL", "google/gemini-3.5-flash"),
-            messages=messages,
-            response_format=response_format,
-            extra_body={"parallel_tool_calls": False},
-        )
+        last_error: Exception | None = None
+        response = None
+        for index, model in enumerate(models_to_try):
+            try:
+                response = await llm_client.chat_completion(
+                    model=model,
+                    messages=messages,
+                    response_format=response_format,
+                    extra_body={"parallel_tool_calls": False},
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if index == len(models_to_try) - 1:
+                    raise
+        if response is None:
+            raise RuntimeError("reasoning model did not return a response") from last_error
         trace_id_from_api, cached_tokens = _extract_trace_metadata(response)
         if trace_id_from_api:
             trace_metadata["trace_id"] = trace_id_from_api

@@ -43,6 +43,23 @@ def format_interview_confirmation_message(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def format_fix_confirmation_message(payload: dict) -> str:
+    diff = payload.get("diff", {})
+    side_effects = payload.get("side_effects", {})
+    changed = ", ".join(diff.get("changed_fields", [])) or "details"
+    visual_note = (
+        "linked visual will be invalidated"
+        if side_effects.get("invalidated_visuals")
+        else "no visual invalidation"
+    )
+    nutrition_note = (
+        "nutrition will be recomputed"
+        if side_effects.get("recompute_nutrition")
+        else "nutrition unchanged"
+    )
+    return f"Confirm fix for {payload.get('entry_id')}: {changed}. {visual_note}; {nutrition_note}."
+
+
 @dataclass(frozen=True)
 class CompletionItem:
     food_name: str
@@ -170,6 +187,7 @@ __all__ = [
     "format_error_message",
     "format_interview_confirmation_message",
     "format_interview_reminder_message",
+    "format_fix_confirmation_message",
     "format_match_completion_message",
     "format_result_sentence",
     "format_soft_failure_message",

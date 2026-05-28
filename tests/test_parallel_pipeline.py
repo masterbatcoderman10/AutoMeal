@@ -27,8 +27,25 @@ def _fake_match_result(segment_id: str, is_below_threshold: bool = False) -> Sim
         similarity=0.93,
         is_match=True,
         is_below_threshold=is_below_threshold,
+        match_threshold=0.90,
         query_embedding=[0.2] * 3,
         food_visual=SimpleNamespace(food_item=food_item),
+        top_candidates=[
+            {
+                "candidate_id": f"visual-{segment_id}",
+                "label": "meal item",
+                "identity_confidence": 0.93,
+                "quantity_confidence": 0.82,
+                "match_consistency_confidence": 0.91,
+                "visual_evidence": ["matching fake candidate"],
+                "missing_evidence": [],
+                "specificity": "high",
+                "nutrition_relevance": "medium",
+                "source": "test",
+                "decision_rationale": "stable fake match",
+                "nutrition_impact": 0.1,
+            }
+        ],
     )
 
 
@@ -112,17 +129,28 @@ class ParallelPipelineTests(unittest.IsolatedAsyncioTestCase):
                 "_is_rejection_threshold_reached",
                 new=slow_aware_match,
             ),
+            unittest.mock.patch.object(polling, "get_llm_client", return_value=object()),
             unittest.mock.patch.object(
                 polling.matching_service,
                 "persist_successful_match_rows",
                 AsyncMock(),
             ),
             unittest.mock.patch.object(
+                polling.reasoning_service,
+                "run_reasoning_request",
+                AsyncMock(return_value=({"action": "AUTO_CONFIRM", "meal_state": "READY_TO_WRITE"}, None)),
+            ),
+            unittest.mock.patch.object(
+                polling.reasoning_service,
+                "finalize_meal_from_reasoning",
+                AsyncMock(return_value={"finalized": True, "meal_resolution": SimpleNamespace(meal_entries=[])}),
+            ),
+            unittest.mock.patch.object(
                 polling,
                 "format_match_completion_message",
                 return_value="meal completed",
             ),
-            unittest.mock.patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+            unittest.mock.patch.object(polling, "_poll_sleep", side_effect=asyncio.CancelledError),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)

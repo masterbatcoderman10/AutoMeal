@@ -96,7 +96,7 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
         segment = SimpleNamespace(id="segment-1", cropped_image_url="/data/uploads/crops/seg-1.jpg", embedding=None)
         food_visual = SimpleNamespace(id="fv-1", food_item_id="item-1")
         session = AsyncMock()
-        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.15)))
+        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.10)))
         llm_client = AsyncMock()
         llm_client.embed_multimodal.return_value = query_embedding
 
@@ -124,7 +124,7 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
         segment = SimpleNamespace(id="segment-1", cropped_image_url="/data/uploads/crops/seg-1.jpg", embedding=None)
         food_visual = SimpleNamespace(id="fv-1", food_item_id="item-1")
         session = AsyncMock()
-        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.1501)))
+        session.execute.return_value = Mock(first=Mock(return_value=(food_visual, 0.1001)))
         llm_client = AsyncMock()
         llm_client.embed_multimodal.return_value = query_embedding
 
@@ -298,6 +298,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(polling, "get_llm_client", return_value=object()),
             patch.object(
                 polling.matching_service,
                 "embed_segment_query_embedding",
@@ -343,6 +344,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(polling, "get_llm_client", return_value=object()),
             patch.object(
                 polling.matching_service,
                 "embed_segment_query_embedding",
@@ -437,18 +439,28 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "format_unresolved_match_message",
                 return_value="I can see your meal, but I do not know it yet.",
             ),
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(
+                polling.reasoning_service,
+                "run_reasoning_request",
+                AsyncMock(return_value=({"action": "ASK_CHOICE", "meal_state": "PENDING_INTERVIEW"}, None)),
+            ),
+            patch.object(
+                polling.reasoning_service,
+                "finalize_meal_from_reasoning",
+                AsyncMock(return_value={"finalized": False}),
+            ),
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
-        self.assertEqual(meal.processing_status, MealProcessingStatus.REASONING)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.INTERVIEWING)
         bot.send_message.assert_awaited_once_with(
             chat_id="999",
             text="I can see your meal, but I do not know it yet.",
         )
         session.add.assert_not_called()
-        session.commit.assert_awaited_once()
 
     async def test_poll_and_match_writes_all_rows_only_when_all_segments_pass_threshold(self) -> None:
         from bot import polling
@@ -504,6 +516,14 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             [0.202] * matching_service.EMBEDDING_DIMENSION,
         ]
 
+        async def finalize_success(**kwargs):
+            meal.processing_status = MealProcessingStatus.COMPLETED
+            entries = [
+                SimpleNamespace(segment_id="segment-1", portion_bucket="STANDARD", quantity_display="Standard"),
+                SimpleNamespace(segment_id="segment-2", portion_bucket="STANDARD", quantity_display="Standard"),
+            ]
+            return {"finalized": True, "meal_resolution": SimpleNamespace(meal_entries=entries)}
+
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
@@ -554,6 +574,17 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "embed_segment_visual_embedding",
                 side_effect=write_back_embeddings,
             ),
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(
+                polling.reasoning_service,
+                "run_reasoning_request",
+                AsyncMock(return_value=({"action": "AUTO_CONFIRM", "meal_state": "READY_TO_WRITE"}, None)),
+            ),
+            patch.object(
+                polling.reasoning_service,
+                "finalize_meal_from_reasoning",
+                AsyncMock(side_effect=finalize_success),
+            ) as finalize_meal,
             patch.object(polling, "format_match_completion_message", return_value="meal completed"),
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
@@ -561,19 +592,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        self.assertEqual(len(session.add.call_args_list), 4)
-        food_visual_rows = [
-            call.args[0]
-            for call in session.add.call_args_list
-            if getattr(call.args[0], "cropped_image_url", None)
-        ]
-        self.assertEqual(
-            len(food_visual_rows),
-            2,
-            "Expected one FoodVisual row per segment",
-        )
-        self.assertIn([0.101] * matching_service.EMBEDDING_DIMENSION, [row.embedding for row in food_visual_rows])
-        self.assertIn([0.202] * matching_service.EMBEDDING_DIMENSION, [row.embedding for row in food_visual_rows])
+        finalize_meal.assert_awaited_once()
         bot.send_message.assert_awaited_once_with(chat_id="999", text="meal completed")
 
     async def test_poll_and_match_reuses_new_retrieval_document_embedding_for_each_confirmation(self) -> None:
@@ -629,6 +648,17 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         first_run_embedding = [0.3] * EMBEDDING_DIMENSION
         second_run_embedding = [0.4] * EMBEDDING_DIMENSION
 
+        async def finalize_repeated(**kwargs):
+            meal.processing_status = MealProcessingStatus.COMPLETED
+            return {
+                "finalized": True,
+                "meal_resolution": SimpleNamespace(
+                    meal_entries=[
+                        SimpleNamespace(segment_id="segment-1", portion_bucket="STANDARD", quantity_display="Standard")
+                    ]
+                ),
+            }
+
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
@@ -661,6 +691,17 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "embed_segment_visual_embedding",
                 side_effect=[first_run_embedding, second_run_embedding],
             ) as embed_segment_visual_embedding,
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(
+                polling.reasoning_service,
+                "run_reasoning_request",
+                AsyncMock(return_value=({"action": "AUTO_CONFIRM", "meal_state": "READY_TO_WRITE"}, None)),
+            ),
+            patch.object(
+                polling.reasoning_service,
+                "finalize_meal_from_reasoning",
+                AsyncMock(side_effect=finalize_repeated),
+            ) as finalize_meal,
             patch.object(polling, "format_match_completion_message", return_value="meal completed"),
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
@@ -669,24 +710,5 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
-        food_visual_payloads = [
-            call.args[0].embedding
-            for call in session.add.call_args_list
-            if getattr(call.args[0], "cropped_image_url", None)
-        ]
-        self.assertEqual(len(food_visual_payloads), 2)
-        self.assertIn(first_run_embedding, food_visual_payloads)
-        self.assertIn(second_run_embedding, food_visual_payloads)
-
-        matching_service_args = embed_segment_visual_embedding.call_args_list
-        self.assertEqual(len(matching_service_args), 2)
-        self.assertEqual(matching_service_args[0].kwargs["segment"], segment_one)
-        self.assertEqual(matching_service_args[1].kwargs["segment"], segment_one)
-        self.assertEqual(
-            matching_service_args[0].kwargs["embedding_model"],
-            matching_service.MATCHING_EMBEDDING_MODEL,
-        )
-        self.assertEqual(
-            matching_service_args[1].kwargs["embedding_model"],
-            matching_service.MATCHING_EMBEDDING_MODEL,
-        )
+        self.assertEqual(finalize_meal.await_count, 2)
+        embed_segment_visual_embedding.assert_not_called()

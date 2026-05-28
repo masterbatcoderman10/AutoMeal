@@ -18,6 +18,7 @@ from app.services.vision_service import (
     label_food_segment,
     segment_food_photo_with_retry,
 )
+from app.services import reasoning_service
 from bot.messages import (
     format_ack_message,
     format_soft_failure_message,
@@ -27,6 +28,16 @@ from bot.messages import (
 )
 
 logger = logging.getLogger(__name__)
+_poll_sleep = asyncio.sleep
+
+
+def _normalize_portion_bucket(value: str | None) -> str:
+    if not isinstance(value, str):
+        return "STANDARD"
+    normalized = value.strip().upper()
+    if normalized in {"SMALL", "STANDARD", "LARGE"}:
+        return normalized
+    return "STANDARD"
 
 
 async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None) -> None:
@@ -80,7 +91,7 @@ async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None
                     except Exception:
                         logger.exception("Error recovering acknowledged meal state")
 
-            await asyncio.sleep(interval)
+            await _poll_sleep(interval)
     finally:
         await engine.dispose()
 
@@ -167,7 +178,7 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                     meal = result.scalar_one_or_none()
 
                     if meal is None:
-                        await asyncio.sleep(interval)
+                        await _poll_sleep(interval)
                         continue
 
                     segments = await segment_food_photo_with_retry(
@@ -242,7 +253,7 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                         crop_path.unlink(missing_ok=True)
                     except Exception:
                         logger.exception("Error while deleting failed segment crop", extra={"path": str(crop_path)})
-            await asyncio.sleep(interval)
+            await _poll_sleep(interval)
     finally:
         await engine.dispose()
 
@@ -277,7 +288,7 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                     result = await session.execute(statement)
                     meal = result.scalar_one_or_none()
                     if meal is None:
-                        await asyncio.sleep(interval)
+                        await _poll_sleep(interval)
                         continue
 
                     segment_result = await session.execute(
@@ -315,7 +326,7 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                             await session.commit()
                 except Exception:
                     logger.exception("Error while marking meal as FAILED in embedding")
-            await asyncio.sleep(interval)
+            await _poll_sleep(interval)
     finally:
         await engine.dispose()
 
@@ -327,12 +338,97 @@ async def _is_rejection_threshold_reached(
     llm_client,
 ) -> matching_service.SegmentMatchResult:
     if segment.embedding is None:
+        if llm_client is None:
+            llm_client = get_llm_client()
         return await matching_service.match_segment_against_visual_corpus(
             segment=segment,
             session=session,
             llm_client=llm_client,
         )
     return await matching_service.match_segment_with_cached_embedding(segment=segment, session=session)
+
+
+def _resolve_match_parallelism(settings: object) -> int:
+    configured = getattr(settings, "REASONING_SEGMENT_PARALLELISM", None)
+    if configured is None:
+        configured = getattr(settings, "SEGMENT_MATCH_PARALLELISM", 4)
+    try:
+        value = int(configured)
+    except (TypeError, ValueError):
+        value = 4
+    return max(1, value)
+
+
+async def _match_segment_with_limit(
+    *,
+    segment: MealSegment,
+    session: AsyncSession,
+    llm_client,
+    semaphore: asyncio.Semaphore,
+) -> tuple[MealSegment, matching_service.SegmentMatchResult]:
+    async with semaphore:
+        result = await _is_rejection_threshold_reached(
+            segment=segment,
+            session=session,
+            llm_client=llm_client,
+        )
+    return segment, result
+
+
+def _completion_items_from_meal_resolution(
+    *,
+    match_results: list[tuple[MealSegment, matching_service.SegmentMatchResult]],
+    meal_resolution: object,
+) -> list[CompletionItem]:
+    entries_by_segment = {
+        getattr(entry, "segment_id", None): entry
+        for entry in getattr(meal_resolution, "meal_entries", [])
+    }
+
+    completion_items: list[CompletionItem] = []
+    for segment, result in match_results:
+        food_item = result.food_visual.food_item if getattr(result, "food_visual", None) is not None else None
+        entry = entries_by_segment.get(getattr(segment, "id", None))
+        portion_bucket = (
+            getattr(entry, "portion_bucket", None)
+            if entry is not None
+            else None
+        )
+        quantity_label = (
+            getattr(entry, "quantity_display", None) if entry is not None else None
+        )
+
+        completion_items.append(
+            CompletionItem(
+                food_name=(
+                    food_item.name
+                    if food_item is not None and getattr(food_item, "name", None)
+                    else "Unknown food"
+                ),
+                portion_bucket=(
+                    _normalize_portion_bucket(
+                        str(portion_bucket)
+                        if portion_bucket is not None
+                        else "STANDARD"
+                    )
+                ),
+                identification_method="AUTO_CONFIRM",
+                is_verified=(
+                    bool(food_item.is_verified)
+                    if food_item is not None and hasattr(food_item, "is_verified")
+                    else False
+                ),
+                calories=getattr(food_item, "calories", None),
+                protein_g=getattr(food_item, "protein_g", None),
+                carbs_g=getattr(food_item, "carbs_g", None),
+                fat_g=getattr(food_item, "fat_g", None),
+                quantity_label=(
+                    quantity_label if isinstance(quantity_label, str) and quantity_label.strip() else None
+                ),
+            )
+        )
+
+    return completion_items
 
 
 async def poll_and_match_food_segments(bot, settings, poll_interval: float | None = None) -> None:
@@ -348,7 +444,7 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
         autoflush=False,
     )
     interval = poll_interval or settings.BOT_POLL_INTERVAL
-    llm_client = get_llm_client()
+    llm_client = None
 
     try:
         while True:
@@ -365,7 +461,7 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                     result = await session.execute(statement)
                     meal = result.scalar_one_or_none()
                     if meal is None:
-                        await asyncio.sleep(interval)
+                        await _poll_sleep(interval)
                         continue
 
                     segment_result = await session.execute(
@@ -377,75 +473,63 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                         await session.commit()
                         continue
 
-                    match_results: list[tuple[MealSegment, matching_service.SegmentMatchResult]] = []
-                    unresolved_results = []
-                    for segment in segments:
-                        result = await _is_rejection_threshold_reached(
-                            segment=segment,
-                            session=session,
-                            llm_client=llm_client,
-                        )
-                        match_results.append((segment, result))
-                        if result.is_below_threshold or not result.is_match:
-                            unresolved_results.append(result)
+                    match_sem = asyncio.Semaphore(_resolve_match_parallelism(settings))
+                    match_results = await asyncio.gather(
+                        *[
+                            _match_segment_with_limit(
+                                segment=segment,
+                                session=session,
+                                llm_client=llm_client,
+                                semaphore=match_sem,
+                            )
+                            for segment in segments
+                        ]
+                    )
 
-                    if unresolved_results:
-                        meal.processing_status = MealProcessingStatus.REASONING
-                        await session.commit()
-                        try:
+                    for segment, result in match_results:
+                        matching_service.persist_match_candidate_snapshot(
+                            segment=segment,
+                            result=result,
+                        )
+
+                    reasoning_result, _trace = await reasoning_service.run_reasoning_request(
+                        llm_client=llm_client or get_llm_client(),
+                        meal_id=meal.id,
+                        meal=meal,
+                        match_results=match_results,
+                        settings=settings,
+                    )
+
+                    finalization = await reasoning_service.finalize_meal_from_reasoning(
+                        session=session,
+                        meal=meal,
+                        segments=segments,
+                        match_results=match_results,
+                        reasoning_payload=reasoning_result,
+                    )
+
+                    if finalization.get("finalized"):
+                        completion_items = _completion_items_from_meal_resolution(
+                            match_results=match_results,
+                            meal_resolution=finalization.get("meal_resolution"),
+                        )
+                    else:
+                        meal.processing_status = MealProcessingStatus.INTERVIEWING
+
+                    try:
+                        if finalization.get("finalized"):
+                            await bot.send_message(
+                                chat_id=settings.TELEGRAM_CHAT_ID,
+                                text=format_match_completion_message(completion_items),
+                            )
+                        else:
                             await bot.send_message(
                                 chat_id=settings.TELEGRAM_CHAT_ID,
                                 text=format_unresolved_match_message(meal.id),
                             )
-                        except Exception:
-                            logger.exception("Error sending unresolved match message")
-                        continue
-
-                    await matching_service.persist_successful_match_rows(
-                        session=session,
-                        meal=meal,
-                        match_results=match_results,
-                        llm_client=llm_client,
-                    )
-
-                    completion_items = []
-                    for _segment, result in match_results:
-                        food_item = (
-                            result.food_visual.food_item
-                            if result.food_visual is not None
-                            else None
-                        )
-                        completion_items.append(
-                            CompletionItem(
-                                food_name=(
-                                    food_item.name
-                                    if food_item is not None and food_item.name
-                                    else "Unknown food"
-                                ),
-                                portion_bucket="STANDARD",
-                                identification_method="SIMILARITY",
-                                is_verified=(
-                                    bool(food_item.is_verified)
-                                    if food_item is not None and hasattr(food_item, "is_verified")
-                                    else False
-                                ),
-                                calories=getattr(food_item, "calories", None),
-                                protein_g=getattr(food_item, "protein_g", None),
-                                carbs_g=getattr(food_item, "carbs_g", None),
-                                fat_g=getattr(food_item, "fat_g", None),
-                            )
-                        )
-
-                    meal.processing_status = MealProcessingStatus.COMPLETED
-                    await session.commit()
-
-                    try:
-                        await bot.send_message(
-                            chat_id=settings.TELEGRAM_CHAT_ID,
-                            text=format_match_completion_message(completion_items),
-                        )
                     except Exception:
                         logger.exception("Error sending completion match message")
+                    continue
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -459,6 +543,6 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                             await session.commit()
                 except Exception:
                     logger.exception("Error while marking meal as FAILED in matching")
-            await asyncio.sleep(interval)
+            await _poll_sleep(interval)
     finally:
         await engine.dispose()

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import json
 import re
 import sys
@@ -20,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.config import get_settings
 from app.models import FoodItem, FoodVisual, MealLog, MealSegment, MealProcessingStatus
-from app.services import embedding_service, matching_service
+from app.services import embedding_service, matching_service, reasoning_service
 from app.services.llm_client import get_llm_client
 
 EMBEDDING_MODEL = "google/gemini-embedding-2-preview"
@@ -128,219 +127,79 @@ def _make_smoke_id(prefix: str, *, suffix_length: int = 12) -> str:
     return f"{trimmed}-{suffix}"
 
 
-def _resolve_reasoning_model() -> str:
-    settings = get_settings()
-    return (
-        getattr(settings, "REASONING_MODEL", None)
-        or getattr(settings, "LABEL_MODEL", "google/gemini-3.5-flash")
-    )
-
-
-def _mime_type_for_path(path: Path) -> str:
-    if path.suffix.lower() == ".png":
-        return "image/png"
-    if path.suffix.lower() == ".webp":
-        return "image/webp"
-    return "image/jpeg"
-
-
-def _base64_image_payload(path: Path) -> dict[str, Any]:
-    media_type = _mime_type_for_path(path)
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-    return {
-        "type": "image_url",
-        "image_url": {"url": f"data:{media_type};base64,{encoded}"},
-    }
-
-
-def _reasoning_probe_schema() -> dict[str, Any]:
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "reasoning_contract_probe",
-            "schema": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["action", "meal_state", "top_3", "decision_rationale"],
-                "properties": {
-                    "action": {"type": "string"},
-                    "meal_state": {"type": "string"},
-                    "trace_id": {"type": "string"},
-                    "decision_rationale": {"type": "string"},
-                    "gate_reason": {"type": "string"},
-                    "segment_count": {"type": "integer"},
-                    "top_3": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": [
-                                "candidate_id",
-                                "label",
-                                "identity_confidence",
-                                "quantity_confidence",
-                                "match_consistency_confidence",
-                                "visual_evidence",
-                                "missing_evidence",
-                                "specificity",
-                                "nutrition_relevance",
-                                "source",
-                                "decision_rationale",
-                            ],
-                            "properties": {
-                                "candidate_id": {"type": "string"},
-                                "label": {"type": "string"},
-                                "identity_confidence": {"type": "number"},
-                                "quantity_confidence": {"type": "number"},
-                                "match_consistency_confidence": {"type": "number"},
-                                "visual_evidence": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                },
-                                "missing_evidence": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                },
-                                "specificity": {"type": "string"},
-                                "nutrition_relevance": {"type": "string"},
-                                "source": {"type": "string"},
-                                "decision_rationale": {"type": "string"},
-                                "nutrition_impact": {"type": "number"},
-                            },
-                        },
-                        "minItems": 3,
-                        "maxItems": 3,
-                    },
-                },
-            },
-        },
-    }
-
-
-def _extract_reasoning_metadata(response: Any) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        "trace_id": None,
-        "cached_tokens": None,
-    }
-    cached_values: list[int] = []
-    trace_values: list[str] = []
-
-    def walk_node(node: Any) -> None:
-        if node is None:
-            return
-        if isinstance(node, dict):
-            for key, value in node.items():
-                key_lower = str(key).lower()
-                if key_lower in {"trace_id", "trace-id", "traceid", "x-trace-id"}:
-                    if isinstance(value, str) and value:
-                        trace_values.append(value)
-                    elif isinstance(value, int | float):
-                        trace_values.append(str(value))
-                if key_lower == "cached_tokens" and isinstance(value, (int, float)):
-                    cached_values.append(int(value))
-                walk_node(value)
-        elif isinstance(node, (list, tuple, set)):
-            for item in node:
-                walk_node(item)
-        elif hasattr(node, "__dict__"):
-            walk_node(vars(node))
-
-    walk_node(response)
-
-    metadata["trace_id"] = trace_values[0] if trace_values else None
-    if cached_values:
-        metadata["cached_tokens"] = max(cached_values)
-    return metadata
-
-
-def _parse_llm_json_response(response: Any) -> tuple[dict[str, Any] | None, str | None]:
-    if not isinstance(response, dict):
-        return None, "response is not a mapping"
-    choices = response.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return None, "no choices returned"
-    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-    if not isinstance(message, dict):
-        return None, "first choice message is malformed"
-    content = message.get("content")
-    if not isinstance(content, str):
-        return None, "first choice content is not text"
-    try:
-        return json.loads(content), None
-    except json.JSONDecodeError as exc:
-        return None, f"failed to parse JSON: {exc}"
+def _resolve_image_path(path_value: str | Path, *, flag_name: str) -> Path:
+    image_path = Path(path_value).expanduser().resolve()
+    if not image_path.exists() or not image_path.is_file():
+        raise FileNotFoundError(f"{flag_name} image missing: {image_path}")
+    return image_path
 
 
 async def _run_reasoning_probe(args: argparse.Namespace, llm_client) -> dict[str, Any]:
-    sample_input = _resolve_crop_path(args.sample, flag_name="--sample")
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a meal reasoning model. Return strict JSON for meal reasoning. "
-                "Use the provided top-3 output format and keep action as an open string."
-            ),
-        },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        "Meal image and stable taxonomy probe."
-                        " Use these 3 stable candidate entries and rank best 3."
-                    ),
-                },
-                _base64_image_payload(sample_input),
-            ],
-        },
-    ]
-    response_format = _reasoning_probe_schema()
-    model = _resolve_reasoning_model()
+    sample_input = _resolve_image_path(args.sample, flag_name="--sample")
+    settings = get_settings()
+    database_url = _resolve_database_url(args)
+    engine = create_async_engine(database_url, echo=False, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    probe_runs = []
-    for run_index in (1, 2):
-        response = await llm_client.chat_completion(
-            model=model,
-            messages=messages,
-            response_format=response_format,
-        )
-        parsed_response, parse_error = _parse_llm_json_response(response)
-        metadata = _extract_reasoning_metadata(response)
-        probe_runs.append(
-            {
-                "run": run_index,
-                "status": "pass" if parse_error is None else "warn",
-                "trace_id": metadata["trace_id"] or (parsed_response or {}).get(
-                    "trace_id",
-                ),
-                "cached_tokens": metadata["cached_tokens"],
-                "parse_error": parse_error,
-                "response": parsed_response,
-            }
-        )
+    meal = MealLog(
+        id=_make_smoke_id("reasoning-meal"),
+        image_url=str(sample_input),
+        image_hash="reasoning-probe",
+        processing_status=MealProcessingStatus.REASONING,
+    )
+    segment = MealSegment(
+        id=_make_smoke_id("reasoning-segment"),
+        meal_log_id=meal.id,
+        label="reasoning probe sample",
+        bounding_box=[0, 0, 1000, 1000],
+        cropped_image_url=str(sample_input),
+    )
 
-    cached_tokens: list[int | None] = [
-        run["cached_tokens"] for run in probe_runs
-    ]
+    try:
+        async with session_factory() as session:
+            match_result = await matching_service.match_segment_against_visual_corpus(
+                segment=segment,
+                session=session,
+                llm_client=llm_client,
+                embedding_model=matching_service.MATCHING_EMBEDDING_MODEL,
+            )
+            matching_service.persist_match_candidate_snapshot(
+                segment=segment,
+                result=match_result,
+            )
+            reasoning_result, trace_metadata = await reasoning_service.run_reasoning_request(
+                llm_client=llm_client,
+                meal_id=meal.id,
+                meal=meal,
+                match_results=[(segment, match_result)],
+                settings=settings,
+            )
+    finally:
+        await engine.dispose()
+
+    trace_metadata = trace_metadata or {}
     return {
         "mode": "reasoning-probe",
         "status": "pass",
         "sample": str(sample_input),
-        "model": model,
-        "runs": probe_runs,
-        "cached_tokens_by_run": cached_tokens,
-        "cached_tokens_same_as_prior": len(
-            {
-                run["cached_tokens"]
-                for run in probe_runs
-                if run["cached_tokens"] is not None
-            }
-        )
-        == 1
-        if len([run for run in probe_runs if run["cached_tokens"] is not None]) >= 2
-        else None,
-        "trace_ids": [run["trace_id"] for run in probe_runs],
+        "model": getattr(settings, "REASONING_MODEL", None),
+        "meal_id": meal.id,
+        "segment_id": segment.id,
+        "action": reasoning_result.get("action"),
+        "meal_state": reasoning_result.get("meal_state"),
+        "gate_auto_confirmed": reasoning_result.get("meal_state") == "READY_TO_WRITE",
+        "gate_reason": reasoning_result.get("gate_reason"),
+        "decision_rationale": reasoning_result.get("decision_rationale"),
+        "trace_id": reasoning_result.get("trace_id") or trace_metadata.get("trace_id"),
+        "cached_tokens": trace_metadata.get("cached_tokens"),
+        "match": {
+            "is_match": match_result.is_match,
+            "is_below_threshold": match_result.is_below_threshold,
+            "similarity": match_result.similarity,
+            "candidate_count": len(match_result.top_candidates),
+            "snapshot": segment.match_candidates_json,
+        },
+        "top_3": reasoning_result.get("top_3", []),
     }
 
 
@@ -351,8 +210,10 @@ def is_corpus_branch_valid(visual_count: int) -> bool:
 
 
 def _resolve_database_url(args: argparse.Namespace) -> str:
-    settings = get_settings()
-    database_url = args.database_url or settings.DATABASE_URL
+    database_url = args.database_url
+    if not database_url:
+        settings = get_settings()
+        database_url = settings.DATABASE_URL
     if not database_url:
         raise RuntimeError(
             "DATABASE_URL is empty. Set it in .env or pass --database-url for smoke modes that use Postgres."

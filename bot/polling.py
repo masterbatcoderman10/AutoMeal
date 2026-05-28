@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.models import InterviewSession, MealSegment, MealLog, MealProcessingStatus
 from app.services.llm_client import get_llm_client
-from app.services import matching_service
+from app.services import interview_service, matching_service
 from app.services.image_service import save_segment_crop
 from app.services.vision_service import (
     dedupe_overlapping_segments,
@@ -587,6 +587,14 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                             match_results=match_results,
                             meal_resolution=finalization.get("meal_resolution"),
                         )
+                    else:
+                        await interview_service.prepare_interview_session(
+                            session=session,
+                            meal=meal,
+                            segments=segments,
+                            chat_id=str(settings.TELEGRAM_CHAT_ID),
+                        )
+                        await session.commit()
 
                     try:
                         if finalization.get("finalized"):

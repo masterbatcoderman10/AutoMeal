@@ -74,7 +74,7 @@ class JanitorTests(unittest.TestCase):
 
         plan = _plan_stale_recovery(meal, segments=segments, now=now)
 
-        self.assertEqual(plan.get("recovery_status"), MealProcessingStatus.REASONING.value)
+        self.assertEqual(plan.get("recovery_status"), MealProcessingStatus.MATCHING.value)
         self.assertEqual(plan.get("resume_basis"), "candidate_snapshots")
         self.assertEqual(plan.get("recovery_attempt_count"), 2)
         self.assertEqual(plan.get("failed_reason"), None)
@@ -92,16 +92,17 @@ class JanitorTests(unittest.TestCase):
         }
 
         failed = _plan_stale_recovery(meal, now=now)
-        second_pass = _enqueue_notification(failed, now=now + timedelta(minutes=1))
+        delivered = {**failed, "last_recovery_notified_at": now}
+        second_pass = _enqueue_notification(delivered, now=now + timedelta(minutes=1))
 
         self.assertEqual(failed.get("recovery_status"), MealProcessingStatus.FAILED.value)
         self.assertEqual(failed.get("failed_reason"), "janitor_stale_retries_exhausted")
         self.assertTrue(failed.get("notify_user"))
-        self.assertIsNotNone(failed.get("last_recovery_notified_at"))
+        self.assertIsNone(failed.get("last_recovery_notified_at"))
         self.assertFalse(second_pass.get("notify_user"))
         self.assertEqual(
             second_pass.get("last_recovery_notified_at"),
-            failed.get("last_recovery_notified_at"),
+            delivered.get("last_recovery_notified_at"),
         )
 
     def test_interviewing_and_terminal_states_are_excluded(self) -> None:

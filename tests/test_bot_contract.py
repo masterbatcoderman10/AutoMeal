@@ -1087,7 +1087,7 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
         builder.concurrent_updates.assert_called_once_with(False)
         builder.post_init.assert_called_once_with(bot_main.post_init)
         builder.post_shutdown.assert_called_once_with(bot_main.post_shutdown)
-        self.assertEqual(application.add_handler.call_count, 3)
+        self.assertEqual(application.add_handler.call_count, 4)
         application.run_polling.assert_called_once_with(
             allowed_updates=bot_main.Update.ALL_TYPES,
             drop_pending_updates=True,

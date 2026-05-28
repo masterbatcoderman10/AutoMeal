@@ -132,7 +132,7 @@ def select_recovery_target(
 
     if segment_rows and all(_segment_has_candidate_snapshot(segment) for segment in segment_rows):
         return {
-            "recovery_status": MealProcessingStatus.REASONING.value,
+            "recovery_status": MealProcessingStatus.MATCHING.value,
             "resume_basis": "candidate_snapshots",
         }
 
@@ -190,7 +190,7 @@ def enqueue_recovery_notification(meal: Mapping[str, Any], *, now: datetime | No
         return notification
 
     notification["notify_user"] = True
-    notification["last_recovery_notified_at"] = current_time
+    notification["notification_ready_at"] = current_time
     return notification
 
 
@@ -443,6 +443,17 @@ async def run_meal_janitor(
                     chat_id=getattr(settings, "TELEGRAM_CHAT_ID"),
                     text=_janitor_failure_message(str(plan["meal_id"])),
                 )
+                async with session_factory() as notify_session:
+                    result = await notify_session.execute(
+                        select(MealLog)
+                        .where(MealLog.id == plan["meal_id"])
+                        .limit(1)
+                    )
+                    notified_meal = result.scalar_one_or_none()
+                    if notified_meal is not None:
+                        notified_meal.last_recovery_notified_at = datetime.now(UTC)
+                        notify_session.add(notified_meal)
+                        await notify_session.commit()
             except Exception:
                 logger.exception("Failed to send janitor recovery notification", extra={"meal_id": plan.get("meal_id")})
 

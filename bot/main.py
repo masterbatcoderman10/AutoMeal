@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from app.config import get_settings
-from bot.handlers import start
+from bot.handlers import fix_command, start
 from bot.handlers import interview_callback, interview_text
 from bot.polling import (
     poll_and_acknowledge,
@@ -99,6 +99,7 @@ def main() -> None:
         .build()
     )
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("fix", fix_command))
     application.add_handler(CallbackQueryHandler(interview_callback, pattern=r"^(interview|confirm|edit|all_wrong):"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, interview_text))
     application.run_polling(

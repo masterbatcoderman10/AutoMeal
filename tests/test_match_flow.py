@@ -454,12 +454,18 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "finalize_meal_from_reasoning",
                 AsyncMock(side_effect=_finalize_unresolved),
             ),
+            patch.object(
+                polling.interview_service,
+                "prepare_interview_session",
+                AsyncMock(),
+            ) as prepare_interview_session,
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.INTERVIEWING)
+        prepare_interview_session.assert_awaited_once()
         bot.send_message.assert_awaited_once_with(
             chat_id="999",
             text="I can see your meal, but I do not know it yet.",

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
 
-from app.models import MealLog, MealProcessingStatus, MealSegment
+from sqlalchemy import select
+
+from app.models import InterviewMessage, InterviewSession, MealLog, MealProcessingStatus, MealSegment
 from app.services.grounding_stub import build_grounding_prep, normalize_source_type
 from app.services.meal_resolution_service import (
     FinalSegmentResolution,
@@ -203,6 +206,65 @@ def answer_to_confirmation_item(answer: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if value is not None}
 
 
+async def prepare_interview_session(
+    *,
+    session,
+    meal: MealLog,
+    segments: list[MealSegment],
+    chat_id: str,
+) -> InterviewSession:
+    existing_result = await session.execute(
+        select(InterviewSession)
+        .where(
+            InterviewSession.meal_log_id == meal.id,
+            InterviewSession.is_active.is_(True),
+        )
+        .order_by(InterviewSession.updated_at.desc())
+        .limit(1)
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    pending_targets = [
+        {
+            "segment_id": segment.id,
+            "label": getattr(segment, "label", None) or "this item",
+        }
+        for segment in segments
+    ]
+    prompt_payload = {
+        "meal_id": meal.id,
+        "roadmap_step": "INITIAL_QUESTION",
+        "pending_targets": pending_targets,
+        "current_target_index": 0,
+        "interview_messages": [],
+        "last_prompted_at": datetime.now(UTC),
+    }
+    interview = InterviewSession(
+        id=str(uuid.uuid4()),
+        meal_log_id=meal.id,
+        chat_id=str(chat_id),
+        state_key="INITIAL_QUESTION",
+        current_prompt_payload=prompt_payload,
+        reminder_count=0,
+        is_active=True,
+    )
+    session.add(interview)
+    session.add(
+        InterviewMessage(
+            id=str(uuid.uuid4()),
+            session_id=interview.id,
+            role="bot",
+            payload={
+                "type": "prompt",
+                "prompt": current_target_question(prompt_payload),
+            },
+        )
+    )
+    return interview
+
+
 def final_resolution_from_confirmation(
     *,
     item: Mapping[str, Any],
@@ -257,6 +319,29 @@ async def finalize_confirmed_interview(
         )
         for item in confirmation_items
     ]
+    if any(resolution.food.needs_grounding for resolution in final_segments):
+        meal.processing_status = MealProcessingStatus.INTERVIEWING
+        meal.reasoning_state_json = {
+            "completed_by": "interview_service",
+            "grounding_required": True,
+            "confirmation_items": [dict(item) for item in confirmation_items],
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        if hasattr(meal, "last_stage_started_at"):
+            meal.last_stage_started_at = None
+        session.add(meal)
+        if hasattr(session, "commit"):
+            maybe = session.commit()
+            if hasattr(maybe, "__await__"):
+                await maybe
+        return {
+            "meal": meal,
+            "meal_entries": [],
+            "food_visuals": [],
+            "correction_events": [],
+            "grounding_required": True,
+        }
+
     result = await apply_final_meal_resolution(
         session=session,
         meal=meal,
@@ -324,5 +409,6 @@ __all__ = [
     "is_pinned_chat_update",
     "parse_confirmation_bulk_text",
     "parse_interview_text",
+    "prepare_interview_session",
     "should_send_single_reminder",
 ]

@@ -106,7 +106,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 - [ ] `04-03-PLAN.md` — durable schema and ORM state surfaces for reasoning, quantity, interview, correction, and recovery
 - [ ] `04-04-PLAN.md` — shared runtime interfaces, editable taxonomy, Phase 4 config keys, and optional Langfuse tracing wrapper
 - [x] `04-05-PLAN.md` — meal-level reasoning gate, top-3 trace persistence, and bounded parallel auto-confirm slice
-- [ ] `04-06-PLAN.md` — Telegram interview, confirmation edit loops, reminder, and minimal grounding-prep slice
+- [x] `04-06-PLAN.md` — Telegram interview, confirmation edit loops, reminder, and minimal grounding-prep slice
 - [ ] `04-07-PLAN.md` — `/fix` correction, scoped invalidation, and correction history slice
 - [ ] `04-08-PLAN.md` — APScheduler janitor recovery, duplicate-notify suppression, and crash smoke slice
 

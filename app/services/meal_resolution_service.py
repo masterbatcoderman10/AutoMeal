@@ -412,6 +412,8 @@ async def apply_final_meal_resolution(
     if reasoning_state_json is not None:
         meal.reasoning_state_json = copy.deepcopy(reasoning_state_json)
     meal.processing_status = meal_status
+    if hasattr(meal, "last_stage_started_at"):
+        meal.last_stage_started_at = None
 
     return MealResolutionResult(
         meal=meal,

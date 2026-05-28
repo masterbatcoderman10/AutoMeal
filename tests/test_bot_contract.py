@@ -839,7 +839,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("send", order)
         self.assertLess(order.index("commit"), order.index("send"))
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        session.commit.assert_awaited_once()
+        self.assertEqual(session.commit.await_count, 2)
         bot.send_message.assert_awaited_once_with(chat_id="999", text="meal completed")
         self.assertEqual(formatter.call_count, 1)
         completion_items = list(formatter.call_args[0][0]) if formatter.call_args else []
@@ -961,8 +961,8 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        self.assertEqual(order, ["commit", "send"])
-        session.commit.assert_awaited_once()
+        self.assertEqual(order, ["commit", "commit", "send"])
+        self.assertEqual(session.commit.await_count, 2)
 
 class MainWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_post_init_starts_background_polling_task(self) -> None:

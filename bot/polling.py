@@ -583,15 +583,10 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                     )
 
                     if finalization.get("finalized"):
-                        _transition_meal_status(meal, MealProcessingStatus.COMPLETED)
-                        await session.commit()
                         completion_items = _completion_items_from_meal_resolution(
                             match_results=match_results,
                             meal_resolution=finalization.get("meal_resolution"),
                         )
-                    else:
-                        _transition_meal_status(meal, MealProcessingStatus.INTERVIEWING)
-                        await session.commit()
 
                     try:
                         if finalization.get("finalized"):

@@ -409,6 +409,10 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             BOT_POLL_INTERVAL=3.0,
         )
 
+        async def _finalize_unresolved(**_kwargs):
+            meal.processing_status = MealProcessingStatus.INTERVIEWING
+            return {"finalized": False}
+
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
@@ -448,7 +452,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 polling.reasoning_service,
                 "finalize_meal_from_reasoning",
-                AsyncMock(return_value={"finalized": False}),
+                AsyncMock(side_effect=_finalize_unresolved),
             ),
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):

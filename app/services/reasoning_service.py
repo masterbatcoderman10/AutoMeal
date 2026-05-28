@@ -706,6 +706,8 @@ async def finalize_meal_from_reasoning(
     if not result.get("ready_for_final_write"):
         if hasattr(meal, "processing_status"):
             meal.processing_status = MealProcessingStatus.INTERVIEWING
+        if hasattr(meal, "last_stage_started_at"):
+            meal.last_stage_started_at = None
         if hasattr(session, "add"):
             session.add(meal)
         if hasattr(session, "commit"):

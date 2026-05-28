@@ -541,7 +541,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
-    async def test_post_interview_grounding_worker_moves_meal_into_reasoning_stage(self) -> None:
+    async def test_post_interview_grounding_worker_runs_reasoning_and_closes_completed_handoff(self) -> None:
         from bot import polling
 
         interview = SimpleNamespace(
@@ -562,16 +562,41 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             reasoning_state_json={
                 "grounding_required": True,
                 "grounding_status": "HANDOFF_ACKNOWLEDGED",
-                "confirmation_items": [{"segment_id": "seg-1", "name": "Protein Bar"}],
+                "confirmation_items": [
+                    {
+                        "segment_id": "seg-1",
+                        "name": "Protein Bar",
+                        "source_type": "PACKAGED",
+                        "brand_name": "Acme",
+                        "quantity_display": "1 bar",
+                    }
+                ],
             },
             recovery_attempt_count=0,
             last_stage_started_at=None,
         )
+        segment = SimpleNamespace(
+            id="seg-1",
+            meal_log_id="meal-1",
+            label="bar",
+            embedding=[0.1] * 1536,
+            match_candidates_json={
+                "top_3": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "label": "Protein Bar",
+                        "identity_confidence": 0.97,
+                    }
+                ],
+                "match_threshold": 0.9,
+            },
+        )
         session = AsyncMock()
         session.add = Mock()
-        session.execute.return_value = Mock(
-            scalars=Mock(return_value=Mock(all=Mock(return_value=[interview]))),
-        )
+        session.execute.side_effect = [
+            Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[interview])))),
+            Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[segment])))),
+        ]
         session.get = AsyncMock(return_value=meal)
         engine = SimpleNamespace(dispose=AsyncMock())
 
@@ -585,7 +610,104 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         session_factory = Mock(return_value=SessionContext())
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
+        )
+
+        async def finalize_grounding(**_kwargs):
+            meal.processing_status = MealProcessingStatus.COMPLETED
+            meal.reasoning_state_json = {"completed_by": "reasoning_service"}
+            return {
+                "finalized": True,
+                "completed_by": "reasoning_service",
+                "meal_reasoning": {"action": "AUTO_CONFIRM", "meal_state": "READY_TO_WRITE"},
+                "segment_reasoning": [{"segment_id": "seg-1"}],
+                "ready_for_final_write": True,
+                "meal_resolution": SimpleNamespace(
+                    meal_entries=[
+                        SimpleNamespace(
+                            id="entry-1",
+                            segment_id="seg-1",
+                            food_item_id=None,
+                            portion_bucket="STANDARD",
+                            quantity_display="1 bar",
+                            food_item=SimpleNamespace(
+                                name="Protein Bar",
+                                calories=200.0,
+                                protein_g=20.0,
+                                carbs_g=20.0,
+                                fat_g=7.0,
+                                is_verified=True,
+                            ),
+                        )
+                    ]
+                ),
+            }
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(polling.reasoning_service, "run_reasoning_request", AsyncMock(return_value=({"action": "AUTO_CONFIRM", "meal_state": "READY_TO_WRITE"}, None))) as run_reasoning_request,
+            patch.object(polling.reasoning_service, "finalize_meal_from_reasoning", AsyncMock(side_effect=finalize_grounding)),
+            patch.object(polling, "format_match_completion_message", return_value="grounded meal complete"),
+            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_post_interview_grounding(
+                    SimpleNamespace(send_message=AsyncMock()),
+                    settings,
+                    poll_interval=0.01,
+                    bot_data={},
+                )
+
+        run_reasoning_request.assert_awaited_once()
+        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
+        self.assertEqual(meal.reasoning_state_json["grounding_status"], "COMPLETED")
+        self.assertEqual(meal.reasoning_state_json["confirmation_items"][0]["brand_name"], "Acme")
+        self.assertTrue(meal.reasoning_state_json["grounding_finalized"])
+        self.assertFalse(interview.is_active)
+        self.assertEqual(interview.state_key, "GROUNDING_COMPLETED")
+        self.assertEqual(interview.current_prompt_payload["grounding_status"], "COMPLETED")
+        self.assertEqual(interview.current_prompt_payload["grounding_consumer"], "poll_post_interview_grounding")
+        self.assertGreaterEqual(session.commit.await_count, 1)
+        engine.dispose.assert_awaited_once()
+
+    async def test_interview_reminder_worker_skips_grounding_pending_sessions(self) -> None:
+        from bot import polling
+
+        interview = SimpleNamespace(
+            chat_id="999",
+            meal_log_id="meal-1",
+            is_active=True,
+            state_key="GROUNDING_PENDING",
+            last_reminder_at=None,
+            reminder_count=0,
+            updated_at=object(),
+            current_prompt_payload={
+                "roadmap_step": "GROUNDING_PENDING",
+                "grounding_status": "HANDOFF_ACKNOWLEDGED",
+            },
+        )
+        session = AsyncMock()
+        session.execute.return_value = Mock(
+            scalar_one_or_none=Mock(return_value=interview),
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            BOT_POLL_INTERVAL=3.0,
+            INTERVIEW_REMINDER_DELAY_SECONDS=60,
         )
 
         with (
@@ -594,19 +716,11 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
         ):
             with self.assertRaises(asyncio.CancelledError):
-                await polling.poll_post_interview_grounding(
-                    SimpleNamespace(),
-                    settings,
-                    poll_interval=0.01,
-                )
+                await polling.poll_interview_reminders(bot, settings, poll_interval=0.01)
 
-        self.assertEqual(meal.processing_status, MealProcessingStatus.REASONING)
-        self.assertEqual(meal.reasoning_state_json["grounding_status"], "AWAITING_GROUNDING")
-        self.assertIsNotNone(meal.last_stage_started_at)
-        self.assertTrue(interview.is_active)
-        self.assertEqual(interview.current_prompt_payload["grounding_status"], "AWAITING_GROUNDING")
-        self.assertEqual(interview.current_prompt_payload["grounding_consumer"], "poll_post_interview_grounding")
-        session.commit.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
+        session.commit.assert_not_awaited()
+        self.assertEqual(interview.reminder_count, 0)
         engine.dispose.assert_awaited_once()
 
     async def test_poll_recovers_acknowledged_meal_state_after_commit_failure(self) -> None:
@@ -1415,6 +1529,7 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             application.bot,
             settings,
             settings.BOT_POLL_INTERVAL,
+            application.bot_data,
         )
         poll_interview_reminders.assert_called_once_with(
             application.bot,

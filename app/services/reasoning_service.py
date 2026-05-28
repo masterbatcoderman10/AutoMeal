@@ -673,15 +673,20 @@ def _build_resolution_from_result(
     top_one = _coerce_top_candidate(result)
     canonical_name = _coerce_str(top_one.get("label"), "label") or "unlabeled food"
     segment_embedding = getattr(segment, "embedding", None)
+    food_item_id = getattr(result, "food_item_id", None) or _coerce_str(top_one.get("food_item_id"), "food_item_id")
+    source_type = (
+        _coerce_str(top_one.get("source_type"), "source_type")
+        or _coerce_str(top_one.get("source"), "source")
+        or "vector_match"
+    )
     return FinalSegmentResolution(
         food=ResolvedFoodInput(
             canonical_name=canonical_name,
-            food_item_id=getattr(result, "food_item_id", None),
+            food_item_id=food_item_id,
             aliases=[canonical_name],
-            source_type=(
-                _coerce_str(top_one.get("source"), "source")
-                or "vector_match"
-            ),
+            source_type=source_type,
+            brand_name=_coerce_str(top_one.get("brand_name"), "brand_name"),
+            restaurant_name=_coerce_str(top_one.get("restaurant_name"), "restaurant_name"),
             is_verified=True,
             times_confirmed=1,
         ),

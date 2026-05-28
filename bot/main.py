@@ -78,6 +78,7 @@ async def post_init(application: Application) -> None:
             application.bot,
             settings,
             settings.BOT_POLL_INTERVAL,
+            application.bot_data,
         )
     )
 

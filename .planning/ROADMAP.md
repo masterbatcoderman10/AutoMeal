@@ -9,7 +9,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 - [x] **Phase 1: Foundation & Ingest** - Docker stack running, correct schema, iOS Shortcut posts a photo and gets a Telegram ack (completed 2026-05-26)
 - [ ] **Phase 2: Vision Slice** - Photo upload produces a bot message listing detected food items by name (no nutrition yet)
 - [ ] **Phase 3: Embed & Match** - Seeded foods matched by vector similarity produce DiaryEntries and a nutrition push
-- [ ] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: segmented foods continue in bounded async parallel; unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes
+- [x] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: segmented foods continue in bounded async parallel; unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes (completed 2026-05-28)
 - [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
@@ -104,7 +104,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 - [ ] `04-01-PLAN.md` — Wave 0 reasoning contract, gate, parallel-pipeline tests, and live cache/trace smoke coverage
 - [ ] `04-02-PLAN.md` — Wave 0 interview, `/fix`, and janitor test scaffolds including D-48 and D-49 confirmation-edit branches
 - [ ] `04-03-PLAN.md` — durable schema and ORM state surfaces for reasoning, quantity, interview, correction, and recovery
-- [ ] `04-04-PLAN.md` — shared runtime interfaces, editable taxonomy, Phase 4 config keys, and optional Langfuse tracing wrapper
+- [x] `04-04-PLAN.md` — shared runtime interfaces, editable taxonomy, Phase 4 config keys, and optional Langfuse tracing wrapper (completed 2026-05-28)
 - [x] `04-05-PLAN.md` — meal-level reasoning gate, top-3 trace persistence, and bounded parallel auto-confirm slice
 - [x] `04-06-PLAN.md` — Telegram interview, confirmation edit loops, reminder, and minimal grounding-prep slice
 - [x] `04-07-PLAN.md` — `/fix` correction, scoped invalidation, and correction history slice
@@ -159,6 +159,6 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 | 1. Foundation & Ingest | 5/5 | Complete   | 2026-05-26 |
 | 2. Vision Slice | 4/4 | In Progress|  |
 | 3. Embed & Match | 4/4 | In Progress|  |
-| 4. Reason, Interview & Learning Loop | 4/8 | In Progress|  |
+| 4. Reason, Interview & Learning Loop | 8/8 | Complete    | 2026-05-28 |
 | 5. Agentic Grounding | 0/TBD | Not started | - |
 | 6. Bot Surface & Daily Summary | 0/TBD | Not started | - |

@@ -29,14 +29,14 @@
 
 ### Reason
 
-- [ ] **REASON-01**: When the top similarity score is below the auto-match threshold, the LLM reasoning stage runs against the cropped segment
-- [ ] **REASON-02**: LLM reasoning emits the **top-3 candidate identifications**, each with a brutally-self-reported confidence value and short rationale (not a single guess + single confidence)
-- [ ] **REASON-03**: Multi-signal confidence gate decides escalation using top-1-vs-top-2 margin AND the vector similarity score — not the LLM's self-reported confidence alone
-- [ ] **REASON-04**: Reasoning trace (top-3, scores, similarity, decision) is written to `MealSegment.ai_reasoning` for audit
+- [x] **REASON-01**: When the top similarity score is below the auto-match threshold, the LLM reasoning stage runs against the cropped segment
+- [x] **REASON-02**: LLM reasoning emits the **top-3 candidate identifications**, each with a brutally-self-reported confidence value and short rationale (not a single guess + single confidence)
+- [x] **REASON-03**: Multi-signal confidence gate decides escalation using top-1-vs-top-2 margin AND the vector similarity score — not the LLM's self-reported confidence alone
+- [x] **REASON-04**: Reasoning trace (top-3, scores, similarity, decision) is written to `MealSegment.ai_reasoning` for audit
 
 ### Pipeline
 
-- [ ] **PIPELINE-01**: After segmentation completes, each `MealSegment` continues independently through the remaining pipeline stages (embed → match → reason → interview/confirmation → write-back) using bounded async parallelism with a semaphore; one slow segment must not block automated progress on sibling segments, and the meal completes only after all segments resolve
+- [x] **PIPELINE-01**: After segmentation completes, each `MealSegment` continues independently through the remaining pipeline stages (embed → match → reason → interview/confirmation → write-back) using bounded async parallelism with a semaphore; one slow segment must not block automated progress on sibling segments, and the meal completes only after all segments resolve
 
 ### Ground
 
@@ -46,12 +46,12 @@
 
 ### Interview
 
-- [ ] **INTERVIEW-01**: Segments below the confidence threshold trigger a Telegram interview session
-- [ ] **INTERVIEW-02**: Interview follows the structured `InterviewMessageKey` flow (name → source-type → restaurant/brand → portion-context → confirmation)
-- [ ] **INTERVIEW-03**: Interview answers create or update a `FoodItem`; brands/restaurants run a re-grounding pass with tools to populate nutrition
-- [ ] **INTERVIEW-04**: If post-interview confidence is still below threshold, commit best-effort with `is_verified=false` (no infinite interview loops)
-- [ ] **INTERVIEW-05**: User can override an existing identification (`identification_method=USER_CORRECTED`)
-- [ ] **INTERVIEW-06**: `USER_CORRECTED` invalidates the offending `FoodVisual` and writes a new one for the correct `FoodItem`
+- [x] **INTERVIEW-01**: Segments below the confidence threshold trigger a Telegram interview session
+- [x] **INTERVIEW-02**: Interview follows the structured `InterviewMessageKey` flow (name → source-type → restaurant/brand → portion-context → confirmation)
+- [x] **INTERVIEW-03**: Interview answers create or update a `FoodItem`; brands/restaurants run a re-grounding pass with tools to populate nutrition
+- [x] **INTERVIEW-04**: If post-interview confidence is still below threshold, commit best-effort with `is_verified=false` (no infinite interview loops)
+- [x] **INTERVIEW-05**: User can override an existing identification (`identification_method=USER_CORRECTED`)
+- [x] **INTERVIEW-06**: `USER_CORRECTED` invalidates the offending `FoodVisual` and writes a new one for the correct `FoodItem`
 
 ### Output
 
@@ -69,7 +69,7 @@
 - [x] **INFRA-01**: A single `docker-compose.yml` brings up app + Postgres+pgvector + SearXNG + Firecrawl
 - [x] **INFRA-02**: All LLM calls go through OpenRouter via the OpenAI SDK with swapped `base_url` (vision, tool calls, structured outputs through SDK; multimodal embeddings via a thin `httpx` wrapper)
 - [x] **INFRA-03**: Runtime config (OpenRouter key, Telegram bot token + chat id, ingest secret, confidence thresholds, summary time + TZ) is loaded from an env file
-- [ ] **INFRA-04**: Pipeline state machine includes a `FAILED` status; a janitor job resets `*ING` rows stuck longer than 10 minutes
+- [x] **INFRA-04**: Pipeline state machine includes a `FAILED` status; a janitor job resets `*ING` rows stuck longer than 10 minutes
 - [x] **INFRA-05**: The full stack runs arm64 on the Mac mini and the same `docker-compose.yml` works on amd64 (multi-arch images preferred)
 
 ## v2 Requirements
@@ -130,20 +130,20 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 | MATCH-02 | Phase 3 | Pending |
 | MATCH-03 | Phase 3 | Pending |
 | MATCH-04 | Phase 3 | Pending |
-| REASON-01 | Phase 4 | Pending |
-| REASON-02 | Phase 4 | Pending |
-| REASON-03 | Phase 4 | Pending |
-| REASON-04 | Phase 4 | Pending |
-| PIPELINE-01 | Phase 4 | Pending |
+| REASON-01 | Phase 4 | Complete |
+| REASON-02 | Phase 4 | Complete |
+| REASON-03 | Phase 4 | Complete |
+| REASON-04 | Phase 4 | Complete |
+| PIPELINE-01 | Phase 4 | Complete |
 | GROUND-01 | Phase 5 | Pending |
 | GROUND-02 | Phase 5 | Pending |
 | GROUND-03 | Phase 5 | Pending |
-| INTERVIEW-01 | Phase 4 | Pending |
-| INTERVIEW-02 | Phase 4 | Pending |
-| INTERVIEW-03 | Phase 4 | Pending |
-| INTERVIEW-04 | Phase 4 | Pending |
-| INTERVIEW-05 | Phase 4 | Pending |
-| INTERVIEW-06 | Phase 4 | Pending |
+| INTERVIEW-01 | Phase 4 | Complete |
+| INTERVIEW-02 | Phase 4 | Complete |
+| INTERVIEW-03 | Phase 4 | Complete |
+| INTERVIEW-04 | Phase 4 | Complete |
+| INTERVIEW-05 | Phase 4 | Complete |
+| INTERVIEW-06 | Phase 4 | Complete |
 | OUTPUT-01 | Phase 6 | Pending |
 | OUTPUT-02 | Phase 6 | Pending |
 | OUTPUT-03 | Phase 6 | Pending |
@@ -155,7 +155,7 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 | INFRA-01 | Phase 1 | Complete |
 | INFRA-02 | Phase 1 | Complete |
 | INFRA-03 | Phase 1 | Complete |
-| INFRA-04 | Phase 4 | Pending |
+| INFRA-04 | Phase 4 | Complete |
 | INFRA-05 | Phase 1 | Complete |
 
 **Coverage:**

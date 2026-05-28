@@ -2,6 +2,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.services import interview_service
+from app.services import correction_service
 
 from bot.messages import format_start_message
 
@@ -17,6 +18,8 @@ apply_confirmation_edits = interview_service.apply_confirmation_edits
 parse_confirmation_bulk_text = interview_service.parse_confirmation_bulk_text
 build_confirmation_message = interview_service.build_confirmation_message
 build_all_wrong_prompt = interview_service.build_all_wrong_prompt
+resolve_fix_target = correction_service.resolve_fix_target
+parse_fix_patch = correction_service.parse_fix_patch
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -35,6 +38,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "Send a meal photo via the iOS Shortcut. I'll process it and tell you what I found."
     )
+
+
+async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    text = getattr(update.message, "text", "") or "/fix"
+    recent_entries = context.bot_data.get("recent_entries", []) if hasattr(context, "bot_data") else []
+    target = correction_service.resolve_fix_target(text, recent_entries=recent_entries)
+    if target["mode"] == "none":
+        await update.message.reply_text("No recent entries available to fix.")
+        return
+    await update.message.reply_text(f"Fix target: {target['entry_id']}. Send the correction or cancel.")
 
 
 async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -58,13 +73,16 @@ __all__ = [
     "build_confirmation_message",
     "complete_target_question",
     "current_target_question",
+    "fix_command",
     "get_interview_roadmap",
     "help_command",
     "interview_callback",
     "interview_text",
     "is_pinned_chat_update",
     "parse_confirmation_bulk_text",
+    "parse_fix_patch",
     "parse_interview_text",
+    "resolve_fix_target",
     "should_send_single_reminder",
     "start",
 ]

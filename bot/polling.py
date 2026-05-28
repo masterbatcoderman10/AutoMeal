@@ -30,6 +30,13 @@ from bot.messages import (
 )
 
 logger = logging.getLogger(__name__)
+_MACHINE_STAGE_STATUSES = {
+    MealProcessingStatus.DETECTING,
+    MealProcessingStatus.SEGMENTING,
+    MealProcessingStatus.EMBEDDING,
+    MealProcessingStatus.MATCHING,
+    MealProcessingStatus.REASONING,
+}
 
 
 async def _poll_sleep(delay: float) -> None:
@@ -43,6 +50,12 @@ def _normalize_portion_bucket(value: str | None) -> str:
     if normalized in {"SMALL", "STANDARD", "LARGE"}:
         return normalized
     return "STANDARD"
+
+
+def _transition_meal_status(meal: MealLog, status: MealProcessingStatus) -> None:
+    meal.processing_status = status
+    meal.recovery_attempt_count = int(getattr(meal, "recovery_attempt_count", 0) or 0)
+    meal.last_stage_started_at = datetime.now(UTC) if status in _MACHINE_STAGE_STATUSES else None
 
 
 async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None) -> None:
@@ -81,7 +94,7 @@ async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None
                             text=format_ack_message(meal.id),
                         )
                         ack_sent = True
-                        meal.processing_status = MealProcessingStatus.DETECTING
+                        _transition_meal_status(meal, MealProcessingStatus.DETECTING)
                         await session.commit()
             except asyncio.CancelledError:
                 raise
@@ -90,7 +103,7 @@ async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None
                 if ack_sent and meal is not None:
                     try:
                         async with session_factory() as recovery_session:
-                            meal.processing_status = MealProcessingStatus.DETECTING
+                            _transition_meal_status(meal, MealProcessingStatus.DETECTING)
                             await recovery_session.merge(meal)
                             await recovery_session.commit()
                     except Exception:
@@ -190,9 +203,9 @@ async def poll_and_detect_food(bot, settings, poll_interval: float | None = None
                             model=settings.DETECT_MODEL,
                         )
                         if decision["next_action"] == "segment":
-                            meal.processing_status = MealProcessingStatus.SEGMENTING
+                            _transition_meal_status(meal, MealProcessingStatus.SEGMENTING)
                         else:
-                            meal.processing_status = MealProcessingStatus.COMPLETED
+                            _transition_meal_status(meal, MealProcessingStatus.COMPLETED)
                         await session.commit()
             except asyncio.CancelledError:
                 raise
@@ -248,7 +261,7 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                     )
                     segments = dedupe_overlapping_segments(segments)
                     if not segments:
-                        meal.processing_status = MealProcessingStatus.FAILED
+                        _transition_meal_status(meal, MealProcessingStatus.FAILED)
                         await session.commit()
                         try:
                             await bot.send_message(
@@ -290,7 +303,7 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                             raise ValueError("segment label missing")
                         segment_row.label = label
 
-                    meal.processing_status = MealProcessingStatus.EMBEDDING
+                    _transition_meal_status(meal, MealProcessingStatus.EMBEDDING)
                     await session.commit()
 
             except asyncio.CancelledError:
@@ -301,7 +314,7 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                     async with session_factory() as session:
                         await session.rollback()
                         if meal is not None:
-                            meal.processing_status = MealProcessingStatus.FAILED
+                            _transition_meal_status(meal, MealProcessingStatus.FAILED)
                             await session.merge(meal)
                             await session.commit()
                 except Exception:
@@ -358,7 +371,7 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                             "Embedding worker found meal %s without segments; marking FAILED",
                             meal.id,
                         )
-                        meal.processing_status = MealProcessingStatus.FAILED
+                        _transition_meal_status(meal, MealProcessingStatus.FAILED)
                         await session.commit()
                         continue
 
@@ -369,7 +382,7 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                             embedding_model=matching_service.MATCHING_EMBEDDING_MODEL,
                         )
 
-                    meal.processing_status = MealProcessingStatus.MATCHING
+                    _transition_meal_status(meal, MealProcessingStatus.MATCHING)
                     await session.commit()
             except asyncio.CancelledError:
                 raise
@@ -379,7 +392,7 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                     async with session_factory() as session:
                         await session.rollback()
                         if meal is not None:
-                            meal.processing_status = MealProcessingStatus.FAILED
+                            _transition_meal_status(meal, MealProcessingStatus.FAILED)
                             await session.merge(meal)
                             await session.commit()
                 except Exception:
@@ -527,7 +540,7 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                     )
                     segments = list(segment_result.scalars().all())
                     if not segments:
-                        meal.processing_status = MealProcessingStatus.REASONING
+                        _transition_meal_status(meal, MealProcessingStatus.REASONING)
                         await session.commit()
                         continue
 
@@ -550,6 +563,9 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                             result=result,
                         )
 
+                    _transition_meal_status(meal, MealProcessingStatus.REASONING)
+                    await session.commit()
+
                     reasoning_result, _trace = await reasoning_service.run_reasoning_request(
                         llm_client=llm_client or get_llm_client(),
                         meal_id=meal.id,
@@ -567,12 +583,15 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                     )
 
                     if finalization.get("finalized"):
+                        _transition_meal_status(meal, MealProcessingStatus.COMPLETED)
+                        await session.commit()
                         completion_items = _completion_items_from_meal_resolution(
                             match_results=match_results,
                             meal_resolution=finalization.get("meal_resolution"),
                         )
                     else:
-                        meal.processing_status = MealProcessingStatus.INTERVIEWING
+                        _transition_meal_status(meal, MealProcessingStatus.INTERVIEWING)
+                        await session.commit()
 
                     try:
                         if finalization.get("finalized"):
@@ -596,7 +615,7 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                     async with session_factory() as session:
                         await session.rollback()
                         if meal is not None:
-                            meal.processing_status = MealProcessingStatus.FAILED
+                            _transition_meal_status(meal, MealProcessingStatus.FAILED)
                             await session.merge(meal)
                             await session.commit()
                 except Exception:

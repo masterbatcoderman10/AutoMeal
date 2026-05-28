@@ -13,6 +13,7 @@ from bot.polling import (
     poll_and_acknowledge,
     poll_and_detect_food,
     poll_and_embed_food_segments,
+    poll_grounding_handoffs,
     poll_and_match_food_segments,
     poll_interview_reminders,
     poll_and_segment_food,
@@ -64,6 +65,13 @@ async def post_init(application: Application) -> None:
             settings.BOT_POLL_INTERVAL,
         )
     )
+    application.bot_data["grounding_handoff_task"] = asyncio.create_task(
+        poll_grounding_handoffs(
+            application.bot,
+            settings,
+            settings.BOT_POLL_INTERVAL,
+        )
+    )
 
 
 async def post_shutdown(application: Application) -> None:
@@ -74,6 +82,7 @@ async def post_shutdown(application: Application) -> None:
         application.bot_data.get("embed_task"),
         application.bot_data.get("match_task"),
         application.bot_data.get("interview_reminder_task"),
+        application.bot_data.get("grounding_handoff_task"),
     ]:
         if task is None:
             continue

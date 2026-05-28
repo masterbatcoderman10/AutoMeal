@@ -30,6 +30,13 @@ def format_interview_reminder_message(meal_id: str) -> str:
     return f"Still need your reply for meal {meal_id[:8]} before I can finish logging it."
 
 
+def format_grounding_pending_message(meal_id: str) -> str:
+    return (
+        f"Thanks. Meal {meal_id[:8]} still needs brand or restaurant grounding, "
+        "so I've queued the next step and won't log it yet."
+    )
+
+
 def format_interview_confirmation_message(items: list[dict]) -> str:
     if not items:
         return "Please confirm this meal before I write it. Reply `confirm` to log it."
@@ -204,6 +211,7 @@ __all__ = [
     "format_interview_confirmation_message",
     "format_interview_reminder_message",
     "format_fix_confirmation_message",
+    "format_grounding_pending_message",
     "format_match_completion_message",
     "format_recent_fix_targets",
     "format_result_sentence",

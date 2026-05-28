@@ -13,6 +13,7 @@ from app.services import correction_service
 
 from bot.messages import (
     format_fix_confirmation_message,
+    format_grounding_pending_message,
     format_interview_confirmation_message,
     format_recent_fix_targets,
     format_start_message,
@@ -192,6 +193,15 @@ def _remember_recent_entry_context(bot_data: dict, new_entries: list[dict]) -> l
     return recent_entries
 
 
+def _mark_grounding_pending(interview: InterviewSession) -> None:
+    payload = dict(interview.current_prompt_payload or {})
+    payload["roadmap_step"] = "GROUNDING_PENDING"
+    payload["grounding_handoff_pending"] = True
+    interview.current_prompt_payload = payload
+    interview.state_key = "GROUNDING_PENDING"
+    interview.is_active = True
+
+
 async def _handle_pending_fix(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
     pending = context.bot_data.get("pending_fix")
     if not isinstance(pending, dict):
@@ -266,6 +276,14 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             finalized = await _finalize_interview_confirmation(session=session, interview=interview)
             if finalized is None:
                 return
+            if finalized["result"].get("grounding_required"):
+                _mark_grounding_pending(interview)
+                session.add(interview)
+                await session.commit()
+                message = update.callback_query.message
+                if message is not None:
+                    await message.reply_text(format_grounding_pending_message(finalized["meal"].id))
+                return
             interview.is_active = False
             session.add(interview)
             await session.commit()
@@ -310,12 +328,21 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text("Got it. I'll update the meal confirmation.")
                 return
             state = dict(interview.current_prompt_payload or {})
+            if state.get("roadmap_step") == "GROUNDING_PENDING":
+                await update.message.reply_text(format_grounding_pending_message(interview.meal_log_id))
+                return
             if state.get("roadmap_step") == "CONFIRMATION":
                 lowered = text.strip().lower()
                 if lowered == "confirm":
                     finalized = await _finalize_interview_confirmation(session=session, interview=interview)
                     if finalized is None:
                         await update.message.reply_text("I could not find that meal to confirm.")
+                        return
+                    if finalized["result"].get("grounding_required"):
+                        _mark_grounding_pending(interview)
+                        session.add(interview)
+                        await session.commit()
+                        await update.message.reply_text(format_grounding_pending_message(finalized["meal"].id))
                         return
                     interview.is_active = False
                     session.add(interview)

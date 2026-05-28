@@ -324,6 +324,7 @@ async def finalize_confirmed_interview(
         meal.reasoning_state_json = {
             "completed_by": "interview_service",
             "grounding_required": True,
+            "grounding_status": "PENDING_HANDOFF",
             "confirmation_items": [dict(item) for item in confirmation_items],
             "updated_at": datetime.now(UTC).isoformat(),
         }

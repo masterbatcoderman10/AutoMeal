@@ -23,6 +23,7 @@ from app.services import reasoning_service
 from bot.messages import (
     CompletionItem,
     format_ack_message,
+    format_grounding_pending_message,
     format_interview_reminder_message,
     format_match_completion_message,
     format_recent_fix_targets,
@@ -163,6 +164,66 @@ async def poll_interview_reminders(bot, settings, poll_interval: float | None = 
                 raise
             except Exception:
                 logger.exception("Error in poll_interview_reminders")
+            await _poll_sleep(interval)
+    finally:
+        await engine.dispose()
+
+
+async def poll_grounding_handoffs(bot, settings, poll_interval: float | None = None) -> None:
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        pool_pre_ping=True,
+    )
+    session_factory = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    interval = poll_interval or settings.BOT_POLL_INTERVAL
+
+    try:
+        while True:
+            try:
+                async with session_factory() as session:
+                    statement = (
+                        select(InterviewSession)
+                        .where(InterviewSession.is_active.is_(True))
+                        .order_by(InterviewSession.updated_at.asc())
+                        .limit(10)
+                        .with_for_update(skip_locked=True)
+                    )
+                    result = await session.execute(statement)
+                    interviews = list(result.scalars().all())
+                    interview = next(
+                        (
+                            candidate
+                            for candidate in interviews
+                            if dict(candidate.current_prompt_payload or {}).get("roadmap_step") == "GROUNDING_PENDING"
+                            and dict(candidate.current_prompt_payload or {}).get("grounding_handoff_pending")
+                        ),
+                        None,
+                    )
+                    if interview is None:
+                        await _poll_sleep(interval)
+                        continue
+
+                    payload = dict(interview.current_prompt_payload or {})
+                    await bot.send_message(
+                        chat_id=interview.chat_id,
+                        text=format_grounding_pending_message(interview.meal_log_id),
+                    )
+                    payload["grounding_handoff_pending"] = False
+                    payload["grounding_handoff_completed_at"] = datetime.now(UTC).isoformat()
+                    interview.current_prompt_payload = payload
+                    interview.state_key = "GROUNDING_PENDING"
+                    interview.is_active = False
+                    await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error in poll_grounding_handoffs")
             await _poll_sleep(interval)
     finally:
         await engine.dispose()

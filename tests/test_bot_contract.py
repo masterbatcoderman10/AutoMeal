@@ -127,6 +127,14 @@ class MessageTemplateTests(unittest.TestCase):
         self.assertIn("1. entry-1 Dal (1 bowl)", message)
         self.assertIn("Use /fix 1 or /fix <id>.", message)
 
+    def test_grounding_pending_message_mentions_handoff(self) -> None:
+        from bot.messages import format_grounding_pending_message
+
+        message = format_grounding_pending_message("12345678-abcd")
+
+        self.assertIn("12345678", message)
+        self.assertIn("queued the next step", message)
+
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_replies_with_start_message(self) -> None:
@@ -225,6 +233,56 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         finalize.assert_awaited_once()
         self.assertFalse(interview.is_active)
         reply_text.assert_awaited_once_with("Meal confirmation saved.")
+        session.commit.assert_awaited_once()
+        engine.dispose.assert_awaited_once()
+
+    async def test_interview_text_confirm_queues_grounding_handoff(self) -> None:
+        from bot.handlers import interview_text
+        from bot.messages import format_grounding_pending_message
+
+        interview = SimpleNamespace(
+            id="interview-2",
+            meal_log_id="meal-2",
+            is_active=True,
+            state_key="CONFIRMATION",
+            current_prompt_payload={
+                "roadmap_step": "CONFIRMATION",
+                "interview_messages": [
+                    {"payload": {"segment_id": "seg-1", "name": "Protein Bar", "source_type": "PACKAGED"}}
+                ],
+            },
+        )
+        meal = SimpleNamespace(id="meal-2", segments=[SimpleNamespace(id="seg-1")])
+        session = AsyncMock()
+        session.add = Mock()
+        session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            message=SimpleNamespace(chat=SimpleNamespace(id="999"), text="confirm", reply_text=reply_text),
+            callback_query=None,
+        )
+        context = SimpleNamespace(bot_data={})
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value={"grounding_required": True, "meal_entries": []})),
+        ):
+            await interview_text(update, context)
+
+        self.assertTrue(interview.is_active)
+        self.assertEqual(interview.state_key, "GROUNDING_PENDING")
+        reply_text.assert_awaited_once_with(format_grounding_pending_message("meal-2"))
         session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
@@ -412,6 +470,58 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                     poll_interval=0.01,
                 )
 
+        engine.dispose.assert_awaited_once()
+
+    async def test_grounding_handoff_worker_closes_pending_interview(self) -> None:
+        from bot import polling
+        from bot.messages import format_grounding_pending_message
+
+        interview = SimpleNamespace(
+            chat_id="999",
+            meal_log_id="meal-1",
+            is_active=True,
+            state_key="GROUNDING_PENDING",
+            current_prompt_payload={
+                "roadmap_step": "GROUNDING_PENDING",
+                "grounding_handoff_pending": True,
+            },
+            updated_at=object(),
+        )
+        session = AsyncMock()
+        session.execute.return_value = Mock(
+            scalars=Mock(return_value=Mock(all=Mock(return_value=[interview]))),
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_grounding_handoffs(bot, settings, poll_interval=0.01)
+
+        bot.send_message.assert_awaited_once_with(
+            chat_id="999",
+            text=format_grounding_pending_message("meal-1"),
+        )
+        self.assertFalse(interview.is_active)
+        self.assertFalse(interview.current_prompt_payload["grounding_handoff_pending"])
+        session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
     async def test_poll_recovers_acknowledged_meal_state_after_commit_failure(self) -> None:
@@ -1178,6 +1288,7 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot_main, "poll_and_segment_food", new=AsyncMock()) as poll_and_segment_food,
             patch.object(bot_main, "poll_and_embed_food_segments", new=AsyncMock()) as poll_and_embed_food_segments,
             patch.object(bot_main, "poll_and_match_food_segments", new=AsyncMock()) as poll_and_match_food_segments,
+            patch.object(bot_main, "poll_grounding_handoffs", new=AsyncMock()) as poll_grounding_handoffs,
             patch.object(bot_main, "poll_interview_reminders", new=AsyncMock()) as poll_interview_reminders,
             patch.object(bot_main.asyncio, "create_task", side_effect=create_task) as create_task_mock,
         ):
@@ -1209,19 +1320,25 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             settings.BOT_POLL_INTERVAL,
             application.bot_data,
         )
+        poll_grounding_handoffs.assert_called_once_with(
+            application.bot,
+            settings,
+            settings.BOT_POLL_INTERVAL,
+        )
         poll_interview_reminders.assert_called_once_with(
             application.bot,
             settings,
             settings.BOT_POLL_INTERVAL,
         )
         create_task_mock.assert_called()
-        self.assertEqual(len(created_coroutines), 6)
+        self.assertEqual(len(created_coroutines), 7)
         self.assertIs(application.bot_data["poll_task"], fake_task)
         self.assertIs(application.bot_data["detect_task"], fake_task)
         self.assertIs(application.bot_data["segment_task"], fake_task)
         self.assertIs(application.bot_data["embed_task"], fake_task)
         self.assertIs(application.bot_data["match_task"], fake_task)
         self.assertIs(application.bot_data["interview_reminder_task"], fake_task)
+        self.assertIs(application.bot_data["grounding_handoff_task"], fake_task)
 
     async def test_post_shutdown_cancels_background_tasks(self) -> None:
         from bot import main as bot_main
@@ -1240,11 +1357,13 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
         poll_task = FakeTask()
         detect_task = FakeTask()
         segment_task = FakeTask()
+        grounding_handoff_task = FakeTask()
         application = SimpleNamespace(
             bot_data={
                 "poll_task": poll_task,
                 "detect_task": detect_task,
                 "segment_task": segment_task,
+                "grounding_handoff_task": grounding_handoff_task,
             }
         )
 
@@ -1256,6 +1375,8 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(detect_task.awaited)
         segment_task.cancel.assert_called_once_with()
         self.assertTrue(segment_task.awaited)
+        grounding_handoff_task.cancel.assert_called_once_with()
+        self.assertTrue(grounding_handoff_task.awaited)
 
     def test_main_builds_application_and_runs_polling(self) -> None:
         from bot import main as bot_main

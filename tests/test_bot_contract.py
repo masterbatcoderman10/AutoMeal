@@ -53,6 +53,66 @@ class MessageTemplateTests(unittest.TestCase):
             "I see 2 items: Pita Bread, maybe Chicken Curry.",
         )
 
+    def test_match_completion_message_has_two_lines_per_item_and_known_totals_only(self) -> None:
+        from bot.messages import CompletionItem, format_match_completion_message
+
+        message = format_match_completion_message(
+            [
+                CompletionItem(
+                    food_name="Daal Chawal",
+                    portion_bucket="STANDARD",
+                    identification_method="SIMILARITY",
+                    is_verified=True,
+                    calories=420.0,
+                    protein_g=16.0,
+                    carbs_g=68.0,
+                    fat_g=12.0,
+                ),
+                CompletionItem(
+                    food_name="Chicken Curry",
+                    portion_bucket="STANDARD",
+                    identification_method="SIMILARITY",
+                    is_verified=False,
+                    calories=None,
+                    protein_g=12.0,
+                    carbs_g=None,
+                    fat_g=6.0,
+                ),
+            ]
+        )
+
+        expected = [
+            "Daal Chawal | portion=STANDARD | method=SIMILARITY | verified=true",
+            "Calories: 420 kcal | Protein: 16 g | Carbs: 68 g | Fat: 12 g",
+            "Chicken Curry | portion=STANDARD | method=SIMILARITY | verified=false",
+            "Protein: 12 g | Fat: 6 g",
+            "Total | Calories: 420 kcal | Protein: 28 g | Carbs: 68 g | Fat: 18 g",
+        ]
+
+        self.assertEqual(message.splitlines(), expected)
+        self.assertNotIn("default", message.lower())
+        self.assertNotIn("assume", message.lower())
+        self.assertNotIn("score", message.lower())
+
+    def test_match_completion_message_omits_internal_debug_fields(self) -> None:
+        from bot.messages import CompletionItem, format_match_completion_message
+
+        message = format_match_completion_message(
+            [
+                CompletionItem(
+                    food_name="Sample Item",
+                    portion_bucket="STANDARD",
+                    identification_method="SIMILARITY",
+                    is_verified=True,
+                    calories=200.0,
+                ),
+            ]
+        )
+
+        self.assertNotIn("vector", message)
+        self.assertNotIn("embedding", message)
+        self.assertNotIn("cropped_image_url", message)
+
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_replies_with_start_message(self) -> None:
@@ -520,11 +580,10 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(segment.bounding_box)
             self.assertIn(segment.cropped_image_url, {"/data/uploads/crops/aaa.jpg", "/data/uploads/crops/bbb.jpg"})
             self.assertIsNotNone(segment.label)
-        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        bot.send_message.assert_awaited_once()
-        self.assertTrue(bot.send_message.await_args.kwargs["text"].startswith("I see "))
+        self.assertEqual(meal.processing_status, MealProcessingStatus.EMBEDDING)
+        bot.send_message.assert_not_awaited()
 
-    async def test_poll_segments_keeps_completed_state_when_message_send_fails(self) -> None:
+    async def test_poll_segments_keeps_embedding_handoff_when_message_send_fails(self) -> None:
         from bot import polling
 
         meal = SimpleNamespace(
@@ -591,9 +650,9 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_segment_food(bot, settings, poll_interval=0.01)
 
-        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.EMBEDDING)
         session.commit.assert_awaited_once()
-        bot.send_message.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
 
     async def test_poll_segments_rejects_empty_segments_with_no_result_message(self) -> None:
         from bot import polling
@@ -661,6 +720,195 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meal.processing_status, MealProcessingStatus.FAILED)
         bot.send_message.assert_awaited_once_with(chat_id="999", text="soft fail")
 
+    async def test_poll_match_sends_completion_message_for_completed_meal_after_commit(self) -> None:
+        from bot import polling
+
+        segment = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=[0.1] * 1536,
+        )
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            processing_status=MealProcessingStatus.MATCHING,
+        )
+        session = AsyncMock()
+        meal_result = Mock(scalar_one_or_none=Mock(return_value=meal))
+        segments_result = Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[segment]))))
+        session.execute.side_effect = [meal_result, segments_result]
+        session.add = Mock()
+        session.add_all = Mock()
+
+        order: list[str] = []
+
+        async def _commit() -> None:
+            order.append("commit")
+        session.commit = AsyncMock(side_effect=_commit)
+
+        async def _send_message(*, chat_id: str, text: str) -> None:
+            order.append("send")
+
+        bot = SimpleNamespace(send_message=AsyncMock(side_effect=_send_message))
+        engine = SimpleNamespace(dispose=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            TELEGRAM_CHAT_ID="999",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        match_result = SimpleNamespace(
+            food_visual_id="visual-1",
+            food_item_id="item-1",
+            is_match=True,
+            is_below_threshold=False,
+            food_visual=SimpleNamespace(
+                food_item=SimpleNamespace(
+                    name="Daal Chawal",
+                    calories=420.0,
+                    protein_g=16.0,
+                    carbs_g=68.0,
+                    fat_g=12.0,
+                    is_verified=True,
+                )
+            ),
+            query_embedding=[0.1] * 1536,
+            similarity=0.92,
+        )
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling,
+                "_is_rejection_threshold_reached",
+                new=AsyncMock(return_value=match_result),
+            ),
+            patch.object(
+                polling.matching_service,
+                "persist_successful_match_rows",
+                AsyncMock(),
+            ),
+            patch.object(
+                polling,
+                "format_match_completion_message",
+                return_value="meal completed",
+            ) as formatter,
+            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+
+        self.assertIn("commit", order)
+        self.assertIn("send", order)
+        self.assertLess(order.index("commit"), order.index("send"))
+        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
+        session.commit.assert_awaited_once()
+        bot.send_message.assert_awaited_once_with(chat_id="999", text="meal completed")
+        self.assertEqual(formatter.call_count, 1)
+        completion_items = list(formatter.call_args[0][0]) if formatter.call_args else []
+        self.assertEqual(len(completion_items), 1)
+        first_item = completion_items[0]
+        self.assertEqual(first_item.food_name, "Daal Chawal")
+        self.assertEqual(first_item.identification_method, "SIMILARITY")
+        self.assertTrue(first_item.is_verified)
+
+    async def test_poll_match_send_failure_does_not_rollback_completed_transition(self) -> None:
+        from bot import polling
+
+        segment = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=[0.2] * 1536,
+        )
+        meal = SimpleNamespace(
+            id="12345678-abcd-efgh",
+            processing_status=MealProcessingStatus.MATCHING,
+        )
+        session = AsyncMock()
+        meal_result = Mock(scalar_one_or_none=Mock(return_value=meal))
+        segments_result = Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[segment]))))
+        session.execute.side_effect = [meal_result, segments_result]
+        session.add = Mock()
+        session.add_all = Mock()
+        order: list[str] = []
+
+        async def _commit() -> None:
+            order.append("commit")
+        session.commit = AsyncMock(side_effect=_commit)
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        async def _send_message(*, chat_id: str, text: str) -> None:
+            order.append("send")
+            raise RuntimeError("telegram down")
+
+        bot = SimpleNamespace(send_message=AsyncMock(side_effect=_send_message))
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            TELEGRAM_CHAT_ID="999",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        match_result = SimpleNamespace(
+            food_visual_id="visual-1",
+            food_item_id="item-1",
+            is_match=True,
+            is_below_threshold=False,
+            food_visual=SimpleNamespace(
+                food_item=SimpleNamespace(
+                    name="Daal Chawal",
+                    calories=420.0,
+                    protein_g=16.0,
+                    carbs_g=68.0,
+                    fat_g=12.0,
+                    is_verified=True,
+                )
+            ),
+            query_embedding=[0.2] * 1536,
+            similarity=0.95,
+        )
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(
+                polling,
+                "_is_rejection_threshold_reached",
+                new=AsyncMock(return_value=match_result),
+            ),
+            patch.object(
+                polling.matching_service,
+                "persist_successful_match_rows",
+                AsyncMock(),
+            ),
+            patch.object(polling, "format_match_completion_message", return_value="meal completed"),
+            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+
+        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
+        self.assertEqual(order, ["commit", "send"])
+        session.commit.assert_awaited_once()
 
 class MainWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_post_init_starts_background_polling_task(self) -> None:
@@ -681,6 +929,8 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot_main, "poll_and_acknowledge", new=AsyncMock()) as poll_and_acknowledge,
             patch.object(bot_main, "poll_and_detect_food", new=AsyncMock()) as poll_and_detect_food,
             patch.object(bot_main, "poll_and_segment_food", new=AsyncMock()) as poll_and_segment_food,
+            patch.object(bot_main, "poll_and_embed_food_segments", new=AsyncMock()) as poll_and_embed_food_segments,
+            patch.object(bot_main, "poll_and_match_food_segments", new=AsyncMock()) as poll_and_match_food_segments,
             patch.object(bot_main.asyncio, "create_task", side_effect=create_task) as create_task_mock,
         ):
             await bot_main.post_init(application)
@@ -700,11 +950,23 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             settings,
             settings.BOT_POLL_INTERVAL,
         )
+        poll_and_embed_food_segments.assert_called_once_with(
+            application.bot,
+            settings,
+            settings.BOT_POLL_INTERVAL,
+        )
+        poll_and_match_food_segments.assert_called_once_with(
+            application.bot,
+            settings,
+            settings.BOT_POLL_INTERVAL,
+        )
         create_task_mock.assert_called()
-        self.assertEqual(len(created_coroutines), 3)
+        self.assertEqual(len(created_coroutines), 5)
         self.assertIs(application.bot_data["poll_task"], fake_task)
         self.assertIs(application.bot_data["detect_task"], fake_task)
         self.assertIs(application.bot_data["segment_task"], fake_task)
+        self.assertIs(application.bot_data["embed_task"], fake_task)
+        self.assertIs(application.bot_data["match_task"], fake_task)
 
     async def test_post_shutdown_cancels_background_tasks(self) -> None:
         from bot import main as bot_main

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from math import isfinite
+
 import httpx
 from openai import AsyncOpenAI
 
@@ -54,24 +56,46 @@ class OpenRouterClient:
     async def embed_multimodal(
         self,
         model: str,
-        content: dict[str, Any],
-        output_dimensionality=1536,
-        task_type: str = "RETRIEVE_DOCUMENT",
+        content: list[dict[str, Any]] | dict[str, Any],
+        output_dimensionality: int = 1536,
+        task_type: str = "RETRIEVAL_DOCUMENT",
     ) -> list[float]:
+        input_type = _map_embedding_task_type(task_type)
         payload = {
             "model": model,
-            "input": [
-                {
-                    "content": content,
-                }
-            ],
+            "input": [{"content": content}],
             "dimensions": output_dimensionality,
-            "task_type": task_type,
+            "encoding_format": "float",
+            "input_type": input_type,
         }
         response = await self._http.post("/embeddings", json=payload)
         response.raise_for_status()
         data = response.json()
-        return data["data"][0]["embedding"]
+        if not isinstance(data, dict):
+            raise ValueError("embedding response must be a mapping")
+        raw_data = data.get("data")
+        if not isinstance(raw_data, list) or not raw_data:
+            raise ValueError("embedding response missing data list")
+        first = raw_data[0]
+        if not isinstance(first, dict):
+            raise ValueError("embedding response item must be a mapping")
+        raw_embedding = first.get("embedding")
+        if not isinstance(raw_embedding, list):
+            raise ValueError("embedding response item must include embedding vector")
+        if len(raw_embedding) != output_dimensionality:
+            raise ValueError(
+                "embedding length mismatch: expected "
+                f"{output_dimensionality}, got {len(raw_embedding)}"
+            )
+
+        parsed: list[float] = []
+        for value in raw_embedding:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("embedding values must be numeric")
+            if not isfinite(float(value)):
+                raise ValueError("embedding values must be finite")
+            parsed.append(float(value))
+        return parsed
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -88,6 +112,15 @@ def get_llm_client() -> OpenRouterClient:
             base_url=settings.OPENROUTER_BASE_URL,
         )
     return _client
+
+
+def _map_embedding_task_type(task_type: str) -> str:
+    normalized = task_type.strip().upper()
+    if normalized == "RETRIEVAL_QUERY":
+        return "search_query"
+    if normalized == "RETRIEVAL_DOCUMENT":
+        return "search_document"
+    return normalized.casefold()
 
 
 __all__ = ["OpenRouterClient", "get_llm_client"]

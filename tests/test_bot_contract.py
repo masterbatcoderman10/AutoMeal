@@ -785,6 +785,22 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
 
         session_factory = Mock(return_value=SessionContext())
 
+        async def _finalize_meal(**_kwargs):
+            meal.processing_status = MealProcessingStatus.COMPLETED
+            await session.commit()
+            return {
+                "finalized": True,
+                "meal_resolution": SimpleNamespace(
+                    meal_entries=[
+                        SimpleNamespace(
+                            segment_id="segment-1",
+                            portion_bucket="STANDARD",
+                            quantity_display=None,
+                        )
+                    ]
+                ),
+            }
+
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
@@ -797,6 +813,17 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 polling.matching_service,
                 "persist_successful_match_rows",
                 AsyncMock(),
+            ),
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(
+                polling.reasoning_service,
+                "run_reasoning_request",
+                AsyncMock(return_value=({"action": "AUTO_CONFIRM", "meal_state": "READY_TO_WRITE"}, None)),
+            ),
+            patch.object(
+                polling.reasoning_service,
+                "finalize_meal_from_reasoning",
+                AsyncMock(side_effect=_finalize_meal),
             ),
             patch.object(
                 polling,
@@ -819,7 +846,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(completion_items), 1)
         first_item = completion_items[0]
         self.assertEqual(first_item.food_name, "Daal Chawal")
-        self.assertEqual(first_item.identification_method, "SIMILARITY")
+        self.assertEqual(first_item.identification_method, "AUTO_CONFIRM")
         self.assertTrue(first_item.is_verified)
 
     async def test_poll_match_send_failure_does_not_rollback_completed_transition(self) -> None:
@@ -887,6 +914,22 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
 
         session_factory = Mock(return_value=SessionContext())
 
+        async def _finalize_meal(**_kwargs):
+            meal.processing_status = MealProcessingStatus.COMPLETED
+            await session.commit()
+            return {
+                "finalized": True,
+                "meal_resolution": SimpleNamespace(
+                    meal_entries=[
+                        SimpleNamespace(
+                            segment_id="segment-1",
+                            portion_bucket="STANDARD",
+                            quantity_display=None,
+                        )
+                    ]
+                ),
+            }
+
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
@@ -899,6 +942,17 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 polling.matching_service,
                 "persist_successful_match_rows",
                 AsyncMock(),
+            ),
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(
+                polling.reasoning_service,
+                "run_reasoning_request",
+                AsyncMock(return_value=({"action": "AUTO_CONFIRM", "meal_state": "READY_TO_WRITE"}, None)),
+            ),
+            patch.object(
+                polling.reasoning_service,
+                "finalize_meal_from_reasoning",
+                AsyncMock(side_effect=_finalize_meal),
             ),
             patch.object(polling, "format_match_completion_message", return_value="meal completed"),
             patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
@@ -931,6 +985,7 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot_main, "poll_and_segment_food", new=AsyncMock()) as poll_and_segment_food,
             patch.object(bot_main, "poll_and_embed_food_segments", new=AsyncMock()) as poll_and_embed_food_segments,
             patch.object(bot_main, "poll_and_match_food_segments", new=AsyncMock()) as poll_and_match_food_segments,
+            patch.object(bot_main, "poll_interview_reminders", new=AsyncMock()) as poll_interview_reminders,
             patch.object(bot_main.asyncio, "create_task", side_effect=create_task) as create_task_mock,
         ):
             await bot_main.post_init(application)
@@ -960,13 +1015,19 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             settings,
             settings.BOT_POLL_INTERVAL,
         )
+        poll_interview_reminders.assert_called_once_with(
+            application.bot,
+            settings,
+            settings.BOT_POLL_INTERVAL,
+        )
         create_task_mock.assert_called()
-        self.assertEqual(len(created_coroutines), 5)
+        self.assertEqual(len(created_coroutines), 6)
         self.assertIs(application.bot_data["poll_task"], fake_task)
         self.assertIs(application.bot_data["detect_task"], fake_task)
         self.assertIs(application.bot_data["segment_task"], fake_task)
         self.assertIs(application.bot_data["embed_task"], fake_task)
         self.assertIs(application.bot_data["match_task"], fake_task)
+        self.assertIs(application.bot_data["interview_reminder_task"], fake_task)
 
     async def test_post_shutdown_cancels_background_tasks(self) -> None:
         from bot import main as bot_main
@@ -1010,6 +1071,7 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
         application = Mock()
 
         builder.token.return_value = builder
+        builder.concurrent_updates.return_value = builder
         builder.post_init.return_value = builder
         builder.post_shutdown.return_value = builder
         builder.build.return_value = application
@@ -1022,9 +1084,10 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             bot_main.main()
 
         builder.token.assert_called_once_with("token")
+        builder.concurrent_updates.assert_called_once_with(False)
         builder.post_init.assert_called_once_with(bot_main.post_init)
         builder.post_shutdown.assert_called_once_with(bot_main.post_shutdown)
-        application.add_handler.assert_called_once()
+        self.assertEqual(application.add_handler.call_count, 3)
         application.run_polling.assert_called_once_with(
             allowed_updates=bot_main.Update.ALL_TYPES,
             drop_pending_updates=True,

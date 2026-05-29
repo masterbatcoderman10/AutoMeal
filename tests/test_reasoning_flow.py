@@ -148,7 +148,8 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result["segment_reasoning"]), len(segments))
         self.assertEqual(result["meal_reasoning"]["trace_id"], "trace-flow-1")
         self.assertEqual(segments[0].ai_reasoning["trace_id"], "trace-flow-1")
-        self.assertEqual(segments[1].ai_reasoning["meal_state"], "READY_TO_WRITE")
+        self.assertEqual(segments[1].ai_reasoning["group_state"], "READY_TO_WRITE")
+        self.assertEqual(segments[1].ai_reasoning["group_id"], "group-1")
         self.assertEqual(meal.reasoning_state_json["meal_reasoning"]["trace_id"], "trace-flow-1")
         self.assertTrue(meal.reasoning_state_json["ready_for_final_write"])
 
@@ -202,6 +203,7 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("meal_reasoning", result)
         self.assertEqual(result["meal_reasoning"]["meal_state"], "PENDING_INTERVIEW")
         self.assertEqual(segments[0].ai_reasoning["trace_id"], "trace-flow-2")
+        self.assertEqual(segments[0].ai_reasoning["group_state"], "PENDING_INTERVIEW")
         self.assertEqual(meal.reasoning_state_json["meal_reasoning"]["meal_state"], "PENDING_INTERVIEW")
         self.assertFalse(meal.reasoning_state_json["ready_for_final_write"])
 

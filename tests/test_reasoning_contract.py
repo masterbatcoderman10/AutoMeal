@@ -31,9 +31,20 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertEqual(schema["type"], "object")
         self.assertIn("action", schema["required"])
         self.assertIn("meal_state", schema["required"])
-        self.assertIn("top_3", schema["required"])
+        self.assertIn("food_groups", schema["required"])
+        self.assertIn("food_group_count", schema["required"])
 
-        top_three_schema = schema["properties"]["top_3"]
+        food_group_schema = schema["properties"]["food_groups"]
+        self.assertEqual(food_group_schema["type"], "array")
+        group_schema = food_group_schema["items"]
+        self.assertEqual(group_schema["type"], "object")
+        self.assertFalse(group_schema["additionalProperties"])
+        self.assertIn("group_id", group_schema["required"])
+        self.assertIn("primary_segment_id", group_schema["required"])
+        self.assertIn("segment_ids", group_schema["required"])
+        self.assertIn("top_3", group_schema["required"])
+
+        top_three_schema = group_schema["properties"]["top_3"]
         self.assertEqual(top_three_schema["type"], "array")
         self.assertEqual(top_three_schema["minItems"], 3)
         self.assertEqual(top_three_schema["maxItems"], 3)
@@ -79,7 +90,10 @@ class ReasoningContractTests(unittest.TestCase):
 
         self.assertEqual(set(schema["required"]), set(schema["properties"]))
 
-        candidate_schema = schema["properties"]["top_3"]["items"]
+        group_schema = schema["properties"]["food_groups"]["items"]
+        self.assertEqual(set(group_schema["required"]), set(group_schema["properties"]))
+
+        candidate_schema = group_schema["properties"]["top_3"]["items"]
         self.assertEqual(set(candidate_schema["required"]), set(candidate_schema["properties"]))
         self.assertIn("nutrition_impact", candidate_schema["required"])
 
@@ -87,7 +101,7 @@ class ReasoningContractTests(unittest.TestCase):
         from app.services.reasoning_schema import reasoning_response_format
 
         response_format = reasoning_response_format()
-        candidate_schema = response_format["json_schema"]["schema"]["properties"]["top_3"]["items"]
+        candidate_schema = response_format["json_schema"]["schema"]["properties"]["food_groups"]["items"]["properties"]["top_3"]["items"]
         required_fields = set(candidate_schema["required"])
 
         expected_fields = {
@@ -113,10 +127,26 @@ class ReasoningContractTests(unittest.TestCase):
             "action": "SUDDENLY_UNKNOWN_ACTION",
             "meal_state": "READY_TO_WRITE",
             "trace_id": "trace-abc-123",
-            "top_3": [_candidate_payload(), _candidate_payload(), _candidate_payload()],
             "decision_rationale": "model suggested an internal-only branch",
             "gate_reason": "self-confidence is high",
             "segment_count": 1,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-curry",
+                    "group_label": "chicken curry",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-1",
+                    "segment_ids": ["segment-1"],
+                    "selected_candidate_id": "candidate-1",
+                    "visual_evidence": ["segment_1: clear protein pieces"],
+                    "missing_evidence": [],
+                    "decision_rationale": "best candidate",
+                    "gate_reason": "",
+                    "top_3": [_candidate_payload(), _candidate_payload(), _candidate_payload()],
+                }
+            ],
         }
 
         coerced = coerce_reasoning_response(payload)
@@ -132,33 +162,49 @@ class ReasoningContractTests(unittest.TestCase):
             "action": "ASK_QUANTITY",
             "meal_state": "PENDING_INTERVIEW",
             "trace_id": "trace-321",
-            "top_3": [
-                {
-                    **_candidate_payload(),
-                    "candidate_id": "candidate-1",
-                },
-                {
-                    **_candidate_payload(),
-                    "candidate_id": "candidate-2",
-                    "missing_evidence": ["portion_unit", "serving_size"],
-                    "visual_evidence": [],
-                },
-                {
-                    **_candidate_payload(),
-                    "candidate_id": "candidate-3",
-                },
-            ],
             "decision_rationale": "open quantity bucket requested",
             "gate_reason": "ask a question before final write",
             "segment_count": 3,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-curry",
+                    "group_label": "chicken curry",
+                    "group_action": "ASK_QUANTITY",
+                    "group_state": "PENDING_INTERVIEW",
+                    "primary_segment_id": "segment-1",
+                    "segment_ids": ["segment-1"],
+                    "selected_candidate_id": "candidate-1",
+                    "visual_evidence": ["segment_1: clear protein pieces"],
+                    "missing_evidence": ["portion_unit"],
+                    "decision_rationale": "open quantity bucket requested",
+                    "gate_reason": "ask a question before final write",
+                    "top_3": [
+                        {
+                            **_candidate_payload(),
+                            "candidate_id": "candidate-1",
+                        },
+                        {
+                            **_candidate_payload(),
+                            "candidate_id": "candidate-2",
+                            "missing_evidence": ["portion_unit", "serving_size"],
+                            "visual_evidence": [],
+                        },
+                        {
+                            **_candidate_payload(),
+                            "candidate_id": "candidate-3",
+                        },
+                    ],
+                }
+            ],
         }
 
         normalized = coerce_reasoning_response(payload)
         self.assertEqual(normalized["action"], "ASK_QUANTITY")
         self.assertEqual(normalized["meal_state"], "PENDING_INTERVIEW")
         self.assertEqual(normalized["trace_id"], "trace-321")
-        self.assertEqual(len(normalized["top_3"]), 3)
-        self.assertIn("portion_unit", normalized["top_3"][1]["missing_evidence"])
+        self.assertEqual(len(normalized["food_groups"][0]["top_3"]), 3)
+        self.assertIn("portion_unit", normalized["food_groups"][0]["top_3"][1]["missing_evidence"])
 
     def test_grouped_reasoning_contract_requires_food_groups(self) -> None:
         from app.services.reasoning_schema import coerce_reasoning_response, reasoning_response_format

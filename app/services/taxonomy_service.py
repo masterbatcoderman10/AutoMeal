@@ -97,6 +97,7 @@ def _validate_taxonomy(payload: dict[str, Any]) -> dict[str, Any]:
     nutrition_rules = _as_list(
         nutrition.get("high_impact_rules"),
         "nutrition_impact.high_impact_rules",
+        item_type=dict,
     )
     for index, rule in enumerate(nutrition_rules):
         rule_dict = _as_dict(rule, f"nutrition_impact.high_impact_rules[{index}]")
@@ -181,7 +182,7 @@ def _validate_taxonomy(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _default_taxonomy_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "config" / "reasoning_taxonomy.json"
+    return Path(__file__).resolve().parents[2] / "config" / "reasoning_taxonomy.json"
 
 
 @lru_cache(maxsize=8)

@@ -12,8 +12,8 @@
         "reasoning_effort": "high"
       },
       "sonnet": {
-        "model": "gpt-5.3-codex-spark",
-        "reasoning_effort": "xhigh",
+        "model": "gpt-5.4",
+        "reasoning_effort": "high",
         "fallback_model": "gpt-5.4",
         "fallback_reasoning_effort": "high"
       }

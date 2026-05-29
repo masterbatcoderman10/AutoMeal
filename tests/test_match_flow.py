@@ -561,7 +561,20 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                     return_value=SimpleNamespace(
                         current_prompt_payload={
                             "roadmap_step": "INITIAL_QUESTION",
-                            "pending_targets": [{"segment_id": "segment-1", "label": "mystery curry"}],
+                            "pending_targets": [
+                                {
+                                    "group_id": "group-egg-curry",
+                                    "primary_segment_id": "segment-1",
+                                    "segment_ids": ["segment-1", "segment-2"],
+                                    "label": "egg curry",
+                                    "question_kind": "DETAIL",
+                                    "question_focus": "vegetable inside egg curry",
+                                    "question_examples": [
+                                        "egg curry with bottle gourd",
+                                        "egg curry with zucchini",
+                                    ],
+                                }
+                            ],
                             "current_target_index": 0,
                             "answers_by_segment": [],
                             "session_mode": "MEAL_INTERVIEW",
@@ -580,10 +593,9 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             chat_id="999",
             text=(
                 "I can see your meal, but I do not know it yet.\n\n"
-                "I detected `mystery curry`. What exactly should I log for it? "
-                "Include the main food name and any key ingredient or preparation detail that changes nutrition. "
-                "For curries, say the main protein or vegetable inside, for example `egg curry with bottle gourd`, "
-                "`chicken leg curry`, or `dal with spinach`. If my label is wrong, reply with the corrected food name."
+                "I can see the egg curry, but I can't tell which vegetable is in it. "
+                "What should I call it? For example: egg curry with bottle gourd, "
+                "egg curry with zucchini, or the name you normally use."
             ),
         )
         session.add.assert_not_called()

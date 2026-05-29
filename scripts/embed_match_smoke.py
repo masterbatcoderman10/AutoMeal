@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import mimetypes
 import re
 import sys
 import uuid
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from sqlalchemy import select, update
@@ -19,8 +21,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.config import get_settings
 from app.models import FoodItem, FoodVisual, MealLog, MealSegment, MealProcessingStatus
-from app.services import embedding_service, matching_service, reasoning_service
+from app.services import embedding_service, interview_service, matching_service, reasoning_service
+from app.services.image_service import HEIC_CONTENT_TYPES, compute_hash, save_segment_crop, transcode_to_jpeg
 from app.services.llm_client import get_llm_client
+from app.services.vision_service import (
+    dedupe_overlapping_segments,
+    detect_food_photo,
+    label_food_segment,
+    segment_food_photo_with_retry,
+)
 
 EMBEDDING_MODEL = "google/gemini-embedding-2-preview"
 EMBEDDING_TASK_MARGIN = 0.001
@@ -38,6 +47,7 @@ def _parse_args() -> argparse.Namespace:
             "unresolved-probe",
             "repeat-confirmation",
             "reasoning-probe",
+            "grouped-uat",
         ],
         required=True,
     )
@@ -201,6 +211,201 @@ async def _run_reasoning_probe(args: argparse.Namespace, llm_client) -> dict[str
         },
         "top_3": reasoning_result.get("top_3", []),
     }
+
+
+def _prepare_sample_working_copy(sample_path: Path, work_dir: Path) -> Path:
+    mime_type, _ = mimetypes.guess_type(sample_path.name)
+    raw_bytes = sample_path.read_bytes()
+    if mime_type in HEIC_CONTENT_TYPES:
+        working_path = work_dir / f"{sample_path.stem}.jpg"
+        working_path.write_bytes(transcode_to_jpeg(raw_bytes, mime_type or "image/heic"))
+        return working_path
+
+    working_path = work_dir / sample_path.name
+    working_path.write_bytes(raw_bytes)
+    return working_path
+
+
+def _food_groups_from_reasoning_state(reasoning_state: object) -> list[dict[str, Any]]:
+    if not isinstance(reasoning_state, dict):
+        return []
+    direct_groups = reasoning_state.get("food_groups")
+    if isinstance(direct_groups, list):
+        return [dict(group) for group in direct_groups if isinstance(group, dict)]
+    meal_reasoning = reasoning_state.get("meal_reasoning")
+    if isinstance(meal_reasoning, dict):
+        nested_groups = meal_reasoning.get("food_groups")
+        if isinstance(nested_groups, list):
+            return [dict(group) for group in nested_groups if isinstance(group, dict)]
+    return []
+
+
+async def _run_grouped_uat(args: argparse.Namespace, llm_client) -> dict[str, Any]:
+    sample_input = _resolve_image_path(args.sample, flag_name="--sample")
+    settings = get_settings()
+    engine = create_async_engine(_resolve_database_url(args), echo=False, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+
+    try:
+        with TemporaryDirectory(prefix="grouped-uat-") as tempdir:
+            work_dir = Path(tempdir)
+            uploads_dir = work_dir / "uploads"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            working_image = _prepare_sample_working_copy(sample_input, work_dir)
+
+            detect_result = await detect_food_photo(
+                str(working_image),
+                llm_client=llm_client,
+                model=settings.DETECT_MODEL,
+            )
+            if detect_result.get("next_action") != "segment":
+                raise RuntimeError(
+                    f"grouped UAT sample was not routed to segmentation: {detect_result}"
+                )
+
+            raw_segments = await segment_food_photo_with_retry(
+                str(working_image),
+                llm_client=llm_client,
+                model=settings.SEGMENT_MODEL,
+                retry_model=settings.SEGMENT_RETRY_MODEL,
+                max_segments=settings.VISION_MAX_SEGMENTS,
+            )
+            segments = dedupe_overlapping_segments(raw_segments)
+            if not segments:
+                raise RuntimeError("grouped UAT produced no food segments")
+
+            async with session_factory() as session:
+                meal = MealLog(
+                    id=_make_smoke_id("grouped-uat-meal"),
+                    image_url=str(working_image),
+                    image_hash=compute_hash(sample_input.read_bytes()),
+                    processing_status=MealProcessingStatus.REASONING,
+                )
+                session.add(meal)
+                await session.flush()
+
+                segment_rows: list[MealSegment] = []
+                for decision in segments:
+                    segment_id = _make_smoke_id("grouped-segment")
+                    crop_path = save_segment_crop(
+                        source_image_path=working_image,
+                        segment_id=segment_id,
+                        normalized_box=decision.box_2d,
+                        uploads_dir=uploads_dir,
+                    )
+                    label = await label_food_segment(
+                        str(crop_path),
+                        llm_client=llm_client,
+                        model=settings.LABEL_MODEL,
+                    )
+                    segment_row = MealSegment(
+                        id=segment_id,
+                        meal_log_id=meal.id,
+                        label=label or decision.label_hint or "unlabeled food",
+                        bounding_box=decision.box_2d,
+                        cropped_image_url=str(crop_path),
+                    )
+                    session.add(segment_row)
+                    segment_rows.append(segment_row)
+
+                await session.flush()
+
+                match_results: list[tuple[MealSegment, Any]] = []
+                for segment_row in segment_rows:
+                    match_result = await matching_service.match_segment_against_visual_corpus(
+                        segment=segment_row,
+                        session=session,
+                        llm_client=llm_client,
+                        embedding_model=matching_service.MATCHING_EMBEDDING_MODEL,
+                    )
+                    matching_service.persist_match_candidate_snapshot(
+                        segment=segment_row,
+                        result=match_result,
+                    )
+                    match_results.append((segment_row, match_result))
+
+                reasoning_result, trace_metadata = await reasoning_service.run_reasoning_request(
+                    llm_client=llm_client,
+                    meal_id=meal.id,
+                    meal=meal,
+                    match_results=match_results,
+                    settings=settings,
+                )
+                finalization = await reasoning_service.finalize_meal_from_reasoning(
+                    session=session,
+                    meal=meal,
+                    segments=segment_rows,
+                    match_results=match_results,
+                    reasoning_payload=reasoning_result,
+                )
+
+                food_groups = [
+                    dict(group)
+                    for group in list(finalization.get("food_groups", []))
+                    if isinstance(group, dict)
+                ] or _food_groups_from_reasoning_state(getattr(meal, "reasoning_state_json", None))
+                unresolved_group_ids = [
+                    str(group.get("group_id"))
+                    for group in food_groups
+                    if str(group.get("action") or "").upper() == "INTERVIEW"
+                    or str(group.get("state") or "").upper() == "UNRESOLVED"
+                ]
+
+                current_prompt = None
+                interview_session_id = None
+                if not finalization.get("finalized"):
+                    interview = await interview_service.prepare_interview_session(
+                        session=session,
+                        meal=meal,
+                        segments=segment_rows,
+                        chat_id="grouped-uat",
+                    )
+                    interview_session_id = interview.id
+                    await session.commit()
+                    current_prompt = interview_service.current_target_question(
+                        interview.current_prompt_payload or {}
+                    ).get("prompt")
+
+                grouped_summary = [
+                    {
+                        "group_id": group.get("group_id"),
+                        "label": group.get("label"),
+                        "action": group.get("action"),
+                        "state": group.get("group_state") or group.get("state"),
+                        "primary_segment_id": group.get("primary_segment_id"),
+                        "segment_ids": group.get("segment_ids"),
+                    }
+                    for group in food_groups
+                ]
+
+                return {
+                    "mode": "grouped-uat",
+                    "status": "pass",
+                    "sample": str(sample_input),
+                    "meal_id": meal.id,
+                    "interview_session_id": interview_session_id,
+                    "processing_status": getattr(meal.processing_status, "value", meal.processing_status),
+                    "segment_labels": [
+                        {
+                            "segment_id": segment.id,
+                            "label": segment.label,
+                            "crop_path": segment.cropped_image_url,
+                        }
+                        for segment in segment_rows
+                    ],
+                    "food_groups": grouped_summary,
+                    "unresolved_group_ids": unresolved_group_ids,
+                    "current_prompt": current_prompt,
+                    "trace_id": reasoning_result.get("trace_id") or trace_metadata.get("trace_id"),
+                    "trace_metadata": {
+                        "trace_id": trace_metadata.get("trace_id"),
+                        "cached_tokens": trace_metadata.get("cached_tokens"),
+                        "meal_image_path": str(working_image),
+                        "segment_crop_paths": [segment.cropped_image_url for segment in segment_rows],
+                    },
+                }
+    finally:
+        await engine.dispose()
 
 
 def is_corpus_branch_valid(visual_count: int) -> bool:
@@ -623,6 +828,8 @@ async def main() -> int:
             report = await _run_repeat_confirmation(args, client)
         elif args.mode == "reasoning-probe":
             report = await _run_reasoning_probe(args, client)
+        elif args.mode == "grouped-uat":
+            report = await _run_grouped_uat(args, client)
         else:
             report = await _run_unresolved_probe(args, client)
 

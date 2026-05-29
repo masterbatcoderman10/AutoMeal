@@ -104,13 +104,26 @@ class InterviewProgressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["confirmation_items"][0]["source_type"], "HOME")
         self.assertEqual(state["confirmation_items"][0]["portion_bucket"], "SMALL")
 
-    def test_initial_question_is_targeted_and_not_placeholder_copy(self) -> None:
+    def test_current_target_question_uses_locked_grouped_curry_detail_wording(self) -> None:
         from bot import handlers
 
         state = {
             "meal_id": "meal-1",
             "roadmap_step": "INITIAL_QUESTION",
-            "pending_targets": [{"segment_id": "seg-1", "label": "egg curry"}],
+            "pending_targets": [
+                {
+                    "group_id": "group-egg-curry",
+                    "primary_segment_id": "seg-1",
+                    "segment_ids": ["seg-1", "seg-2"],
+                    "label": "egg curry",
+                    "question_kind": "DETAIL",
+                    "question_focus": "vegetable inside egg curry",
+                    "question_examples": [
+                        "egg curry with bottle gourd",
+                        "egg curry with zucchini",
+                    ],
+                }
+            ],
             "current_target_index": 0,
             "answers_by_segment": [],
             "interview_messages": [],
@@ -118,13 +131,19 @@ class InterviewProgressionTests(unittest.IsolatedAsyncioTestCase):
 
         question = handlers.current_target_question(state)
 
-        self.assertNotEqual(question["prompt"], "What is egg curry?")
-        self.assertIn("I detected", question["prompt"])
-        self.assertIn("egg curry", question["prompt"])
-        self.assertIn("main food name", question["prompt"])
-        self.assertIn("key ingredient", question["prompt"])
-        self.assertIn("egg curry with bottle gourd", question["prompt"])
-        self.assertIn("If my label is wrong", question["prompt"])
+        self.assertEqual(
+            question["prompt"],
+            "I can see the egg curry, but I can't tell which vegetable is in it. "
+            "What should I call it? For example: egg curry with bottle gourd, "
+            "egg curry with zucchini, or the name you normally use.",
+        )
+        self.assertEqual(question["group_id"], "group-egg-curry")
+        self.assertEqual(question["primary_segment_id"], "seg-1")
+        self.assertEqual(question["segment_ids"], ["seg-1", "seg-2"])
+        lowered = question["prompt"].lower()
+        self.assertNotIn("segment", lowered)
+        self.assertNotIn("confidence", lowered)
+        self.assertNotIn("nutrition-relevant detail", lowered)
 
     def test_interview_moves_to_next_target_only_after_portion_context(self) -> None:
         from bot import handlers
@@ -416,6 +435,121 @@ class InterviewConfirmationEditTests(unittest.TestCase):
 
 
 class InterviewPersistencePrepTests(unittest.TestCase):
+    def test_prepare_interview_session_targets_unresolved_food_groups_before_quantity(self) -> None:
+        import asyncio
+
+        from app.services import interview_service
+
+        class EmptyResult:
+            def scalar_one_or_none(self):
+                return None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.added = []
+
+            async def execute(self, _statement):
+                return EmptyResult()
+
+            def add(self, item) -> None:
+                self.added.append(item)
+
+        session = FakeSession()
+        meal = SimpleNamespace(
+            id="meal-grouped",
+            reasoning_state_json={
+                "food_groups": [
+                    {
+                        "group_id": "group-egg-curry",
+                        "label": "egg curry",
+                        "action": "INTERVIEW",
+                        "state": "UNRESOLVED",
+                        "primary_segment_id": "seg-egg-1",
+                        "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                        "question_kind": "DETAIL",
+                        "question_focus": "vegetable inside egg curry",
+                        "question_examples": [
+                            "egg curry with bottle gourd",
+                            "egg curry with zucchini",
+                        ],
+                    },
+                    {
+                        "group_id": "group-pita",
+                        "label": "pita bread",
+                        "action": "INTERVIEW",
+                        "state": "UNRESOLVED",
+                        "primary_segment_id": "seg-bread-1",
+                        "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                        "question_kind": "QUANTITY",
+                        "question_focus": "portion size",
+                        "question_examples": ["1 pita", "2 small pieces"],
+                    },
+                ]
+            },
+        )
+        segments = [
+            SimpleNamespace(id="seg-egg-1", label="egg and vegetable curry"),
+            SimpleNamespace(id="seg-egg-2", label="egg and zucchini curry"),
+            SimpleNamespace(id="seg-bread-1", label="pita bread"),
+            SimpleNamespace(id="seg-bread-2", label="bread"),
+        ]
+
+        interview = asyncio.run(
+            interview_service.prepare_interview_session(
+                session=session,
+                meal=meal,
+                segments=segments,
+                chat_id="chat-grouped",
+            )
+        )
+
+        pending_targets = interview.current_prompt_payload["pending_targets"]
+        self.assertEqual(
+            pending_targets,
+            [
+                {
+                    "group_id": "group-egg-curry",
+                    "primary_segment_id": "seg-egg-1",
+                    "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                    "label": "egg curry",
+                    "question_kind": "DETAIL",
+                    "question_focus": "vegetable inside egg curry",
+                    "question_examples": [
+                        "egg curry with bottle gourd",
+                        "egg curry with zucchini",
+                    ],
+                },
+                {
+                    "group_id": "group-pita",
+                    "primary_segment_id": "seg-bread-1",
+                    "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                    "label": "pita bread",
+                    "question_kind": "QUANTITY",
+                    "question_focus": "portion size",
+                    "question_examples": ["1 pita", "2 small pieces"],
+                },
+            ],
+        )
+        self.assertEqual(
+            interview.current_prompt_payload["pending_targets"][0],
+            {
+                "group_id": "group-egg-curry",
+                "primary_segment_id": "seg-egg-1",
+                "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                "label": "egg curry",
+                "question_kind": "DETAIL",
+                "question_focus": "vegetable inside egg curry",
+                "question_examples": [
+                    "egg curry with bottle gourd",
+                    "egg curry with zucchini",
+                ],
+            },
+        )
+        self.assertEqual(
+            interview.current_prompt_payload["pending_targets"][1].get("question_kind"),
+            "QUANTITY",
+        )
+
     def test_confirmation_items_are_built_from_structured_answers(self) -> None:
         from app.services import interview_service
 

@@ -53,6 +53,26 @@ class SmokeHelperTests(unittest.TestCase):
 
             self.assertEqual(resolved, crop_path.resolve())
 
+    def test_food_groups_from_reasoning_state_reads_nested_meal_reasoning(self) -> None:
+        groups = smoke._food_groups_from_reasoning_state(
+            {
+                "meal_reasoning": {
+                    "food_groups": [
+                        {"group_id": "group-1", "label": "egg curry"},
+                        {"group_id": "group-2", "label": "pita bread"},
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(
+            groups,
+            [
+                {"group_id": "group-1", "label": "egg curry"},
+                {"group_id": "group-2", "label": "pita bread"},
+            ],
+        )
+
 
 class SmokeCalibrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_calibrate_embeds_crop_artifacts(self) -> None:

@@ -784,6 +784,9 @@ def _pending_targets_from_food_groups(reasoning_state: object) -> list[dict[str,
         return []
     groups = reasoning_state.get("food_groups")
     if not isinstance(groups, list):
+        meal_reasoning = reasoning_state.get("meal_reasoning")
+        groups = meal_reasoning.get("food_groups") if isinstance(meal_reasoning, Mapping) else None
+    if not isinstance(groups, list):
         return []
 
     pending_targets: list[dict[str, Any]] = []

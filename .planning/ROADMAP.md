@@ -10,7 +10,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 - [ ] **Phase 2: Vision Slice** - Photo upload produces a bot message listing detected food items by name (no nutrition yet)
 - [ ] **Phase 3: Embed & Match** - Seeded foods matched by vector similarity produce DiaryEntries and a nutrition push
 - [x] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: segmented foods continue in bounded async parallel; unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes (completed 2026-05-28)
-- [ ] **Phase 4.1: Grouped Reasoning & Human Interview Correction** - Correct the Phase 4 UAT gap where whole-meal top-3 candidates and raw segment prompts produce confusing interviews; reasoning must group distinct foods first, produce per-food top-3 candidates, and ask one human question per unresolved food group
+- [x] **Phase 4.1: Grouped Reasoning & Human Interview Correction** - Correct the Phase 4 UAT gap where whole-meal top-3 candidates and raw segment prompts produce confusing interviews; reasoning must group distinct foods first, produce per-food top-3 candidates, and ask one human question per unresolved food group (completed 2026-05-29)
 - [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
@@ -185,6 +185,6 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 | 2. Vision Slice | 4/4 | In Progress|  |
 | 3. Embed & Match | 4/4 | In Progress|  |
 | 4. Reason, Interview & Learning Loop | 8/8 | Complete    | 2026-05-28 |
-| 4.1. Grouped Reasoning & Human Interview Correction | 1/2 | In Progress|  |
+| 4.1. Grouped Reasoning & Human Interview Correction | 2/2 | Complete   | 2026-05-29 |
 | 5. Agentic Grounding | 0/TBD | Not started | - |
 | 6. Bot Surface & Daily Summary | 0/TBD | Not started | - |

@@ -134,6 +134,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 
 - [ ] `04.1-01-PLAN.md` — grouped reasoning contract, per-group gate and persistence, and grouped final-write adapter regression
 - [ ] `04.1-02-PLAN.md` — group-target interview prompts plus `IMG_4646.HEIC` UAT and Langfuse trace verification
+
 **Phase note**: This is a corrective polish phase created from Phase 4 UAT on 2026-05-29. It should remain isolated from Phase 5 grounding work: no SearXNG/Firecrawl tool loop, no nutrition derivation expansion, and no broader Telegram command work. The first executable plan should be small enough to run independently with `/gsd-execute-phase 4.1`.
 
 ---
@@ -184,6 +185,6 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 | 2. Vision Slice | 4/4 | In Progress|  |
 | 3. Embed & Match | 4/4 | In Progress|  |
 | 4. Reason, Interview & Learning Loop | 8/8 | Complete    | 2026-05-28 |
-| 4.1. Grouped Reasoning & Human Interview Correction | 0/2 | Not started | - |
+| 4.1. Grouped Reasoning & Human Interview Correction | 1/2 | In Progress|  |
 | 5. Agentic Grounding | 0/TBD | Not started | - |
 | 6. Bot Surface & Daily Summary | 0/TBD | Not started | - |

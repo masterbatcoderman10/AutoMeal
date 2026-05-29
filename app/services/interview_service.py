@@ -74,26 +74,23 @@ def current_target_question(state: Mapping[str, Any]) -> dict[str, Any]:
     label = _optional_text(answer.get("name")) or _optional_text(target.get("label")) or "this item"
     mode = str(state.get("session_mode") or SESSION_MODE_MEAL)
 
-    prompt = (
-        f"I detected `{label}`. What exactly should I log for it? "
-        "Include the main food name and any key ingredient or preparation detail that changes nutrition. "
-        "For curries, say the main protein or vegetable inside, for example `egg curry with bottle gourd`, "
-        "`chicken leg curry`, or `dal with spinach`. If my label is wrong, reply with the corrected food name."
+    prompt, invalid_prompt = _render_initial_question(
+        target=target,
+        label=label,
     )
-    invalid_prompt = prompt
 
     if step == "FOOD_NAME":
         current_name = _optional_text(answer.get("name"))
         if mode == SESSION_MODE_FIX and current_name:
             prompt = (
-                f"What exact name should I log for {label}? "
-                "Include nutrition-relevant detail such as filling, curry ingredient, meat cut, or bread type. "
+                f"What should I call {label}? "
+                "You can include the style, filling, bread type, or main ingredient if that helps. "
                 f"Reply with the corrected name, or `same` to keep `{current_name}`."
             )
         else:
             prompt = (
-                f"What exact name should I log for {label}? "
-                "Include nutrition-relevant detail such as filling, curry ingredient, meat cut, or bread type. "
+                f"What should I call {label}? "
+                "You can include the style, filling, bread type, or main ingredient if that helps. "
                 "Examples: `egg curry with bottle gourd`, `pita bread`, `chicken leg curry`."
             )
         invalid_prompt = prompt
@@ -136,7 +133,7 @@ def current_target_question(state: Mapping[str, Any]) -> dict[str, Any]:
     prompt_payload = dict(target)
     prompt_payload.update(
         {
-            "segment_id": target.get("segment_id"),
+            "segment_id": _target_segment_id(target),
             "roadmap_step": step,
             "prompt": prompt,
             "invalid_prompt": invalid_prompt,
@@ -159,7 +156,7 @@ def complete_target_question(state: Mapping[str, Any], answer: Mapping[str, Any]
     updated["interview_messages"] = messages
 
     target = _current_target(updated)
-    segment_id = str(answer.get("segment_id") or target.get("segment_id") or "")
+    segment_id = str(answer.get("segment_id") or _target_segment_id(target) or "")
     answers = [dict(item) for item in updated.get("answers_by_segment") or []]
     record = _answer_record_for_state(updated, target)
     record["segment_id"] = segment_id or record.get("segment_id")
@@ -178,7 +175,7 @@ def complete_target_question(state: Mapping[str, Any], answer: Mapping[str, Any]
         record["portion_bucket"] = _portion_bucket(answer.get("portion_bucket"))
         record["quantity_display"] = _optional_text(answer.get("quantity_display"))
 
-    answers = [item for item in answers if str(item.get("segment_id") or "") != segment_id]
+    answers = [item for item in answers if not _answer_matches_target(item, target)]
     answers.append(record)
     updated["answers_by_segment"] = answers
 
@@ -193,7 +190,7 @@ def complete_target_question(state: Mapping[str, Any], answer: Mapping[str, Any]
             updated["confirmation_items"] = confirmation_items_from_state(updated)
         else:
             updated["current_target_index"] = next_index
-            updated["roadmap_step"] = "INITIAL_QUESTION"
+            updated["roadmap_step"] = _initial_roadmap_step_for_target(targets[next_index])
     else:
         updated["roadmap_step"] = next_step
     return updated
@@ -334,6 +331,9 @@ def build_all_wrong_prompt(*, segment: Mapping[str, Any], evidence: str | None =
 def answer_to_confirmation_item(answer: Mapping[str, Any]) -> dict[str, Any]:
     parsed = InterviewAnswer.from_mapping(answer)
     item = {
+        "group_id": _optional_text(answer.get("group_id")),
+        "primary_segment_id": _optional_text(answer.get("primary_segment_id")),
+        "segment_ids": list(answer.get("segment_ids") or []) if isinstance(answer.get("segment_ids"), list) else None,
         "segment_id": parsed.segment_id,
         "entry_id": _optional_text(answer.get("entry_id")),
         "name": parsed.name,
@@ -350,15 +350,9 @@ def answer_to_confirmation_item(answer: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def confirmation_items_from_state(state: Mapping[str, Any]) -> list[dict[str, Any]]:
-    answers_by_id = {
-        str(item.get("segment_id") or ""): dict(item)
-        for item in state.get("answers_by_segment") or []
-        if item.get("segment_id") is not None
-    }
     items: list[dict[str, Any]] = []
     for target in list(state.get("pending_targets") or []):
-        segment_id = str(target.get("segment_id") or "")
-        answer = answers_by_id.get(segment_id)
+        answer = _answer_for_target(state, target)
         if answer is None:
             continue
         items.append(answer_to_confirmation_item(answer))
@@ -393,17 +387,20 @@ async def prepare_interview_session(
     if existing is not None:
         return existing
 
-    pending_targets = [
-        {
-            "segment_id": segment.id,
-            "label": getattr(segment, "label", None) or "this item",
-        }
-        for segment in segments
-    ]
+    pending_targets = _pending_targets_from_food_groups(getattr(meal, "reasoning_state_json", None))
+    if not pending_targets:
+        pending_targets = [
+            {
+                "segment_id": segment.id,
+                "label": getattr(segment, "label", None) or "this item",
+            }
+            for segment in segments
+        ]
+    initial_step = _initial_roadmap_step_for_target(pending_targets[0]) if pending_targets else "CONFIRMATION"
     prompt_payload = _json_safe_payload({
         "meal_id": meal.id,
         "session_mode": SESSION_MODE_MEAL,
-        "roadmap_step": "INITIAL_QUESTION",
+        "roadmap_step": initial_step,
         "pending_targets": pending_targets,
         "current_target_index": 0,
         "answers_by_segment": [],
@@ -414,7 +411,7 @@ async def prepare_interview_session(
         id=str(uuid.uuid4()),
         meal_log_id=meal.id,
         chat_id=str(chat_id),
-        state_key="INITIAL_QUESTION",
+        state_key=initial_step,
         current_prompt_payload=prompt_payload,
         reminder_count=0,
         is_active=True,
@@ -739,12 +736,14 @@ def _current_target(state: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _answer_record_for_state(state: Mapping[str, Any], target: Mapping[str, Any]) -> dict[str, Any]:
-    segment_id = str(target.get("segment_id") or "")
-    for answer in state.get("answers_by_segment") or []:
-        if str(answer.get("segment_id") or "") == segment_id:
-            return dict(answer)
+    existing = _answer_for_target(state, target)
+    if existing is not None:
+        return dict(existing)
     seeded = {
-        "segment_id": target.get("segment_id"),
+        "group_id": _optional_text(target.get("group_id")),
+        "primary_segment_id": _optional_text(target.get("primary_segment_id")),
+        "segment_ids": list(target.get("segment_ids") or []) if isinstance(target.get("segment_ids"), list) else None,
+        "segment_id": _target_segment_id(target),
         "label": target.get("label"),
         "entry_id": target.get("entry_id"),
         "food_item_id": target.get("food_item_id"),
@@ -757,6 +756,151 @@ def _answer_record_for_state(state: Mapping[str, Any], target: Mapping[str, Any]
         "quantity_display": _optional_text(target.get("quantity_display")),
     }
     return {key: value for key, value in seeded.items() if value is not None}
+
+
+def _answer_for_target(
+    state: Mapping[str, Any],
+    target: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    for answer in state.get("answers_by_segment") or []:
+        if _answer_matches_target(answer, target):
+            return dict(answer)
+    return None
+
+
+def _answer_matches_target(answer: Mapping[str, Any], target: Mapping[str, Any]) -> bool:
+    group_id = _optional_text(target.get("group_id"))
+    if group_id and _optional_text(answer.get("group_id")) == group_id:
+        return True
+    return str(answer.get("segment_id") or "") == str(_target_segment_id(target) or "")
+
+
+def _target_segment_id(target: Mapping[str, Any]) -> str | None:
+    return _optional_text(target.get("segment_id")) or _optional_text(target.get("primary_segment_id"))
+
+
+def _pending_targets_from_food_groups(reasoning_state: object) -> list[dict[str, Any]]:
+    if not isinstance(reasoning_state, Mapping):
+        return []
+    groups = reasoning_state.get("food_groups")
+    if not isinstance(groups, list):
+        return []
+
+    pending_targets: list[dict[str, Any]] = []
+    for group in groups:
+        if not isinstance(group, Mapping) or not _group_needs_interview(group):
+            continue
+        segment_ids = [
+            str(segment_id)
+            for segment_id in group.get("segment_ids") or []
+            if segment_id is not None
+        ]
+        target = {
+            "group_id": _optional_text(group.get("group_id")) or f"group-{len(pending_targets) + 1}",
+            "primary_segment_id": _optional_text(group.get("primary_segment_id")) or (segment_ids[0] if segment_ids else None),
+            "segment_ids": segment_ids,
+            "label": _optional_text(group.get("label")) or "this item",
+            "question_kind": _question_kind(group.get("question_kind")),
+            "question_focus": _optional_text(group.get("question_focus")),
+            "question_examples": [
+                str(example).strip()
+                for example in group.get("question_examples") or []
+                if str(example).strip()
+            ],
+            "candidate_choices": _candidate_choices(group.get("top_3")),
+        }
+        pending_targets.append({key: value for key, value in target.items() if value not in (None, [], "")})
+
+    return sorted(pending_targets, key=_pending_target_sort_key)
+
+
+def _group_needs_interview(group: Mapping[str, Any]) -> bool:
+    action = str(group.get("action") or "").upper()
+    state = str(group.get("state") or "").upper()
+    return action == "INTERVIEW" or state == "UNRESOLVED"
+
+
+def _pending_target_sort_key(target: Mapping[str, Any]) -> tuple[int, str]:
+    priority = {
+        "DETAIL": 0,
+        "IDENTITY": 0,
+        "NAME": 0,
+        "CHOICE": 1,
+        "QUANTITY": 2,
+    }
+    return (
+        priority.get(_question_kind(target.get("question_kind")), 1),
+        str(target.get("label") or ""),
+    )
+
+
+def _question_kind(value: object) -> str:
+    if not isinstance(value, str):
+        return "IDENTITY"
+    normalized = value.strip().upper()
+    return normalized or "IDENTITY"
+
+
+def _candidate_choices(top_candidates: object) -> list[str]:
+    if not isinstance(top_candidates, list):
+        return []
+    choices: list[str] = []
+    for candidate in top_candidates:
+        if isinstance(candidate, Mapping):
+            label = _optional_text(candidate.get("label") or candidate.get("candidate_name") or candidate.get("name"))
+            if label:
+                choices.append(label)
+    return choices
+
+
+def _initial_roadmap_step_for_target(target: Mapping[str, Any]) -> str:
+    if _question_kind(target.get("question_kind")) == "QUANTITY":
+        return "PORTION_CONTEXT"
+    return "INITIAL_QUESTION"
+
+
+def _render_initial_question(
+    *,
+    target: Mapping[str, Any],
+    label: str,
+) -> tuple[str, str]:
+    question_kind = _question_kind(target.get("question_kind"))
+    question_focus = _optional_text(target.get("question_focus")) or ""
+    examples = [
+        str(example).strip()
+        for example in target.get("question_examples") or []
+        if str(example).strip()
+    ]
+    normalized_label = label.lower()
+    normalized_focus = question_focus.lower()
+
+    if question_kind == "QUANTITY":
+        prompt = (
+            f"How much {label} was there? "
+            "A short answer like `small bowl`, `2 pieces`, or `half plate` is enough."
+        )
+        return prompt, prompt
+
+    if normalized_label == "egg curry" and normalized_focus == "vegetable inside egg curry":
+        prompt = (
+            "I can see the egg curry, but I can't tell which vegetable is in it. "
+            "What should I call it? For example: egg curry with bottle gourd, "
+            "egg curry with zucchini, or the name you normally use."
+        )
+        return prompt, prompt
+
+    if question_kind == "DETAIL" and question_focus:
+        prompt = f"I can see the {label}, but I can't tell the {question_focus}. What should I call it?"
+        if examples:
+            prompt = f"{prompt} For example: {', '.join(examples)}, or the name you normally use."
+        return prompt, prompt
+
+    prompt = f"What should I call the {label}?"
+    if examples:
+        prompt = f"{prompt} For example: {', '.join(examples)}, or the name you normally use."
+    else:
+        prompt = f"{prompt} If my label is off, just tell me the name you normally use."
+    return prompt, prompt
 
 
 def _next_roadmap_step(*, record: Mapping[str, Any], step: str) -> str | None:

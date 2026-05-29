@@ -28,6 +28,9 @@ _GROUP_REQUIRED_FIELDS = (
     "missing_evidence",
     "decision_rationale",
     "gate_reason",
+    "question_kind",
+    "question_focus",
+    "question_examples",
     "top_3",
 )
 _INTERVIEW_STATES = {
@@ -102,6 +105,12 @@ def reasoning_response_format() -> dict[str, Any]:
         },
         "decision_rationale": {"type": "string"},
         "gate_reason": {"type": "string"},
+        "question_kind": {"type": "string"},
+        "question_focus": {"type": "string"},
+        "question_examples": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
         "top_3": {
             "type": "array",
             "minItems": 3,
@@ -354,6 +363,9 @@ def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, An
         _coerce_str(group.get("group_state") or group.get("state"), "group_state"),
     )
     gate_reason = _coerce_str(group.get("gate_reason"), "gate_reason")
+    question_kind = _coerce_str(group.get("question_kind"), "question_kind")
+    question_focus = _coerce_str(group.get("question_focus"), "question_focus")
+    question_examples = _coerce_list_of_text(group.get("question_examples"), "question_examples")
 
     return {
         "group_id": group_id,
@@ -367,6 +379,9 @@ def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, An
         "missing_evidence": missing_evidence,
         "decision_rationale": decision_rationale,
         "gate_reason": gate_reason,
+        "question_kind": question_kind,
+        "question_focus": question_focus,
+        "question_examples": question_examples,
         "top_3": top_3,
     }
 
@@ -402,6 +417,9 @@ def _legacy_group_from_root(payload: Mapping[str, object]) -> list[dict[str, Any
         "decision_rationale": _coerce_str(payload.get("decision_rationale"), "decision_rationale")
         or str(top_3[0].get("decision_rationale") or "No candidate rationale provided"),
         "gate_reason": _coerce_str(payload.get("gate_reason"), "gate_reason"),
+        "question_kind": _coerce_str(payload.get("question_kind"), "question_kind"),
+        "question_focus": _coerce_str(payload.get("question_focus"), "question_focus"),
+        "question_examples": _coerce_list_of_text(payload.get("question_examples"), "question_examples"),
         "top_3": top_3,
     }
     return [_coerce_group_payload(group, 0)]

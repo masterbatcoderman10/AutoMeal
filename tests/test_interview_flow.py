@@ -550,6 +550,57 @@ class InterviewPersistencePrepTests(unittest.TestCase):
             "QUANTITY",
         )
 
+    def test_prepare_interview_session_reads_persisted_group_fields(self) -> None:
+        import asyncio
+
+        from app.services import interview_service
+
+        class EmptyResult:
+            def scalar_one_or_none(self):
+                return None
+
+        class FakeSession:
+            async def execute(self, _statement):
+                return EmptyResult()
+
+            def add(self, _item) -> None:
+                return None
+
+        meal = SimpleNamespace(
+            id="meal-nested-grouped",
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "food_groups": [
+                        {
+                            "group_id": "group-egg-curry",
+                            "group_label": "egg curry",
+                            "group_action": "ASK_CHOICE",
+                            "group_state": "PENDING_INTERVIEW",
+                            "primary_segment_id": "seg-egg-1",
+                            "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                            "question_kind": "DETAIL",
+                            "question_focus": "vegetable inside egg curry",
+                            "question_examples": ["egg curry with bottle gourd"],
+                        }
+                    ]
+                }
+            },
+        )
+
+        interview = asyncio.run(
+            interview_service.prepare_interview_session(
+                session=FakeSession(),
+                meal=meal,
+                segments=[SimpleNamespace(id="seg-egg-1", label="raw egg segment")],
+                chat_id="chat-nested",
+            )
+        )
+
+        target = interview.current_prompt_payload["pending_targets"][0]
+        self.assertEqual(target["group_id"], "group-egg-curry")
+        self.assertEqual(target["label"], "egg curry")
+        self.assertEqual(target["question_focus"], "vegetable inside egg curry")
+
     def test_confirmation_items_are_built_from_structured_answers(self) -> None:
         from app.services import interview_service
 

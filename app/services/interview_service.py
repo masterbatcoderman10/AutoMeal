@@ -802,7 +802,7 @@ def _pending_targets_from_food_groups(reasoning_state: object) -> list[dict[str,
             "group_id": _optional_text(group.get("group_id")) or f"group-{len(pending_targets) + 1}",
             "primary_segment_id": _optional_text(group.get("primary_segment_id")) or (segment_ids[0] if segment_ids else None),
             "segment_ids": segment_ids,
-            "label": _optional_text(group.get("label")) or "this item",
+            "label": _optional_text(group.get("group_label") or group.get("label")) or "this item",
             "question_kind": _question_kind(group.get("question_kind")),
             "question_focus": _optional_text(group.get("question_focus")),
             "question_examples": [
@@ -818,9 +818,15 @@ def _pending_targets_from_food_groups(reasoning_state: object) -> list[dict[str,
 
 
 def _group_needs_interview(group: Mapping[str, Any]) -> bool:
-    action = str(group.get("action") or "").upper()
-    state = str(group.get("state") or "").upper()
-    return action == "INTERVIEW" or state == "UNRESOLVED"
+    action = str(group.get("group_action") or group.get("action") or "").upper()
+    state = str(group.get("group_state") or group.get("state") or "").upper()
+    return action in {"INTERVIEW", "ASK_CHOICE", "ASK_QUANTITY"} or state in {
+        "UNRESOLVED",
+        "PENDING_INTERVIEW",
+        "PENDING_CHOICE",
+        "PARTIAL_RESOLVED_WAITING",
+        "INTERVIEWING",
+    }
 
 
 def _pending_target_sort_key(target: Mapping[str, Any]) -> tuple[int, str]:

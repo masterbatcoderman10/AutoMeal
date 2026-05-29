@@ -270,6 +270,9 @@ def _normalized_group_result(
         or _coerce_string_list(top_three[0].get("missing_evidence") if top_three else None),
         "decision_rationale": decision_rationale,
         "gate_reason": gate_reason,
+        "question_kind": _coerce_str(group.get("question_kind"), "question_kind"),
+        "question_focus": _coerce_str(group.get("question_focus"), "question_focus"),
+        "question_examples": _coerce_string_list(group.get("question_examples")),
         "top_3": top_three,
     }
 
@@ -420,11 +423,13 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
 def _normalize_top_three(result: object) -> list[dict[str, Any]]:
     if isinstance(result, Mapping):
         candidates = result.get("top_3")
-        if isinstance(candidates, list):
-            return [
-                candidate for candidate in candidates
-                if isinstance(candidate, Mapping)
-            ][:3]
+    else:
+        candidates = getattr(result, "top_candidates", None)
+    if isinstance(candidates, list):
+        return [
+            dict(candidate) for candidate in candidates
+            if isinstance(candidate, Mapping)
+        ][:3]
     return []
 
 
@@ -607,7 +612,8 @@ def _reasoning_system_prompt() -> str:
         "required, including trace_id, gate_reason, segment_count, food_group_count, and "
         "food_groups. Every food_group must include group_id, group_label, group_action, "
         "group_state, primary_segment_id, segment_ids, selected_candidate_id, visible "
-        "evidence, missing evidence, gate reason, decision rationale, and exactly three "
+        "evidence, missing evidence, gate reason, decision rationale, question_kind, "
+        "question_focus, question_examples, and exactly three "
         "top_3 records with nutrition_impact on every candidate. meal_state must be exactly "
         "one of READY_TO_WRITE, PENDING_CHOICE, PENDING_INTERVIEW, PARTIAL_RESOLVED_WAITING, "
         "FAILED_UNCLEAR, or NEEDS_SCHEMA_REVIEW. Use READY_TO_WRITE only when every group is "

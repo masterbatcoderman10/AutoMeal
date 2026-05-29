@@ -347,8 +347,10 @@ async def _run_grouped_uat(args: argparse.Namespace, llm_client) -> dict[str, An
                 unresolved_group_ids = [
                     str(group.get("group_id"))
                     for group in food_groups
-                    if str(group.get("action") or "").upper() == "INTERVIEW"
-                    or str(group.get("state") or "").upper() == "UNRESOLVED"
+                    if str(group.get("group_action") or group.get("action") or "").upper()
+                    in {"INTERVIEW", "ASK_CHOICE", "ASK_QUANTITY"}
+                    or str(group.get("group_state") or group.get("state") or "").upper()
+                    in {"UNRESOLVED", "PENDING_INTERVIEW", "PENDING_CHOICE", "PARTIAL_RESOLVED_WAITING"}
                 ]
 
                 current_prompt = None
@@ -369,8 +371,8 @@ async def _run_grouped_uat(args: argparse.Namespace, llm_client) -> dict[str, An
                 grouped_summary = [
                     {
                         "group_id": group.get("group_id"),
-                        "label": group.get("label"),
-                        "action": group.get("action"),
+                        "label": group.get("group_label") or group.get("label"),
+                        "action": group.get("group_action") or group.get("action"),
                         "state": group.get("group_state") or group.get("state"),
                         "primary_segment_id": group.get("primary_segment_id"),
                         "segment_ids": group.get("segment_ids"),

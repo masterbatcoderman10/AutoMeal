@@ -58,8 +58,8 @@ class SmokeHelperTests(unittest.TestCase):
             {
                 "meal_reasoning": {
                     "food_groups": [
-                        {"group_id": "group-1", "label": "egg curry"},
-                        {"group_id": "group-2", "label": "pita bread"},
+                        {"group_id": "group-1", "group_label": "egg curry"},
+                        {"group_id": "group-2", "group_label": "pita bread"},
                     ]
                 }
             }
@@ -68,8 +68,8 @@ class SmokeHelperTests(unittest.TestCase):
         self.assertEqual(
             groups,
             [
-                {"group_id": "group-1", "label": "egg curry"},
-                {"group_id": "group-2", "label": "pita bread"},
+                {"group_id": "group-1", "group_label": "egg curry"},
+                {"group_id": "group-2", "group_label": "pita bread"},
             ],
         )
 

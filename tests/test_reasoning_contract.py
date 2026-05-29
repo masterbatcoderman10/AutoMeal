@@ -214,6 +214,10 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertIn("food_groups", schema["required"])
         self.assertIn("food_group_count", schema["required"])
         self.assertNotIn("top_3", schema["properties"])
+        group_schema = schema["properties"]["food_groups"]["items"]
+        self.assertIn("question_kind", group_schema["required"])
+        self.assertIn("question_focus", group_schema["required"])
+        self.assertIn("question_examples", group_schema["required"])
 
         grouped = coerce_reasoning_response(
             {
@@ -227,3 +231,42 @@ class ReasoningContractTests(unittest.TestCase):
         )
 
         self.assertEqual(grouped["meal_state"], "NEEDS_SCHEMA_REVIEW")
+
+    def test_grouped_reasoning_contract_preserves_question_metadata(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "ASK_CHOICE",
+                "meal_state": "PENDING_INTERVIEW",
+                "trace_id": "trace-question",
+                "decision_rationale": "hidden curry detail needs a follow-up",
+                "gate_reason": "missing hidden vegetable",
+                "segment_count": 1,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_id": "group-egg-curry",
+                        "group_label": "egg curry",
+                        "group_action": "ASK_CHOICE",
+                        "group_state": "PENDING_INTERVIEW",
+                        "primary_segment_id": "seg-egg",
+                        "segment_ids": ["seg-egg"],
+                        "selected_candidate_id": "candidate-egg",
+                        "visual_evidence": ["egg visible"],
+                        "missing_evidence": ["vegetable inside curry"],
+                        "decision_rationale": "egg visible but vegetable is hidden",
+                        "gate_reason": "missing hidden vegetable",
+                        "question_kind": "DETAIL",
+                        "question_focus": "vegetable inside egg curry",
+                        "question_examples": ["egg curry with bottle gourd"],
+                        "top_3": [_candidate_payload(), _candidate_payload(), _candidate_payload()],
+                    }
+                ],
+            }
+        )
+
+        group = grouped["food_groups"][0]
+        self.assertEqual(group["question_kind"], "DETAIL")
+        self.assertEqual(group["question_focus"], "vegetable inside egg curry")
+        self.assertEqual(group["question_examples"], ["egg curry with bottle gourd"])

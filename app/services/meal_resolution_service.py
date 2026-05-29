@@ -60,6 +60,7 @@ class FinalSegmentResolution:
     prior_food_visual_id_to_invalidate: str | None = None
     visual_learning_eligible: bool = False
     existing_diary_entry_id: str | None = None
+    entry_is_verified: bool | None = None
     correction_reason: str | None = None
     trace_id: str | None = None
 
@@ -345,7 +346,11 @@ async def apply_final_meal_resolution(
             existing.segment_id = _normalize_text(resolution.segment_id)
             existing.portion_bucket = str(_coerce_portion_bucket(resolution.portion_bucket).value)
             existing.identification_method = _normalize_text(resolution.identification_method) or existing.identification_method
-            existing.is_verified = bool(resolved_food.is_verified)
+            existing.is_verified = (
+                bool(resolution.entry_is_verified)
+                if resolution.entry_is_verified is not None
+                else bool(resolved_food.is_verified)
+            )
             existing.quantity_json = copy.deepcopy(resolution.quantity_json)
             existing.quantity_display = _normalize_text(resolution.quantity_display)
             after_json = _serialize_entry(existing)

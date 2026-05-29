@@ -248,6 +248,7 @@ def build_best_effort_closeout(unresolved: Mapping[str, Any]) -> dict[str, Any]:
         "unresolved_count": len(unresolved_items),
         "items": unresolved_items,
         "processing_status": "INTERVIEWING",
+        "is_verified": False,
     }
 
 
@@ -492,6 +493,45 @@ async def prepare_fix_interview_session(
             },
         )
     )
+    return interview
+
+
+async def persist_interview_step(
+    *,
+    session,
+    interview: InterviewSession,
+    state: Mapping[str, Any],
+    user_payload: Mapping[str, Any],
+    next_prompt: Mapping[str, Any] | None = None,
+) -> InterviewSession:
+    persisted_state = dict(state)
+    interview.current_prompt_payload = persisted_state
+    interview.state_key = str(persisted_state.get("roadmap_step") or interview.state_key)
+    session.add(interview)
+    session.add(
+        InterviewMessage(
+            id=str(uuid.uuid4()),
+            session_id=interview.id,
+            role="user",
+            payload=dict(user_payload),
+        )
+    )
+    if next_prompt is not None:
+        session.add(
+            InterviewMessage(
+                id=str(uuid.uuid4()),
+                session_id=interview.id,
+                role="bot",
+                payload={
+                    "type": "prompt",
+                    "prompt": dict(next_prompt),
+                },
+            )
+        )
+    if hasattr(session, "commit"):
+        maybe = session.commit()
+        if hasattr(maybe, "__await__"):
+            await maybe
     return interview
 
 
@@ -755,6 +795,7 @@ __all__ = [
     "is_pinned_chat_update",
     "parse_confirmation_bulk_text",
     "parse_interview_text",
+    "persist_interview_step",
     "prepare_fix_interview_session",
     "prepare_interview_session",
     "should_send_single_reminder",

@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     REASONING_MODEL: str = "google/gemini-3.5-flash"
     REASONING_FALLBACK_MODEL: str = "google/gemini-3-flash-preview"
     REASONING_PARSER_MODEL: str = "google/gemini-3.1-flash-lite"
-    REASONING_PARSER_FALLBACK_MODEL: str = "google/gemini-3-flash-preview"
+    REASONING_PARSER_FALLBACK_MODEL: str = "google/gemini-3.5-flash"
     REASONING_MATCH_THRESHOLD: float = 0.90
     REASONING_TOP_CANDIDATE_FLOOR: float = 0.65
     REASONING_SEGMENT_PARALLELISM: int = 4

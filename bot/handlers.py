@@ -1,4 +1,3 @@
-import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -8,7 +7,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.config import get_settings
-from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog
+from app.models import DiaryEntry, InterviewSession, MealLog
 from app.services import interview_service
 from app.services import correction_service
 
@@ -392,21 +391,16 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         confirmation_items,
                         edits["updates"],
                     )
-                    interview.current_prompt_payload = _update_confirmation_state(state, updated_confirmation)
-                    session.add(interview)
-                    session.add(
-                        InterviewMessage(
-                            id=str(uuid.uuid4()),
-                            session_id=interview.id,
-                            role="user",
-                            payload={
-                                "type": "confirmation_edit",
-                                "text": text,
-                                "updates": edits["updates"],
-                            },
-                        )
+                    await interview_service.persist_interview_step(
+                        session=session,
+                        interview=interview,
+                        state=_update_confirmation_state(state, updated_confirmation),
+                        user_payload={
+                            "type": "confirmation_edit",
+                            "text": text,
+                            "updates": edits["updates"],
+                        },
                     )
-                    await session.commit()
                     action = "apply this fix" if mode == interview_service.SESSION_MODE_FIX else "log it"
                     await update.message.reply_text(format_interview_confirmation_message(updated_confirmation, action=action))
                     return
@@ -421,31 +415,16 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
             state = interview_service.complete_target_question(state, answer)
             state["last_prompted_at"] = datetime.now(UTC)
-            interview.current_prompt_payload = state
-            interview.state_key = str(state.get("roadmap_step") or interview.state_key)
-            session.add(interview)
-            session.add(
-                InterviewMessage(
-                    id=str(uuid.uuid4()),
-                    session_id=interview.id,
-                    role="user",
-                    payload=answer,
-                )
-            )
+            next_prompt = None
             if state.get("roadmap_step") != "CONFIRMATION":
                 next_prompt = interview_service.current_target_question(state)
-                session.add(
-                    InterviewMessage(
-                        id=str(uuid.uuid4()),
-                        session_id=interview.id,
-                        role="bot",
-                        payload={
-                            "type": "prompt",
-                            "prompt": next_prompt,
-                        },
-                    )
-                )
-            await session.commit()
+            await interview_service.persist_interview_step(
+                session=session,
+                interview=interview,
+                state=state,
+                user_payload=answer,
+                next_prompt=next_prompt,
+            )
 
             if state.get("roadmap_step") == "CONFIRMATION":
                 action = (

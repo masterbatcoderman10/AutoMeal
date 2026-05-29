@@ -80,7 +80,11 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_persists_reasoning_before_final_write(self) -> None:
         from app.services import reasoning_service
 
-        meal = type("Meal", (), {"id": "meal-1", "processing_status": "REASONING"})()
+        meal = type(
+            "Meal",
+            (),
+            {"id": "meal-1", "processing_status": "REASONING", "reasoning_state_json": None},
+        )()
         segments = [
             type(
                 "MealSegment",
@@ -124,11 +128,19 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["ready_for_final_write"], True, name)
         self.assertEqual(len(result["segment_reasoning"]), len(segments))
         self.assertEqual(result["meal_reasoning"]["trace_id"], "trace-flow-1")
+        self.assertEqual(segments[0].ai_reasoning["trace_id"], "trace-flow-1")
+        self.assertEqual(segments[1].ai_reasoning["meal_state"], "READY_TO_WRITE")
+        self.assertEqual(meal.reasoning_state_json["meal_reasoning"]["trace_id"], "trace-flow-1")
+        self.assertTrue(meal.reasoning_state_json["ready_for_final_write"])
 
     async def test_final_write_waits_for_all_segment_reasoning_records(self) -> None:
         from app.services import reasoning_service
 
-        meal = type("Meal", (), {"id": "meal-2", "processing_status": "REASONING"})()
+        meal = type(
+            "Meal",
+            (),
+            {"id": "meal-2", "processing_status": "REASONING", "reasoning_state_json": None},
+        )()
         segments = [
             type(
                 "MealSegment",
@@ -170,6 +182,9 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ready_for_final_write"])
         self.assertIn("meal_reasoning", result)
         self.assertEqual(result["meal_reasoning"]["meal_state"], "PENDING_INTERVIEW")
+        self.assertEqual(segments[0].ai_reasoning["trace_id"], "trace-flow-2")
+        self.assertEqual(meal.reasoning_state_json["meal_reasoning"]["meal_state"], "PENDING_INTERVIEW")
+        self.assertFalse(meal.reasoning_state_json["ready_for_final_write"])
 
     async def test_run_reasoning_request_uses_fallback_model_after_primary_failure(self) -> None:
         from app.services import reasoning_service
@@ -274,3 +289,15 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm_client.chat_completion.await_args_list[0].kwargs["model"], "parser-primary")
         self.assertEqual(llm_client.chat_completion.await_args_list[1].kwargs["model"], "parser-fallback")
         self.assertEqual(repaired["trace_id"], "trace-parser-fallback")
+
+    def test_parser_fallback_default_matches_phase_contract(self) -> None:
+        from app.config import Settings
+
+        self.assertEqual(
+            Settings.model_fields["REASONING_PARSER_MODEL"].default,
+            "google/gemini-3.1-flash-lite",
+        )
+        self.assertEqual(
+            Settings.model_fields["REASONING_PARSER_FALLBACK_MODEL"].default,
+            "google/gemini-3.5-flash",
+        )

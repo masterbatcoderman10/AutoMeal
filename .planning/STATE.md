@@ -102,6 +102,12 @@ Recent decisions affecting current work:
 
 None yet.
 
+### Quick Tasks Completed
+
+| Date | Quick Task | Summary |
+|------|------------|---------|
+| 2026-05-29 | 260529-epp-fix-phase-04-security-audit-open-threats | Closed Phase 04 security audit gaps; Phase 04 SECURITY.md now verifies 38/38 threats closed. |
+
 ### Blockers/Concerns
 
 - Phase 1: CF-3 — iOS Shortcut "new photo added" trigger reliability is unverified on real device. Budget time for real-device smoke test; implement Share Sheet fallback if automatic trigger is unreliable.

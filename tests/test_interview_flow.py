@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 
 class InterviewRoadmapTests(unittest.TestCase):
@@ -41,7 +42,7 @@ class InterviewRoadmapTests(unittest.TestCase):
         )
 
 
-class InterviewProgressionTests(unittest.TestCase):
+class InterviewProgressionTests(unittest.IsolatedAsyncioTestCase):
     def test_interview_proceeds_through_structured_steps_before_confirmation(self) -> None:
         from bot import handlers
 
@@ -190,7 +191,85 @@ class InterviewProgressionTests(unittest.TestCase):
 
         self.assertEqual(closeout["meal_id"], "meal-1")
         self.assertTrue(closeout["best_effort"])  # D-43 through D-54
+        self.assertFalse(closeout["is_verified"])
         self.assertEqual(closeout["unresolved_count"], 2)
+
+    async def test_persist_interview_step_records_session_state_and_messages(self) -> None:
+        from app.services import interview_service
+
+        session = SimpleNamespace(add=Mock(), commit=AsyncMock())
+        interview = SimpleNamespace(
+            id="interview-1",
+            state_key="INITIAL_QUESTION",
+            current_prompt_payload={},
+        )
+        state = {
+            "roadmap_step": "FOOD_NAME",
+            "interview_messages": [],
+        }
+        answer = {
+            "segment_id": "seg-1",
+            "roadmap_step": "INITIAL_QUESTION",
+            "name": "Dal",
+        }
+        next_prompt = {
+            "segment_id": "seg-1",
+            "roadmap_step": "FOOD_NAME",
+            "prompt": "What exact name should I log?",
+        }
+
+        await interview_service.persist_interview_step(
+            session=session,
+            interview=interview,
+            state=state,
+            user_payload=answer,
+            next_prompt=next_prompt,
+        )
+
+        self.assertEqual(interview.current_prompt_payload, state)
+        self.assertEqual(interview.state_key, "FOOD_NAME")
+        self.assertEqual(session.add.call_args_list[0].args[0], interview)
+        added_messages = [call.args[0] for call in session.add.call_args_list[1:]]
+        self.assertEqual(added_messages[0].role, "user")
+        self.assertEqual(added_messages[0].payload["name"], "Dal")
+        self.assertEqual(added_messages[1].role, "bot")
+        self.assertEqual(added_messages[1].payload["prompt"]["roadmap_step"], "FOOD_NAME")
+        session.commit.assert_awaited_once()
+
+    async def test_confirm_callback_requires_matching_persisted_interview_session(self) -> None:
+        from bot.handlers import interview_callback
+
+        callback = SimpleNamespace(
+            data="confirm:meal-from-callback",
+            message=SimpleNamespace(chat=SimpleNamespace(id="999"), reply_text=AsyncMock()),
+            answer=AsyncMock(),
+        )
+        update = SimpleNamespace(message=None, callback_query=callback)
+        context = SimpleNamespace(bot_data={})
+        session = AsyncMock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._load_active_interview", AsyncMock(return_value=None)) as load_interview,
+            patch("bot.handlers._finalize_interview_confirmation", AsyncMock()) as finalize,
+        ):
+            await interview_callback(update, context)
+
+        load_interview.assert_awaited_once()
+        self.assertEqual(load_interview.await_args.kwargs["chat_id"], "999")
+        self.assertEqual(load_interview.await_args.kwargs["meal_id"], "meal-from-callback")
+        finalize.assert_not_awaited()
+        callback.answer.assert_awaited_once()
+        engine.dispose.assert_awaited_once()
 
 
 class InterviewConfirmationEditTests(unittest.TestCase):

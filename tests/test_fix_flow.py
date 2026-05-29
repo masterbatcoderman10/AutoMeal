@@ -246,13 +246,14 @@ class CorrectionContextTests(unittest.IsolatedAsyncioTestCase):
             quantity_json={"portion_bucket": "STANDARD"},
             quantity_display="1 bowl",
         )
-        linked_visual = SimpleNamespace(
-            is_invalidated=False,
-            invalidated_at=None,
-            invalidation_reason=None,
+        meal = SimpleNamespace(
+            id="meal-1",
+            processing_status="COMPLETED",
+            reasoning_state_json={"existing": "state"},
         )
+        correction_event = SimpleNamespace(id="event-1")
         session = SimpleNamespace(
-            get=AsyncMock(return_value=linked_visual),
+            get=AsyncMock(return_value=meal),
             add=Mock(),
         )
 
@@ -278,9 +279,9 @@ class CorrectionContextTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 correction_service,
-                "resolve_or_create_food_item",
-                AsyncMock(return_value=SimpleNamespace(id="food-new")),
-            ) as resolve_food,
+                "apply_final_meal_resolution",
+                AsyncMock(return_value=SimpleNamespace(correction_events=[correction_event])),
+            ) as apply_resolution,
         ):
             result = await correction_service.apply_confirmed_entry_correction(
                 session=session,
@@ -290,13 +291,17 @@ class CorrectionContextTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result["invalidated_visual_ids"], ["visual-1"])
-        self.assertTrue(linked_visual.is_invalidated)
-        self.assertEqual(linked_visual.invalidation_reason, "manual fix")
-        self.assertEqual(entry.food_item_id, "food-new")
         self.assertTrue(result["write_visual_back"])
-        resolved_food = resolve_food.await_args.kwargs["food"]
-        self.assertEqual(resolved_food.source_type, "PACKAGED")
-        self.assertEqual(resolved_food.brand_name, "Acme")
+        self.assertEqual(result["correction_event"], correction_event)
+        apply_resolution.assert_awaited_once()
+        resolution = apply_resolution.await_args.kwargs["final_segments"][0]
+        self.assertEqual(resolution.existing_diary_entry_id, "entry-1")
+        self.assertEqual(resolution.prior_food_visual_id_to_invalidate, "visual-1")
+        self.assertFalse(resolution.create_food_visual)
+        self.assertTrue(resolution.visual_learning_eligible)
+        self.assertTrue(resolution.entry_is_verified)
+        self.assertEqual(resolution.food.source_type, "PACKAGED")
+        self.assertEqual(resolution.food.brand_name, "Acme")
 
 
 class FixInterviewFlowTests(unittest.IsolatedAsyncioTestCase):

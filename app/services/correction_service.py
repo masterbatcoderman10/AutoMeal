@@ -8,9 +8,13 @@ from typing import Any, Mapping
 
 from sqlalchemy import select
 
-from app.models import CorrectionEvent, DiaryEntry, FoodItem, FoodVisual, MealSegment
+from app.models import DiaryEntry, FoodItem, FoodVisual, MealLog, MealSegment
 from app.services.grounding_stub import build_grounding_prep, normalize_source_type
-from app.services.meal_resolution_service import ResolvedFoodInput, resolve_or_create_food_item
+from app.services.meal_resolution_service import (
+    FinalSegmentResolution,
+    ResolvedFoodInput,
+    apply_final_meal_resolution,
+)
 
 
 IDENTITY_FIELDS = {"food_name", "name", "canonical_name", "food_item_id", "source_type", "brand_name", "restaurant_name"}
@@ -213,71 +217,60 @@ async def apply_confirmed_entry_correction(
     trace_id: str | None = None,
 ) -> dict[str, Any]:
     entry_context = await build_entry_correction_context(session=session, entry=entry)
-    before = {
-        "food_item_id": entry.food_item_id,
-        "portion_bucket": entry.portion_bucket,
-        "quantity_json": copy.deepcopy(entry.quantity_json),
-        "quantity_display": entry.quantity_display,
-    }
     result = apply_fix(
         entry=entry_context,
         patch=patch,
         confirm=True,
     )
 
-    if is_identity_fix(patch):
-        updated_identity = {**entry_context, **dict(patch)}
-        food = ResolvedFoodInput(
-            canonical_name=str(
-                updated_identity.get("food_name")
-                or updated_identity.get("name")
-                or updated_identity.get("canonical_name")
-                or "Unknown food"
-            ),
-            food_item_id=updated_identity.get("food_item_id"),
-            source_type=normalize_source_type(updated_identity.get("source_type")),
-            brand_name=updated_identity.get("brand_name"),
-            restaurant_name=updated_identity.get("restaurant_name"),
-            is_verified=False,
-            needs_grounding=result.get("grounding_prep") is not None,
-            llm_reasoning="NEEDS_GROUNDING" if result.get("grounding_prep") else None,
-        )
-        resolved_food = await resolve_or_create_food_item(session=session, food=food)
-        entry.food_item_id = resolved_food.id
+    updated_identity = {**entry_context, **dict(patch)}
+    meal = await session.get(MealLog, entry.meal_log_id)
+    if meal is None:
+        raise ValueError(f"meal not found for correction: {entry.meal_log_id}")
 
-    if "portion_bucket" in patch:
-        entry.portion_bucket = str(patch["portion_bucket"]).strip().upper()
-    if "quantity_json" in patch:
-        entry.quantity_json = copy.deepcopy(patch["quantity_json"])
-    if "quantity_display" in patch:
-        entry.quantity_display = patch["quantity_display"]
-
-    for visual_id in result["invalidated_visual_ids"]:
-        visual = await session.get(FoodVisual, visual_id)
-        if visual is not None:
-            visual.is_invalidated = True
-            visual.invalidated_at = datetime.now(UTC)
-            visual.invalidation_reason = reason or "manual correction"
-
-    after = {
-        "food_item_id": entry.food_item_id,
-        "portion_bucket": entry.portion_bucket,
-        "quantity_json": copy.deepcopy(entry.quantity_json),
-        "quantity_display": entry.quantity_display,
-    }
-    event = CorrectionEvent(
-        id=str(uuid.uuid4()),
-        meal_log_id=entry.meal_log_id,
-        diary_entry_id=entry.id,
-        before_json=before,
-        after_json=after,
-        visual_learning_eligible=bool(result["write_visual_back"]),
-        trace_id=trace_id,
-        reason=reason,
-        food_visual_id=(result["invalidated_visual_ids"][0] if result["invalidated_visual_ids"] else None),
+    meal_resolution = await apply_final_meal_resolution(
+        session=session,
+        meal=meal,
+        final_segments=[
+            FinalSegmentResolution(
+                food=ResolvedFoodInput(
+                    canonical_name=str(
+                        updated_identity.get("food_name")
+                        or updated_identity.get("name")
+                        or updated_identity.get("canonical_name")
+                        or entry_context.get("food_name")
+                        or "Unknown food"
+                    ),
+                    food_item_id=updated_identity.get("food_item_id"),
+                    source_type=normalize_source_type(updated_identity.get("source_type")),
+                    brand_name=updated_identity.get("brand_name"),
+                    restaurant_name=updated_identity.get("restaurant_name"),
+                    is_verified=False,
+                    needs_grounding=result.get("grounding_prep") is not None,
+                    llm_reasoning="NEEDS_GROUNDING" if result.get("grounding_prep") else None,
+                ),
+                segment_id=entry.segment_id,
+                portion_bucket=str(patch.get("portion_bucket") or entry.portion_bucket or "STANDARD"),
+                identification_method=entry.identification_method or "MANUAL_CORRECTION",
+                quantity_json=copy.deepcopy(patch.get("quantity_json", entry.quantity_json)),
+                quantity_display=patch.get("quantity_display", entry.quantity_display),
+                create_food_visual=False,
+                prior_food_visual_id_to_invalidate=(
+                    result["invalidated_visual_ids"][0] if result["invalidated_visual_ids"] else None
+                ),
+                visual_learning_eligible=bool(result["write_visual_back"]),
+                existing_diary_entry_id=entry.id,
+                entry_is_verified=bool(entry.is_verified),
+                correction_reason=reason or "manual correction",
+                trace_id=trace_id,
+            )
+        ],
+        meal_status=meal.processing_status,
+        reasoning_state_json=getattr(meal, "reasoning_state_json", None),
+        now=datetime.now(UTC),
     )
-    session.add(event)
-    return {**result, "correction_event": event}
+    correction_event = meal_resolution.correction_events[0] if meal_resolution.correction_events else None
+    return {**result, "meal_resolution": meal_resolution, "correction_event": correction_event}
 
 
 async def build_entry_correction_context(

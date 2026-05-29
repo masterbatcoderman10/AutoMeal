@@ -73,6 +73,122 @@ class MealResolutionResult:
     correction_events: list[CorrectionEvent]
 
 
+def _candidate_mapping(value: object | None) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _group_top_candidates(group: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_candidates = group.get("top_3")
+    if not isinstance(raw_candidates, list):
+        return []
+    return [dict(candidate) for candidate in raw_candidates if isinstance(candidate, dict)]
+
+
+def _selected_group_candidate(group: dict[str, Any]) -> dict[str, Any]:
+    selected_candidate_id = _normalize_text(group.get("selected_candidate_id"))
+    candidates = _group_top_candidates(group)
+    if selected_candidate_id is not None:
+        for candidate in candidates:
+            if _normalize_text(candidate.get("candidate_id")) == selected_candidate_id:
+                return candidate
+    return candidates[0] if candidates else {}
+
+
+def build_grouped_final_segment_resolutions(
+    *,
+    food_groups: list[dict[str, Any]],
+    segments: list[Any],
+    match_results: list[tuple[Any, Any]],
+    trace_id: str | None = None,
+) -> list[FinalSegmentResolution]:
+    if not isinstance(food_groups, list):
+        raise MealResolutionError("food_groups must be a list")
+
+    segments_by_id = {
+        str(getattr(segment, "id", "")): segment
+        for segment in segments
+        if getattr(segment, "id", None) is not None
+    }
+    match_results_by_segment = {
+        str(getattr(segment, "id", "")): result
+        for segment, result in match_results
+        if getattr(segment, "id", None) is not None
+    }
+
+    resolutions: list[FinalSegmentResolution] = []
+    for group in food_groups:
+        if not isinstance(group, dict):
+            continue
+        primary_segment_id = _normalize_text(group.get("primary_segment_id"))
+        if primary_segment_id is None:
+            raise MealResolutionError("group primary_segment_id is required")
+        primary_segment = segments_by_id.get(primary_segment_id)
+        if primary_segment is None:
+            raise MealResolutionError(f"primary segment not found: {primary_segment_id}")
+
+        selected_candidate = _selected_group_candidate(group)
+        match_result = match_results_by_segment.get(primary_segment_id)
+        canonical_name = (
+            _normalize_text(selected_candidate.get("label"))
+            or _normalize_text(group.get("group_label"))
+            or "unlabeled food"
+        )
+        portion_bucket = _normalize_text(selected_candidate.get("portion_bucket")) or "STANDARD"
+        quantity_payload = _candidate_mapping(selected_candidate.get("quantity_payload"))
+        quantity_display = (
+            _normalize_text(quantity_payload.get("quantity_label"))
+            or _normalize_text(quantity_payload.get("display"))
+            or portion_bucket.title()
+        )
+        quantity_json = {"portion_bucket": portion_bucket}
+        if "quantity" in quantity_payload:
+            quantity_json["quantity"] = quantity_payload["quantity"]
+        if "unit" in quantity_payload:
+            quantity_json["unit"] = quantity_payload["unit"]
+        if "quantity_confidence" in quantity_payload:
+            quantity_json["quantity_confidence"] = quantity_payload["quantity_confidence"]
+
+        result_food_item_id = getattr(match_result, "food_item_id", None) if match_result is not None else None
+        group_trace_id = _normalize_text(group.get("trace_id")) or trace_id
+
+        resolutions.append(
+            FinalSegmentResolution(
+                food=ResolvedFoodInput(
+                    canonical_name=canonical_name,
+                    food_item_id=_normalize_text(selected_candidate.get("food_item_id")) or result_food_item_id,
+                    aliases=[canonical_name],
+                    source_type=_normalize_text(selected_candidate.get("source_type"))
+                    or _normalize_text(selected_candidate.get("source"))
+                    or "vector_match",
+                    brand_name=_normalize_text(selected_candidate.get("brand_name")),
+                    restaurant_name=_normalize_text(selected_candidate.get("restaurant_name")),
+                    llm_reasoning=_normalize_text(group.get("decision_rationale"))
+                    or _normalize_text(group.get("gate_reason")),
+                    times_confirmed=1,
+                    is_verified=True,
+                ),
+                segment_id=primary_segment_id,
+                segment_cropped_image_url=getattr(primary_segment, "cropped_image_url", None),
+                segment_embedding=(
+                    list(getattr(primary_segment, "embedding", []))
+                    if isinstance(getattr(primary_segment, "embedding", None), list)
+                    else None
+                ),
+                portion_bucket=portion_bucket,
+                identification_method="AUTO_CONFIRM",
+                quantity_json=quantity_json,
+                quantity_display=quantity_display,
+                create_food_visual=True,
+                prior_food_visual_id_to_invalidate=None,
+                visual_learning_eligible=True,
+                correction_reason=None,
+                trace_id=group_trace_id,
+            )
+        )
+
+    return resolutions
+
+
 def _normalize_text(value: str | None) -> str | None:
     if not isinstance(value, str):
         return None
@@ -433,6 +549,7 @@ __all__ = [
     "ResolvedFoodInput",
     "FinalSegmentResolution",
     "MealResolutionResult",
+    "build_grouped_final_segment_resolutions",
     "resolve_or_create_food_item",
     "apply_final_meal_resolution",
 ]

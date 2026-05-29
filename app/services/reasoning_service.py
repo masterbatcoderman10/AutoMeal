@@ -15,6 +15,7 @@ from app.services.meal_resolution_service import (
     FinalSegmentResolution,
     ResolvedFoodInput,
     apply_final_meal_resolution,
+    build_grouped_final_segment_resolutions,
 )
 from app.services.reasoning_schema import coerce_reasoning_response, reasoning_response_format
 from app.services.taxonomy_service import load_reasoning_taxonomy
@@ -1130,12 +1131,23 @@ async def finalize_meal_from_reasoning(
             "completed_by": "reasoning_service",
         }
 
-    final_segments: list[FinalSegmentResolution] = []
-    for segment in segments:
-        result_match = next((match for seg, match in match_results if seg.id == segment.id), None)
-        if result_match is None:
-            result_match = result
-        final_segments.append(_build_resolution_from_result(segment=segment, result=result_match))
+    final_segments = build_grouped_final_segment_resolutions(
+        food_groups=[
+            dict(group)
+            for group in list(result.get("food_groups", []))
+            if isinstance(group, Mapping)
+        ],
+        segments=segments,
+        match_results=match_results,
+        trace_id=_coerce_str(result.get("trace_id"), "trace_id"),
+    )
+    if not final_segments:
+        final_segments = []
+        for segment in segments:
+            result_match = next((match for seg, match in match_results if seg.id == segment.id), None)
+            if result_match is None:
+                result_match = result
+            final_segments.append(_build_resolution_from_result(segment=segment, result=result_match))
 
     resolved = await apply_final_meal_resolution(
         session=session,

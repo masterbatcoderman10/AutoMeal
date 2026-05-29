@@ -10,6 +10,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 - [ ] **Phase 2: Vision Slice** - Photo upload produces a bot message listing detected food items by name (no nutrition yet)
 - [ ] **Phase 3: Embed & Match** - Seeded foods matched by vector similarity produce DiaryEntries and a nutrition push
 - [x] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: segmented foods continue in bounded async parallel; unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes (completed 2026-05-28)
+- [ ] **Phase 4.1: Grouped Reasoning & Human Interview Correction** - Correct the Phase 4 UAT gap where whole-meal top-3 candidates and raw segment prompts produce confusing interviews; reasoning must group distinct foods first, produce per-food top-3 candidates, and ask one human question per unresolved food group
 - [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
@@ -114,6 +115,29 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 
 ---
 
+### Phase 4.1: Grouped Reasoning & Human Interview Correction
+
+**Goal**: Fix the Phase 4 UAT failure where the system treats separate foods in one meal as competing top-3 candidates and asks robotic raw-segment interview questions; the system must reason over food groups, rank candidates per group, and ask concise human questions only for unresolved groups.
+**Mode:** mvp
+**Depends on**: Phase 4
+**Requirements**: REASON-01, REASON-02, REASON-04, INTERVIEW-01, INTERVIEW-02, INTERVIEW-03, INTERVIEW-06
+**Success Criteria** (what must be TRUE):
+
+  1. Reasoning output contains grouped food records for distinct foods/components in a meal; each group includes stable `segment_ids`, a human label, action/state, evidence, missing evidence, and exactly three candidate identifications for that group.
+  2. Meal-level gating compares candidates within each food group, not unrelated foods across the whole meal; a clear chicken/pita group and an egg-curry group are not treated as competing alternatives.
+  3. Persisted reasoning keeps both meal-level summary state and group-level/per-segment auditability without copying the same whole-meal top-3 onto every segment.
+  4. Telegram interview session targets unresolved food groups, not raw detector segments; duplicate/overlapping segment labels are collapsed before any user-facing question.
+  5. User-facing interview copy is brief, human, and answerable without developer knowledge; it avoids internal phrases such as "nutrition-relevant detail" and asks the concrete missing thing, for example which vegetable is inside a curry.
+  6. Re-running the known UAT sample `sample_images/IMG_4646.HEIC` records Langfuse image traces and produces group-level reasoning where egg curry, chicken curry, and pita/flatbread are handled as separate food groups.
+
+**Plans**: 2 plans
+
+- [ ] `04.1-01-PLAN.md` — grouped reasoning contract, per-group gate and persistence, and grouped final-write adapter regression
+- [ ] `04.1-02-PLAN.md` — group-target interview prompts plus `IMG_4646.HEIC` UAT and Langfuse trace verification
+**Phase note**: This is a corrective polish phase created from Phase 4 UAT on 2026-05-29. It should remain isolated from Phase 5 grounding work: no SearXNG/Firecrawl tool loop, no nutrition derivation expansion, and no broader Telegram command work. The first executable plan should be small enough to run independently with `/gsd-execute-phase 4.1`.
+
+---
+
 ### Phase 5: Agentic Grounding
 
 **Goal**: The reasoning stage and post-interview re-grounding stage can invoke SearXNG and Firecrawl as tools when the LLM needs brand or restaurant nutrition data; every tool call is bounded, traced, and the loop cannot run away on cost.
@@ -160,5 +184,6 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 | 2. Vision Slice | 4/4 | In Progress|  |
 | 3. Embed & Match | 4/4 | In Progress|  |
 | 4. Reason, Interview & Learning Loop | 8/8 | Complete    | 2026-05-28 |
+| 4.1. Grouped Reasoning & Human Interview Correction | 0/2 | Not started | - |
 | 5. Agentic Grounding | 0/TBD | Not started | - |
 | 6. Bot Surface & Daily Summary | 0/TBD | Not started | - |

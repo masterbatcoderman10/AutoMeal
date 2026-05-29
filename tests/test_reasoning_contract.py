@@ -58,6 +58,31 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertNotIn("enum", action_schema)
         self.assertNotIn("const", action_schema)
 
+        meal_state_schema = schema["properties"]["meal_state"]
+        self.assertEqual(
+            set(meal_state_schema["enum"]),
+            {
+                "READY_TO_WRITE",
+                "PENDING_CHOICE",
+                "PENDING_INTERVIEW",
+                "PARTIAL_RESOLVED_WAITING",
+                "FAILED_UNCLEAR",
+                "NEEDS_SCHEMA_REVIEW",
+            },
+        )
+
+    def test_reasoning_response_format_requires_all_declared_fields_for_strict_mode(self) -> None:
+        from app.services.reasoning_schema import reasoning_response_format
+
+        response_format = reasoning_response_format()
+        schema = response_format["json_schema"]["schema"]
+
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+
+        candidate_schema = schema["properties"]["top_3"]["items"]
+        self.assertEqual(set(candidate_schema["required"]), set(candidate_schema["properties"]))
+        self.assertIn("nutrition_impact", candidate_schema["required"])
+
     def test_reasoning_contract_requires_evidence_and_rationale_fields(self) -> None:
         from app.services.reasoning_schema import reasoning_response_format
 

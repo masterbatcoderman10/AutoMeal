@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import inspect
+import tempfile
 import unittest
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -243,6 +245,78 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["meal_state"], "READY_TO_WRITE")
         self.assertIn(result["action"], {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE"})
 
+    async def test_reasoning_trace_captures_exact_model_input_and_output(self) -> None:
+        from app.services import reasoning_service
+
+        meal = type("Meal", (), {"id": "meal-trace", "image_url": None})()
+        segment = type("MealSegment", (), {"id": "segment-trace"})()
+        candidate = _candidate_payload()
+        response_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "top_3": [candidate],
+            "decision_rationale": "ready to auto-confirm",
+            "gate_reason": "",
+            "segment_count": 1,
+            "trace_id": "trace-from-model",
+        }
+        llm_client = type("LLM", (), {})()
+        raw_response = {"choices": [{"message": {"content": json.dumps(response_payload)}}]}
+        llm_client.chat_completion = AsyncMock(return_value=raw_response)
+        settings = type(
+            "Settings",
+            (),
+            {
+                "REASONING_MODEL": "reasoning-primary",
+                "REASONING_FALLBACK_MODEL": "reasoning-fallback",
+                "REASONING_PARSER_MODEL": "parser-model",
+                "REASONING_PARSER_FALLBACK_MODEL": "parser-fallback-model",
+                "REASONING_MATCH_THRESHOLD": 0.9,
+            },
+        )()
+
+        class FakeTrace:
+            def __init__(self) -> None:
+                self.ended: list[dict[str, Any]] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def end(self, output=None, error=None) -> None:
+                self.ended.append({"output": output, "error": error})
+
+        fake_trace = FakeTrace()
+        with patch.object(reasoning_service.tracing_service, "maybe_start_trace", return_value=fake_trace) as start_trace:
+            result, _trace = await reasoning_service.run_reasoning_request(
+                llm_client=llm_client,
+                meal_id=meal.id,
+                meal=meal,
+                match_results=[(segment, type("Result", (), {"top_candidates": [candidate]})())],
+                settings=settings,
+            )
+
+        trace_input = start_trace.call_args.kwargs["input"]
+        self.assertEqual(trace_input["meal_id"], "meal-trace")
+        self.assertEqual(trace_input["models"], ["reasoning-primary", "reasoning-fallback"])
+        self.assertEqual(
+            trace_input["extra_body"],
+            {
+                "parallel_tool_calls": False,
+                "reasoning": {
+                    "max_tokens": 512,
+                    "exclude": True,
+                },
+            },
+        )
+        self.assertEqual(trace_input["messages"], llm_client.chat_completion.await_args.kwargs["messages"])
+        self.assertEqual(trace_input["response_format"], llm_client.chat_completion.await_args.kwargs["response_format"])
+        self.assertEqual(fake_trace.ended[0]["output"]["raw_response"], raw_response)
+        self.assertEqual(fake_trace.ended[0]["output"]["parsed_response"]["meal_state"], "READY_TO_WRITE")
+        self.assertEqual(result["trace_id"], "trace-from-model")
+
     async def test_parser_retry_uses_fallback_model_when_primary_repair_is_unusable(self) -> None:
         from app.services import reasoning_service
 
@@ -288,6 +362,13 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(llm_client.chat_completion.await_args_list[0].kwargs["model"], "parser-primary")
         self.assertEqual(llm_client.chat_completion.await_args_list[1].kwargs["model"], "parser-fallback")
+        self.assertTrue(
+            llm_client.chat_completion.await_args_list[0].kwargs["response_format"]["json_schema"]["strict"]
+        )
+        self.assertEqual(
+            llm_client.chat_completion.await_args_list[0].kwargs["response_format"]["json_schema"]["name"],
+            "reasoning_contract_v1",
+        )
         self.assertEqual(repaired["trace_id"], "trace-parser-fallback")
 
     def test_parser_fallback_default_matches_phase_contract(self) -> None:
@@ -301,3 +382,66 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
             Settings.model_fields["REASONING_PARSER_FALLBACK_MODEL"].default,
             "google/gemini-3.5-flash",
         )
+
+    def test_reasoning_prompt_includes_meal_image_crops_and_phase_context(self) -> None:
+        from app.services import reasoning_service
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meal_image = Path(tmp_dir) / "meal.jpg"
+            crop_image = Path(tmp_dir) / "segment.jpg"
+            meal_image.write_bytes(b"meal image bytes")
+            crop_image.write_bytes(b"segment image bytes")
+
+            meal = type("Meal", (), {"id": "meal-images", "image_url": str(meal_image)})()
+            segment = type(
+                "MealSegment",
+                (),
+                {
+                    "id": "seg-egg-curry",
+                    "label": "egg curry",
+                    "bounding_box": [0.1, 0.2, 0.4, 0.5],
+                    "cropped_image_url": str(crop_image),
+                },
+            )()
+            candidate = {
+                **_candidate_payload(),
+                "label": "egg and bottle gourd curry",
+                "nutrition_impact": 0.45,
+            }
+
+            messages = reasoning_service._build_reasoning_prompt(
+                meal=meal,
+                match_results=[(segment, type("Result", (), {"top_candidates": [candidate]})())],
+            )
+
+        system_text = messages[0]["content"]
+        user_content = messages[1]["content"]
+        text_blocks = "\n".join(
+            block["text"]
+            for block in user_content
+            if block.get("type") == "text"
+        )
+        image_urls = [
+            block["image_url"]["url"]
+            for block in user_content
+            if block.get("type") == "image_url"
+        ]
+
+        self.assertIn("Asian-cuisine", system_text)
+        self.assertIn("AUTO_CONFIRM", system_text)
+        self.assertIn("ASK_CHOICE", system_text)
+        self.assertIn("INTERVIEW", system_text)
+        self.assertIn("Example 1", system_text)
+        self.assertIn("Example 2", system_text)
+        self.assertIn("strict JSON", system_text)
+        self.assertIn("whole_meal_image", text_blocks)
+        self.assertIn("segment_1", text_blocks)
+        self.assertIn("seg-egg-curry", text_blocks)
+        self.assertIn("egg curry", text_blocks)
+        self.assertIn("egg and bottle gourd curry", text_blocks)
+        self.assertIn("bounding_box", text_blocks)
+        self.assertIn("top_3_candidates", text_blocks)
+        self.assertEqual(len(image_urls), 2)
+        self.assertTrue(all(url.startswith("data:image/jpeg;base64,") for url in image_urls))
+        self.assertIn("bWVhbCBpbWFnZSBieXRlcw==", image_urls[0])
+        self.assertIn("c2VnbWVudCBpbWFnZSBieXRlcw==", image_urls[1])

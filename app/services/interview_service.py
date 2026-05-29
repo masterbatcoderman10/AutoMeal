@@ -74,7 +74,12 @@ def current_target_question(state: Mapping[str, Any]) -> dict[str, Any]:
     label = _optional_text(answer.get("name")) or _optional_text(target.get("label")) or "this item"
     mode = str(state.get("session_mode") or SESSION_MODE_MEAL)
 
-    prompt = f"What is {label}?"
+    prompt = (
+        f"I detected `{label}`. What exactly should I log for it? "
+        "Include the main food name and any key ingredient or preparation detail that changes nutrition. "
+        "For curries, say the main protein or vegetable inside, for example `egg curry with bottle gourd`, "
+        "`chicken leg curry`, or `dal with spinach`. If my label is wrong, reply with the corrected food name."
+    )
     invalid_prompt = prompt
 
     if step == "FOOD_NAME":
@@ -82,10 +87,15 @@ def current_target_question(state: Mapping[str, Any]) -> dict[str, Any]:
         if mode == SESSION_MODE_FIX and current_name:
             prompt = (
                 f"What exact name should I log for {label}? "
+                "Include nutrition-relevant detail such as filling, curry ingredient, meat cut, or bread type. "
                 f"Reply with the corrected name, or `same` to keep `{current_name}`."
             )
         else:
-            prompt = f"What exact name should I log for {label}?"
+            prompt = (
+                f"What exact name should I log for {label}? "
+                "Include nutrition-relevant detail such as filling, curry ingredient, meat cut, or bread type. "
+                "Examples: `egg curry with bottle gourd`, `pita bread`, `chicken leg curry`."
+            )
         invalid_prompt = prompt
     elif step == "SOURCE_TYPE":
         current_source = normalize_source_type(answer.get("source_type"))
@@ -114,7 +124,10 @@ def current_target_question(state: Mapping[str, Any]) -> dict[str, Any]:
     elif step == "PORTION_CONTEXT":
         current_bucket = _portion_bucket(answer.get("portion_bucket"))
         quantity_hint = _optional_text(answer.get("quantity_display"))
-        prompt = "Was it a small, standard, or large portion? Add a short note like `small bowl` if helpful."
+        prompt = (
+            "Was it a small, standard, or large portion? Add the most natural short unit if helpful, "
+            "for example `small bowl`, `2 pieces`, `half plate`, or `1 cup`."
+        )
         if mode == SESSION_MODE_FIX:
             kept = quantity_hint or current_bucket.lower()
             prompt = f"{prompt} Reply `same` to keep `{kept}`."
@@ -234,7 +247,7 @@ def should_send_single_reminder(
 ) -> bool:
     if interview_state.get("last_reminder_at") is not None:
         return False
-    prompted_at = interview_state.get("last_prompted_at")
+    prompted_at = _coerce_datetime(interview_state.get("last_prompted_at"))
     if not isinstance(prompted_at, datetime):
         return False
     return now - prompted_at >= timedelta(minutes=reminder_delay_minutes)
@@ -387,7 +400,7 @@ async def prepare_interview_session(
         }
         for segment in segments
     ]
-    prompt_payload = {
+    prompt_payload = _json_safe_payload({
         "meal_id": meal.id,
         "session_mode": SESSION_MODE_MEAL,
         "roadmap_step": "INITIAL_QUESTION",
@@ -396,7 +409,7 @@ async def prepare_interview_session(
         "answers_by_segment": [],
         "interview_messages": [],
         "last_prompted_at": datetime.now(UTC),
-    }
+    })
     interview = InterviewSession(
         id=str(uuid.uuid4()),
         meal_log_id=meal.id,
@@ -461,7 +474,7 @@ async def prepare_fix_interview_session(
         "portion_bucket": _portion_bucket(entry_context.get("portion_bucket")),
         "quantity_display": _optional_text(entry_context.get("quantity_display")),
     }
-    prompt_payload = {
+    prompt_payload = _json_safe_payload({
         "meal_id": entry.meal_log_id,
         "session_mode": SESSION_MODE_FIX,
         "fix_entry_id": entry.id,
@@ -471,7 +484,7 @@ async def prepare_fix_interview_session(
         "answers_by_segment": [dict(target)],
         "interview_messages": [],
         "last_prompted_at": datetime.now(UTC),
-    }
+    })
     interview = InterviewSession(
         id=str(uuid.uuid4()),
         meal_log_id=entry.meal_log_id,
@@ -504,7 +517,7 @@ async def persist_interview_step(
     user_payload: Mapping[str, Any],
     next_prompt: Mapping[str, Any] | None = None,
 ) -> InterviewSession:
-    persisted_state = dict(state)
+    persisted_state = _json_safe_payload(state)
     interview.current_prompt_payload = persisted_state
     interview.state_key = str(persisted_state.get("roadmap_step") or interview.state_key)
     session.add(interview)
@@ -685,6 +698,35 @@ def _safe_int(value: object, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        normalized = value
+        if normalized.endswith("Z"):
+            normalized = f"{normalized[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
+    return None
+
+
+def _json_safe_payload(value: object) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe_payload(item) for item in value]
+    return value
 
 
 def _current_target(state: Mapping[str, Any]) -> dict[str, Any]:

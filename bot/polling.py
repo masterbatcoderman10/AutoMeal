@@ -1106,7 +1106,7 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                             meal_resolution=finalization.get("meal_resolution"),
                         )
                     else:
-                        await interview_service.prepare_interview_session(
+                        interview = await interview_service.prepare_interview_session(
                             session=session,
                             meal=meal,
                             segments=segments,
@@ -1133,9 +1133,16 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                                 text=text,
                             )
                         else:
+                            question = interview_service.current_target_question(
+                                interview.current_prompt_payload or {}
+                            )
+                            prompt = str(question.get("prompt") or "").strip()
+                            text = format_unresolved_match_message(meal.id)
+                            if prompt:
+                                text = f"{text}\n\n{prompt}"
                             await bot.send_message(
                                 chat_id=settings.TELEGRAM_CHAT_ID,
-                                text=format_unresolved_match_message(meal.id),
+                                text=text,
                             )
                     except Exception:
                         logger.exception("Error sending completion match message")

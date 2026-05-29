@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -102,6 +103,28 @@ class InterviewProgressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["roadmap_step"], "CONFIRMATION")
         self.assertEqual(state["confirmation_items"][0]["source_type"], "HOME")
         self.assertEqual(state["confirmation_items"][0]["portion_bucket"], "SMALL")
+
+    def test_initial_question_is_targeted_and_not_placeholder_copy(self) -> None:
+        from bot import handlers
+
+        state = {
+            "meal_id": "meal-1",
+            "roadmap_step": "INITIAL_QUESTION",
+            "pending_targets": [{"segment_id": "seg-1", "label": "egg curry"}],
+            "current_target_index": 0,
+            "answers_by_segment": [],
+            "interview_messages": [],
+        }
+
+        question = handlers.current_target_question(state)
+
+        self.assertNotEqual(question["prompt"], "What is egg curry?")
+        self.assertIn("I detected", question["prompt"])
+        self.assertIn("egg curry", question["prompt"])
+        self.assertIn("main food name", question["prompt"])
+        self.assertIn("key ingredient", question["prompt"])
+        self.assertIn("egg curry with bottle gourd", question["prompt"])
+        self.assertIn("If my label is wrong", question["prompt"])
 
     def test_interview_moves_to_next_target_only_after_portion_context(self) -> None:
         from bot import handlers
@@ -235,6 +258,62 @@ class InterviewProgressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(added_messages[1].role, "bot")
         self.assertEqual(added_messages[1].payload["prompt"]["roadmap_step"], "FOOD_NAME")
         session.commit.assert_awaited_once()
+
+    async def test_prepare_interview_session_payload_is_json_serializable(self) -> None:
+        from app.models import InterviewSession
+        from app.services import interview_service
+
+        class EmptyResult:
+            def scalar_one_or_none(self):
+                return None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.added = []
+
+            async def execute(self, _statement):
+                return EmptyResult()
+
+            def add(self, item) -> None:
+                self.added.append(item)
+
+        session = FakeSession()
+
+        interview = await interview_service.prepare_interview_session(
+            session=session,
+            meal=SimpleNamespace(id="meal-json"),
+            segments=[SimpleNamespace(id="seg-json", label="mystery curry")],
+            chat_id="chat-json",
+        )
+
+        self.assertIsInstance(interview, InterviewSession)
+        json.dumps(interview.current_prompt_payload)
+        self.assertIsInstance(interview.current_prompt_payload["last_prompted_at"], str)
+
+    async def test_persist_interview_step_payload_is_json_serializable(self) -> None:
+        from app.services import interview_service
+
+        session = SimpleNamespace(add=Mock(), commit=AsyncMock())
+        interview = SimpleNamespace(
+            id="interview-json-step",
+            state_key="INITIAL_QUESTION",
+            current_prompt_payload={},
+        )
+        state = {
+            "roadmap_step": "FOOD_NAME",
+            "last_prompted_at": datetime.now(UTC),
+            "interview_messages": [],
+        }
+
+        await interview_service.persist_interview_step(
+            session=session,
+            interview=interview,
+            state=state,
+            user_payload={"name": "Dal"},
+        )
+
+        json.dumps(interview.current_prompt_payload)
+        self.assertIsInstance(interview.current_prompt_payload["last_prompted_at"], str)
 
     async def test_confirm_callback_requires_matching_persisted_interview_session(self) -> None:
         from bot.handlers import interview_callback

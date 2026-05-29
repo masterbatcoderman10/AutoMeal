@@ -457,7 +457,17 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 polling.interview_service,
                 "prepare_interview_session",
-                AsyncMock(),
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        current_prompt_payload={
+                            "roadmap_step": "INITIAL_QUESTION",
+                            "pending_targets": [{"segment_id": "segment-1", "label": "mystery curry"}],
+                            "current_target_index": 0,
+                            "answers_by_segment": [],
+                            "session_mode": "MEAL_INTERVIEW",
+                        },
+                    )
+                ),
             ) as prepare_interview_session,
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
@@ -468,7 +478,13 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         prepare_interview_session.assert_awaited_once()
         bot.send_message.assert_awaited_once_with(
             chat_id="999",
-            text="I can see your meal, but I do not know it yet.",
+            text=(
+                "I can see your meal, but I do not know it yet.\n\n"
+                "I detected `mystery curry`. What exactly should I log for it? "
+                "Include the main food name and any key ingredient or preparation detail that changes nutrition. "
+                "For curries, say the main protein or vegetable inside, for example `egg curry with bottle gourd`, "
+                "`chicken leg curry`, or `dal with spinach`. If my label is wrong, reply with the corrected food name."
+            ),
         )
         session.add.assert_not_called()
 

@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import json
+import base64
+import mimetypes
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Mapping
 from inspect import isawaitable
 
 from app.config import get_settings
 from app.models import MealLog, MealSegment, MealProcessingStatus
-from app.services import tracing_service
+from app.services import image_service, tracing_service
 from app.services.meal_resolution_service import (
     FinalSegmentResolution,
     ResolvedFoodInput,
     apply_final_meal_resolution,
 )
 from app.services.reasoning_schema import coerce_reasoning_response, reasoning_response_format
+from app.services.taxonomy_service import load_reasoning_taxonomy
 
 _REVIEW_STATE = "NEEDS_SCHEMA_REVIEW"
 _FAILED_UNCLEAR_STATE = "FAILED_UNCLEAR"
@@ -211,6 +215,12 @@ def _parse_reasoning_message(response: Any) -> dict[str, Any] | None:
     return _safe_parse_json(content)
 
 
+def _end_trace(trace: Any, *, output: Mapping[str, Any] | dict[str, Any]) -> None:
+    end = getattr(trace, "end", None)
+    if callable(end):
+        end(output=dict(output))
+
+
 def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, Any]) -> dict[str, Any]:
     normalized = coerce_reasoning_response(reasoning_payload)
     top_three = list(normalized.get("top_3", []))
@@ -305,60 +315,192 @@ def _normalize_top_three(result: object) -> list[dict[str, Any]]:
     return []
 
 
+def _resolve_image_reference(image_reference: object) -> str | None:
+    if not isinstance(image_reference, str):
+        return None
+    reference = image_reference.strip()
+    if not reference:
+        return None
+    if reference.startswith(("http://", "https://", "data:")):
+        return reference
+
+    image_path = Path(reference)
+    if not image_path.exists() or not image_path.is_file():
+        return None
+
+    mime_type, _ = mimetypes.guess_type(image_path.name)
+    raw_bytes = image_path.read_bytes()
+    if mime_type in image_service.HEIC_CONTENT_TYPES:
+        raw_bytes = image_service.transcode_to_jpeg(raw_bytes, mime_type or "image/heic")
+        mime_type = "image/jpeg"
+
+    encoded = base64.b64encode(raw_bytes).decode("ascii")
+    return f"data:{mime_type or 'image/jpeg'};base64,{encoded}"
+
+
+def _image_content_block(image_reference: object) -> dict[str, Any] | None:
+    resolved = _resolve_image_reference(image_reference)
+    if resolved is None:
+        return None
+    return {
+        "type": "image_url",
+        "image_url": {"url": resolved},
+    }
+
+
+def _stable_json(payload: object) -> str:
+    return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def _reasoning_system_prompt() -> str:
+    taxonomy = load_reasoning_taxonomy().raw
+    return (
+        "<CRITICAL_RULES>\n"
+        "You are MealTracker's meal-level visual reasoning model. You must inspect the "
+        "whole_meal_image and every indexed segment crop before trusting vector candidates. "
+        "Base decisions only on the provided images, detector labels, boxes, and top_3 "
+        "candidate context. Do not invent ingredients, brands, nutrition facts, or hidden "
+        "details. Output strict JSON only.\n"
+        "</CRITICAL_RULES>\n\n"
+        "<SPECIFICITY_POLICY>\n"
+        "Asian-cuisine specificity matters. For rice, noodles, breads, curries, wraps, "
+        "meat pieces, sauces, and mixed dishes, capture visible nutrition-relevant detail: "
+        "rice/prep type, noodle style, bread type, filling, protein or vegetable inside a "
+        "curry, meat cut, oiliness, sauce load, and whether visible components should stay "
+        "together or split. If a nutrition-relevant detail is not visible, mark it as "
+        "missing_evidence instead of guessing.\n"
+        "</SPECIFICITY_POLICY>\n\n"
+        "<TAXONOMY_POLICY>\n"
+        "Use this editable policy as guidance, not as a source of facts:\n"
+        f"{_stable_json(taxonomy)}\n\n"
+        "</TAXONOMY_POLICY>\n\n"
+        "<ACTION_POLICY>\n"
+        "- AUTO_CONFIRM only when every meaningful visible segment has image evidence "
+        "supporting the top candidate, the top candidate is clearly separated from "
+        "alternatives, and missing evidence would not materially change nutrition.\n"
+        "- ASK_CHOICE when there are plausible named alternatives and the user can pick "
+        "quickly from top candidates plus all-wrong.\n"
+        "- INTERVIEW when the missing identity/detail is open-ended, especially hidden "
+        "curry vegetables/proteins, sandwich or roll fillings, unclear meat cuts, or "
+        "mixed-dish components.\n"
+        "- ASK_QUANTITY only after identity/detail is good enough but visible portion "
+        "evidence is weak and likely nutrition impact is high.\n"
+        "- NEEDS_GROUNDING when packaged/restaurant nutrition data is needed; Phase 4 "
+        "does not use web tools.\n"
+        "- FAILED_UNCLEAR when the visual evidence is unusable even for a targeted "
+        "question. NEEDS_SCHEMA_REVIEW is only for schema/contract problems.\n\n"
+        "Ranking policy: return exactly three top_3 records ranked by visual specificity, "
+        "DB/vector match signal, whole-meal context, nutrition-impact clarity, and "
+        "uncertainty honesty. Generic fallback candidates are allowed only when labeled "
+        "as uncertainty candidates with low confidence and clear missing_evidence.\n\n"
+        "</ACTION_POLICY>\n\n"
+        "<EXAMPLES>\n"
+        "Example 1 - unclear curry detail: whole meal shows pita and a curry crop; "
+        "candidate labels include chicken curry and egg curry with vegetables. If the "
+        "crop visibly contains egg but the vegetable inside is unclear and changes "
+        "nutrition, set action=INTERVIEW or ASK_CHOICE, meal_state=PENDING_INTERVIEW, "
+        "top_3[0].missing_evidence includes `vegetable inside curry`, and do not "
+        "auto-confirm.\n"
+        "Example 2 - clear simple side: whole meal and crop clearly show pita bread; "
+        "top-1 is pita bread with a strong margin, no hidden filling, and no meaningful "
+        "missing detail. AUTO_CONFIRM is acceptable; visual_evidence should mention the "
+        "crop and whole-meal support.\n"
+        "Example 3 - portion only: identity is clear as rice, but depth/amount is unclear "
+        "and likely changes calories. Use ASK_QUANTITY only if identity detail is already "
+        "good enough; missing_evidence should name portion_unit or serving_size.\n"
+        "</EXAMPLES>\n\n"
+        "<OUTPUT_CONTRACT>\n"
+        "Return only strict JSON matching reasoning_contract_v1. All declared fields are "
+        "required, including trace_id, gate_reason, segment_count, exactly three top_3 "
+        "records, and nutrition_impact on every candidate. meal_state must be exactly one "
+        "of READY_TO_WRITE, PENDING_CHOICE, PENDING_INTERVIEW, PARTIAL_RESOLVED_WAITING, "
+        "FAILED_UNCLEAR, or NEEDS_SCHEMA_REVIEW. Use READY_TO_WRITE only with AUTO_CONFIRM; "
+        "use PENDING_INTERVIEW with INTERVIEW, ASK_CHOICE, or ASK_QUANTITY. Use trace_id=\"\" "
+        "if no provider trace is supplied. Include visible evidence, missing evidence, "
+        "decision rationale, gate reason, and confidence scores. Do not expose hidden "
+        "chain-of-thought.\n"
+        "</OUTPUT_CONTRACT>"
+    )
+
+
 def _build_reasoning_prompt(
     *,
     meal: MealLog,
     match_results: list[tuple[MealSegment, Any]],
 ) -> list[dict[str, Any]]:
-    segment_lines: list[str] = []
-    for segment, match_result in match_results:
-        segment_snapshot = _normalize_top_three(
-            coerce_reasoning_response(
-                {
-                    "action": "AUTO_CONFIRM",
-                    "meal_state": "READY_TO_WRITE",
-                    "top_3": [payload for payload in getattr(match_result, "top_candidates", [])],
-                    "decision_rationale": "",
-                    "gate_reason": "",
-                    "segment_count": 1,
-                    "trace_id": None,
-                }
-            ).get("top_3", [])
-        )
-        segment_lines.append(
-            f"segment_id={getattr(segment, 'id', 'unknown')}; candidates={json.dumps(segment_snapshot, sort_keys=True)}"
-        )
-
     system_prompt = {
         "role": "system",
-        "content": (
-            "You are a meal reasoning model for a personal meal tracker. "
-            "Return strict JSON with keys action, meal_state, top_3, decision_rationale, gate_reason, "
-            "segment_count and optional trace_id. Choose one meal-level action."
-        ),
+        "content": _reasoning_system_prompt(),
     }
 
     user_payload: list[dict[str, Any]] = [
         {
             "type": "text",
             "text": (
-                f"Meal {meal.id}: perform meal-level reasoning from segment snapshots. "
+                f"Meal {meal.id}: perform one meal-level reasoning pass. "
                 f"segment_count={len(match_results)}. "
-                "Return auto-confirm only when top candidates are confident and complete. "
-                "Ask follow-up when confidence or evidence is weak."
-                "\nSegments:\n" + "\n".join(segment_lines)
+                "The whole_meal_image follows first, then each indexed segment crop with "
+                "its detector label, bounding_box, and top_3_candidates. Return the "
+                "strict reasoning_contract_v1 JSON only."
             ),
         },
     ]
 
-    if getattr(meal, "image_url", None):
-        image_url = str(meal.image_url)
-        if image_url.startswith(("http://", "https://", "data:")):
+    meal_image_block = _image_content_block(getattr(meal, "image_url", None))
+    if meal_image_block is not None:
+        user_payload.append({"type": "text", "text": "whole_meal_image"})
+        user_payload.append(meal_image_block)
+    else:
+        user_payload.append(
+            {
+                "type": "text",
+                "text": f"whole_meal_image unavailable from image_url={getattr(meal, 'image_url', None)!r}",
+            }
+        )
+
+    for index, (segment, match_result) in enumerate(match_results, start=1):
+        coerced_snapshot = coerce_reasoning_response(
+            {
+                "action": "AUTO_CONFIRM",
+                "meal_state": "READY_TO_WRITE",
+                "top_3": [payload for payload in getattr(match_result, "top_candidates", [])],
+                "decision_rationale": "",
+                "gate_reason": "",
+                "segment_count": 1,
+                "trace_id": "",
+            }
+        ).get("top_3", [])
+        segment_snapshot = [
+            dict(candidate)
+            for candidate in coerced_snapshot
+            if isinstance(candidate, Mapping)
+        ][:3]
+        segment_payload = {
+            "segment_index": f"segment_{index}",
+            "segment_id": getattr(segment, "id", "unknown"),
+            "detector_label": getattr(segment, "label", None),
+            "bounding_box": getattr(segment, "bounding_box", None),
+            "top_3_candidates": segment_snapshot,
+        }
+        user_payload.append(
+            {
+                "type": "text",
+                "text": _stable_json(segment_payload),
+            }
+        )
+        crop_block = _image_content_block(getattr(segment, "cropped_image_url", None))
+        if crop_block is not None:
+            user_payload.append({"type": "text", "text": f"segment_{index}_crop_image"})
+            user_payload.append(crop_block)
+        else:
             user_payload.append(
                 {
-                    "type": "image_url",
-                    "image_url": {"url": image_url},
-                },
+                    "type": "text",
+                    "text": (
+                        f"segment_{index}_crop_image unavailable from "
+                        f"cropped_image_url={getattr(segment, 'cropped_image_url', None)!r}"
+                    ),
+                }
             )
 
     return [
@@ -409,7 +551,8 @@ async def _run_reasoning_parser_retry(
             repaired = await llm_client.chat_completion(
                 model=model,
                 messages=repair_messages,
-                response_format={"type": "json_object"},
+                response_format=reasoning_response_format(),
+                max_tokens=2200,
             )
         except Exception:
             if index == len(models_to_try) - 1:
@@ -436,11 +579,26 @@ async def _run_reasoning_model(
     models_to_try = [reasoning_model]
     if fallback_model and fallback_model != reasoning_model:
         models_to_try.append(fallback_model)
+    extra_body = {
+        "parallel_tool_calls": False,
+        "reasoning": {
+            "max_tokens": 512,
+            "exclude": True,
+        },
+    }
+    trace_input = {
+        "meal_id": meal.id,
+        "segment_count": len(match_results),
+        "models": models_to_try,
+        "messages": messages,
+        "response_format": response_format,
+        "extra_body": extra_body,
+    }
 
     with tracing_service.maybe_start_trace(
         name="meal_reasoning",
-        input={"meal_id": meal.id, "segment_count": len(match_results)},
-        metadata={"meal_id": meal.id},
+        input=trace_input,
+        metadata={"meal_id": meal.id, "models": models_to_try},
         span_name="meal_reasoning",
     ) as trace:
         last_error: Exception | None = None
@@ -451,7 +609,8 @@ async def _run_reasoning_model(
                     model=model,
                     messages=messages,
                     response_format=response_format,
-                    extra_body={"parallel_tool_calls": False},
+                    extra_body=extra_body,
+                    max_tokens=4096,
                 )
                 break
             except Exception as exc:
@@ -473,6 +632,13 @@ async def _run_reasoning_model(
                 normalized,
                 trace_metadata,
             )
+            _end_trace(
+                trace,
+                output={
+                    "raw_response": response,
+                    "parsed_response": normalized,
+                }
+            )
             return normalized, trace_metadata
 
         parsed_for_retry = _safe_parse_json(json.dumps(response, default=str))
@@ -493,9 +659,17 @@ async def _run_reasoning_model(
                     normalized,
                     trace_metadata,
                 )
+                _end_trace(
+                    trace,
+                    output={
+                        "raw_response": response,
+                        "repair_response": repaired_payload,
+                        "parsed_response": normalized,
+                    }
+                )
                 return normalized, trace_metadata
 
-    return {
+    failed_payload = {
         "action": _FAILED_UNCLEAR_STATE,
         "meal_state": _FAILED_UNCLEAR_STATE,
         "top_3": [],
@@ -503,7 +677,8 @@ async def _run_reasoning_model(
         "decision_rationale": "reasoning output unparseable",
         "gate_reason": "unparseable_reasoning_output",
         "segment_count": len(match_results),
-    }, trace_metadata
+    }
+    return failed_payload, trace_metadata
 
 
 async def run_reasoning_request(

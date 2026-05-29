@@ -27,7 +27,15 @@ def reasoning_response_format() -> dict[str, Any]:
             "schema": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["action", "meal_state", "top_3", "decision_rationale"],
+                "required": [
+                    "action",
+                    "meal_state",
+                    "trace_id",
+                    "decision_rationale",
+                    "gate_reason",
+                    "segment_count",
+                    "top_3",
+                ],
                 "properties": {
                     "action": {
                         "type": "string",
@@ -35,6 +43,14 @@ def reasoning_response_format() -> dict[str, Any]:
                     },
                     "meal_state": {
                         "type": "string",
+                        "enum": [
+                            "READY_TO_WRITE",
+                            "PENDING_CHOICE",
+                            "PENDING_INTERVIEW",
+                            "PARTIAL_RESOLVED_WAITING",
+                            "FAILED_UNCLEAR",
+                            "NEEDS_SCHEMA_REVIEW",
+                        ],
                         "description": "Next meal-level pipeline state",
                     },
                     "trace_id": {
@@ -56,7 +72,7 @@ def reasoning_response_format() -> dict[str, Any]:
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": list(_REASONING_TOP_FIELDS),
+                            "required": [*list(_REASONING_TOP_FIELDS), "nutrition_impact"],
                             "properties": {
                                 "candidate_id": {"type": "string"},
                                 "label": {"type": "string"},

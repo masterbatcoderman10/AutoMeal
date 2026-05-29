@@ -359,6 +359,106 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         session.commit.assert_awaited_once()
 
 
+class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_grouped_auto_confirm_collapses_to_one_final_write_item_per_food_group(self) -> None:
+        from app.services import reasoning_service
+
+        segment_one = SimpleNamespace(
+            id="segment-bread-1",
+            cropped_image_url="/data/uploads/crops/bread-1.jpg",
+            embedding=[0.11] * EMBEDDING_DIMENSION,
+        )
+        segment_two = SimpleNamespace(
+            id="segment-bread-2",
+            cropped_image_url="/data/uploads/crops/bread-2.jpg",
+            embedding=[0.22] * EMBEDDING_DIMENSION,
+        )
+        meal = SimpleNamespace(
+            id="meal-grouped-final-write",
+            processing_status=MealProcessingStatus.REASONING,
+            reasoning_state_json=None,
+            last_stage_started_at=None,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+
+        candidate = {
+            "candidate_id": "candidate-pita",
+            "food_item_id": "food-item-pita",
+            "label": "pita bread",
+            "identity_confidence": 0.99,
+            "quantity_confidence": 0.9,
+            "match_consistency_confidence": 0.98,
+            "missing_evidence": [],
+            "nutrition_impact": 0.02,
+            "portion_bucket": "STANDARD",
+        }
+        match_results = [
+            (
+                segment_one,
+                SimpleNamespace(
+                    food_item_id="food-item-pita",
+                    trace_id="trace-grouped-final-write",
+                    top_candidates=[candidate],
+                ),
+            ),
+            (
+                segment_two,
+                SimpleNamespace(
+                    food_item_id="food-item-pita",
+                    trace_id="trace-grouped-final-write",
+                    top_candidates=[candidate],
+                ),
+            ),
+        ]
+        reasoning_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-grouped-final-write",
+            "decision_rationale": "two detector segments belong to one bread item",
+            "gate_reason": "",
+            "segment_count": 2,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "pita bread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-bread-1",
+                    "segment_ids": ["segment-bread-1", "segment-bread-2"],
+                    "selected_candidate_id": "candidate-pita",
+                    "top_3": [candidate, candidate, candidate],
+                }
+            ],
+        }
+
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with patch.object(
+            reasoning_service,
+            "apply_final_meal_resolution",
+            new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ):
+            result = await reasoning_service.finalize_meal_from_reasoning(
+                session=session,
+                meal=meal,
+                segments=[segment_one, segment_two],
+                match_results=match_results,
+                reasoning_payload=reasoning_payload,
+            )
+
+        final_segments = captured["final_segments"]
+        self.assertEqual(len(final_segments), 1)
+        self.assertEqual(final_segments[0].segment_id, "segment-bread-1")
+        self.assertEqual(final_segments[0].food.canonical_name, "pita bread")
+        self.assertTrue(result["finalized"])
+
+
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:
         from bot import polling

@@ -159,3 +159,25 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertEqual(normalized["trace_id"], "trace-321")
         self.assertEqual(len(normalized["top_3"]), 3)
         self.assertIn("portion_unit", normalized["top_3"][1]["missing_evidence"])
+
+    def test_grouped_reasoning_contract_requires_food_groups(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response, reasoning_response_format
+
+        schema = reasoning_response_format()["json_schema"]["schema"]
+
+        self.assertIn("food_groups", schema["required"])
+        self.assertIn("food_group_count", schema["required"])
+        self.assertNotIn("top_3", schema["properties"])
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "AUTO_CONFIRM",
+                "meal_state": "READY_TO_WRITE",
+                "trace_id": "trace-grouped-contract",
+                "decision_rationale": "grouped contract should reject missing food_groups",
+                "gate_reason": "",
+                "segment_count": 2,
+            }
+        )
+
+        self.assertEqual(grouped["meal_state"], "NEEDS_SCHEMA_REVIEW")

@@ -26,6 +26,23 @@ def _candidate_payload() -> dict[str, Any]:
     }
 
 
+def _group_candidate(
+    *,
+    candidate_id: str,
+    label: str,
+    identity_confidence: float,
+    missing_evidence: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        **_candidate_payload(),
+        "candidate_id": candidate_id,
+        "label": label,
+        "identity_confidence": identity_confidence,
+        "match_consistency_confidence": identity_confidence,
+        "missing_evidence": list(missing_evidence or []),
+    }
+
+
 def _resolve_reasoning_entrypoint(module):
     for name in (
         "persist_reasoning_results",
@@ -187,6 +204,127 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segments[0].ai_reasoning["trace_id"], "trace-flow-2")
         self.assertEqual(meal.reasoning_state_json["meal_reasoning"]["meal_state"], "PENDING_INTERVIEW")
         self.assertFalse(meal.reasoning_state_json["ready_for_final_write"])
+
+    async def test_persists_compact_group_snapshots_without_copying_meal_candidates(self) -> None:
+        from app.services import reasoning_service
+
+        meal = type(
+            "Meal",
+            (),
+            {"id": "meal-grouped", "processing_status": "REASONING", "reasoning_state_json": None},
+        )()
+        segments = [
+            type(
+                "MealSegment",
+                (),
+                {"id": "segment-bread-1", "cropped_image_url": "/tmp/bread-1.jpg", "ai_reasoning": None},
+            )(),
+            type(
+                "MealSegment",
+                (),
+                {"id": "segment-bread-2", "cropped_image_url": "/tmp/bread-2.jpg", "ai_reasoning": None},
+            )(),
+            type(
+                "MealSegment",
+                (),
+                {"id": "segment-curry", "cropped_image_url": "/tmp/curry.jpg", "ai_reasoning": None},
+            )(),
+        ]
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-grouped-persist",
+            "decision_rationale": "bread and curry groups are resolved independently",
+            "gate_reason": "",
+            "segment_count": 3,
+            "food_group_count": 2,
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "pita bread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-bread-1",
+                    "segment_ids": ["segment-bread-1", "segment-bread-2"],
+                    "selected_candidate_id": "candidate-pita",
+                    "top_3": [
+                        _group_candidate(
+                            candidate_id="candidate-pita",
+                            label="pita bread",
+                            identity_confidence=0.99,
+                        ),
+                        _group_candidate(
+                            candidate_id="candidate-naan",
+                            label="naan bread",
+                            identity_confidence=0.75,
+                        ),
+                        _group_candidate(
+                            candidate_id="candidate-roti",
+                            label="roti bread",
+                            identity_confidence=0.72,
+                        ),
+                    ],
+                },
+                {
+                    "group_id": "group-curry",
+                    "group_label": "egg curry",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-curry",
+                    "segment_ids": ["segment-curry"],
+                    "selected_candidate_id": "candidate-egg-curry",
+                    "top_3": [
+                        _group_candidate(
+                            candidate_id="candidate-egg-curry",
+                            label="egg curry",
+                            identity_confidence=0.95,
+                        ),
+                        _group_candidate(
+                            candidate_id="candidate-chicken-curry",
+                            label="chicken curry",
+                            identity_confidence=0.77,
+                        ),
+                        _group_candidate(
+                            candidate_id="candidate-mixed-curry",
+                            label="mixed curry",
+                            identity_confidence=0.71,
+                        ),
+                    ],
+                },
+            ],
+        }
+        write_session = type("Session", (), {})()
+        write_session.add = lambda _obj: None  # type: ignore[method-assign]
+        write_session.flush = lambda: None  # type: ignore[method-assign]
+        write_session.commit = lambda: None  # type: ignore[method-assign]
+
+        _, writer = _resolve_reasoning_entrypoint(reasoning_service)
+        result = _invoke_reasoning_writer(
+            writer,
+            session=write_session,
+            meal=meal,
+            segments=segments,
+            reasoning_payload=payload,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+
+        meal_reasoning = meal.reasoning_state_json["meal_reasoning"]
+        self.assertIn("food_groups", meal_reasoning)
+        self.assertEqual(meal_reasoning["food_group_count"], 2)
+        self.assertEqual(segments[0].ai_reasoning["group_id"], "group-bread")
+        self.assertEqual(segments[0].ai_reasoning["primary_segment_id"], "segment-bread-1")
+        self.assertEqual(
+            segments[0].ai_reasoning["group_segment_ids"],
+            ["segment-bread-1", "segment-bread-2"],
+        )
+        self.assertEqual(
+            segments[0].ai_reasoning["candidate_ids"],
+            ["candidate-pita", "candidate-naan", "candidate-roti"],
+        )
+        self.assertNotIn("top_3", segments[0].ai_reasoning)
+        self.assertEqual(segments[2].ai_reasoning["group_id"], "group-curry")
+        self.assertEqual(result["meal_reasoning"]["food_group_count"], 2)
 
     async def test_run_reasoning_request_uses_fallback_model_after_primary_failure(self) -> None:
         from app.services import reasoning_service

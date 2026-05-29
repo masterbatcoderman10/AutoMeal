@@ -11,12 +11,13 @@ def _candidate_payload(
     *,
     candidate_id: str,
     similarity: float,
+    label: str = "plate of rice and curry",
     missing: list[str] | None = None,
     nutrition_impact: float = 0.1,
 ) -> dict[str, Any]:
     return {
         "candidate_id": candidate_id,
-        "label": "plate of rice and curry",
+        "label": label,
         "identity_confidence": similarity,
         "quantity_confidence": 0.78,
         "match_consistency_confidence": similarity,
@@ -192,3 +193,82 @@ class ReasoningGateTests(unittest.TestCase):
             {"AUTO_CONFIRM", "READY_TO_WRITE", "AUTO_CONFIRM_WITH_TRACE"},
         )
         self.assertIn("auto-confirm", (result.get("decision_rationale") or "").lower())
+
+    def test_group_gate_keeps_unrelated_foods_in_separate_races(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-grouped-gate",
+            "decision_rationale": "bread is obvious but curry details remain uncertain",
+            "gate_reason": "",
+            "segment_count": 3,
+            "food_group_count": 2,
+            "food_groups": [
+                {
+                    "group_id": "group-pita",
+                    "group_label": "pita bread",
+                    "primary_segment_id": "segment-bread-1",
+                    "segment_ids": ["segment-bread-1", "segment-bread-2"],
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="candidate-pita",
+                            label="pita bread",
+                            similarity=0.99,
+                            nutrition_impact=0.02,
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-naan",
+                            label="naan bread",
+                            similarity=0.73,
+                            nutrition_impact=0.04,
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-roti",
+                            label="roti bread",
+                            similarity=0.7,
+                            nutrition_impact=0.04,
+                        ),
+                    ],
+                },
+                {
+                    "group_id": "group-curry",
+                    "group_label": "egg curry",
+                    "primary_segment_id": "segment-curry",
+                    "segment_ids": ["segment-curry"],
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="candidate-egg-curry",
+                            label="egg curry",
+                            similarity=0.93,
+                            missing=["vegetable inside curry"],
+                            nutrition_impact=0.22,
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-chicken-curry",
+                            label="chicken curry",
+                            similarity=0.92,
+                            nutrition_impact=0.23,
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-mixed-curry",
+                            label="mixed curry",
+                            similarity=0.88,
+                            nutrition_impact=0.24,
+                        ),
+                    ],
+                },
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        self.assertEqual(result["meal_state"], "PARTIAL_RESOLVED_WAITING")
+        self.assertIn("food_groups", result)
+        groups = {group["group_id"]: group for group in result["food_groups"]}
+        self.assertEqual(groups["group-pita"]["group_action"], "AUTO_CONFIRM")
+        self.assertEqual(groups["group-pita"]["group_state"], "READY_TO_WRITE")
+        self.assertIn(
+            groups["group-curry"]["group_action"],
+            {"ASK_CHOICE", "ASK_QUANTITY", "INTERVIEW"},
+        )
+        self.assertEqual(groups["group-curry"]["group_state"], "PENDING_INTERVIEW")

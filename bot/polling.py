@@ -937,15 +937,18 @@ def _completion_items_from_meal_resolution(
     match_results: list[tuple[MealSegment, matching_service.SegmentMatchResult]],
     meal_resolution: object,
 ) -> list[CompletionItem]:
+    meal_entries = list(getattr(meal_resolution, "meal_entries", []))
     entries_by_segment = {
         getattr(entry, "segment_id", None): entry
-        for entry in getattr(meal_resolution, "meal_entries", [])
+        for entry in meal_entries
     }
 
     completion_items: list[CompletionItem] = []
     for segment, result in match_results:
         food_item = result.food_visual.food_item if getattr(result, "food_visual", None) is not None else None
         entry = entries_by_segment.get(getattr(segment, "id", None))
+        if meal_entries and entry is None:
+            continue
         portion_bucket = (
             getattr(entry, "portion_bucket", None)
             if entry is not None
@@ -994,13 +997,16 @@ def _recent_entries_from_meal_resolution(
     match_results: list[tuple[MealSegment, matching_service.SegmentMatchResult]],
     meal_resolution: object,
 ) -> list[dict]:
+    meal_entries = list(getattr(meal_resolution, "meal_entries", []))
     entries_by_segment = {
         getattr(entry, "segment_id", None): entry
-        for entry in getattr(meal_resolution, "meal_entries", [])
+        for entry in meal_entries
     }
     recent_entries: list[dict] = []
     for segment, result in match_results:
         entry = entries_by_segment.get(getattr(segment, "id", None))
+        if meal_entries and entry is None:
+            continue
         if entry is None or getattr(entry, "id", None) is None:
             continue
         food_item = result.food_visual.food_item if getattr(result, "food_visual", None) is not None else None

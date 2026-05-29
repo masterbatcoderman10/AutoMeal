@@ -15,6 +15,7 @@ from app.services.meal_resolution_service import (
     FinalSegmentResolution,
     ResolvedFoodInput,
     apply_final_meal_resolution,
+    build_grouped_final_segment_resolutions,
 )
 from app.services.reasoning_schema import coerce_reasoning_response, reasoning_response_format
 from app.services.taxonomy_service import load_reasoning_taxonomy
@@ -147,6 +148,17 @@ def _candidate_score(candidate: Mapping[str, Any] | dict[str, Any] | Any) -> flo
     return _coerce_float(candidate.get("identity_confidence"), default=0.0)
 
 
+def _candidate_ids(candidates: list[dict[str, Any]]) -> list[str]:
+    ids: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        candidate_id = _coerce_str(candidate.get("candidate_id"), "candidate_id")
+        if candidate_id:
+            ids.append(candidate_id)
+    return ids
+
+
 def _should_ask_quantity(missing_evidence: list[str]) -> bool:
     if not missing_evidence:
         return False
@@ -221,42 +233,81 @@ def _end_trace(trace: Any, *, output: Mapping[str, Any] | dict[str, Any]) -> Non
         end(output=dict(output))
 
 
-def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, Any]) -> dict[str, Any]:
-    normalized = coerce_reasoning_response(reasoning_payload)
-    top_three = list(normalized.get("top_3", []))
+def _normalized_group_result(
+    *,
+    group: Mapping[str, Any],
+    group_action: str,
+    group_state: str,
+    gate_reason: str,
+    decision_rationale: str,
+) -> dict[str, Any]:
+    top_three = [
+        dict(candidate)
+        for candidate in list(group.get("top_3", []))
+        if isinstance(candidate, Mapping)
+    ][:3]
+    selected_candidate_id = _coerce_str(group.get("selected_candidate_id"), "selected_candidate_id")
+    if not selected_candidate_id and top_three:
+        selected_candidate_id = str(top_three[0].get("candidate_id") or "")
+    return {
+        "group_id": _coerce_str(group.get("group_id"), "group_id") or "group-unknown",
+        "group_label": _coerce_str(group.get("group_label"), "group_label")
+        or _coerce_str(group.get("label"), "label")
+        or "unlabeled food group",
+        "group_action": group_action,
+        "group_state": group_state,
+        "primary_segment_id": _coerce_str(group.get("primary_segment_id"), "primary_segment_id")
+        or _coerce_str(group.get("segment_id"), "segment_id")
+        or "segment-unknown",
+        "segment_ids": _coerce_string_list(group.get("segment_ids")) or [
+            _coerce_str(group.get("primary_segment_id"), "primary_segment_id")
+            or "segment-unknown"
+        ],
+        "selected_candidate_id": selected_candidate_id,
+        "visual_evidence": _coerce_string_list(group.get("visual_evidence"))
+        or _coerce_string_list(top_three[0].get("visual_evidence") if top_three else None),
+        "missing_evidence": _coerce_string_list(group.get("missing_evidence"))
+        or _coerce_string_list(top_three[0].get("missing_evidence") if top_three else None),
+        "decision_rationale": decision_rationale,
+        "gate_reason": gate_reason,
+        "top_3": top_three,
+    }
+
+
+def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
+    top_three = [
+        dict(candidate)
+        for candidate in list(group.get("top_3", []))
+        if isinstance(candidate, Mapping)
+    ][:3]
     top_one = top_three[0] if top_three else {}
     top_two = top_three[1] if len(top_three) > 1 else {}
-    action = str(normalized.get("action") or "")
-    meal_state = str(normalized.get("meal_state") or "")
-    decision_rationale = str(normalized.get("decision_rationale") or "")
-    gate_reason = str(normalized.get("gate_reason") or "")
-    segment_count = int(normalized.get("segment_count", 0))
+    group_action = _coerce_str(group.get("group_action"), "group_action") or "NEEDS_SCHEMA_REVIEW"
+    group_state = _coerce_str(group.get("group_state"), "group_state") or "NEEDS_SCHEMA_REVIEW"
+    decision_rationale = _coerce_str(group.get("decision_rationale"), "decision_rationale") or "No group rationale provided"
+    gate_reason = _coerce_str(group.get("gate_reason"), "gate_reason") or ""
 
-    if action in {_REVIEW_STATE, _FAILED_UNCLEAR_STATE}:
-        return {
-            "action": action,
-            "meal_state": action,
-            "top_3": top_three,
-            "trace_id": normalized.get("trace_id"),
-            "decision_rationale": decision_rationale or "Schema review required",
-            "gate_reason": gate_reason or "Schema review required",
-            "segment_count": segment_count,
-        }
+    if group_action in {_REVIEW_STATE, _FAILED_UNCLEAR_STATE}:
+        review_reason = gate_reason or "Schema review required"
+        return _normalized_group_result(
+            group=group,
+            group_action=group_action,
+            group_state=group_action,
+            gate_reason=review_reason,
+            decision_rationale=decision_rationale,
+        )
 
-    if action in {"ASK_QUANTITY", "ASK_CHOICE", "INTERVIEW"}:
-        normalized_state = meal_state if meal_state in _INTERVIEW_STATES else _INTERVIEW_STATE_FROM_OUTPUT
-        return {
-            "action": action,
-            "meal_state": normalized_state,
-            "top_3": top_three,
-            "trace_id": normalized.get("trace_id"),
-            "decision_rationale": decision_rationale or "User follow-up requested",
-            "gate_reason": gate_reason or "Interview required",
-            "segment_count": segment_count,
-        }
+    if group_action in {"ASK_QUANTITY", "ASK_CHOICE", "INTERVIEW"}:
+        return _normalized_group_result(
+            group=group,
+            group_action=group_action,
+            group_state=group_state if group_state in _INTERVIEW_STATES else _INTERVIEW_STATE_FROM_OUTPUT,
+            gate_reason=gate_reason or "Interview required",
+            decision_rationale=decision_rationale,
+        )
 
-    if action == _READY_TO_WRITE_STATE:
-        action = "AUTO_CONFIRM"
+    if group_action == _READY_TO_WRITE_STATE:
+        group_action = "AUTO_CONFIRM"
 
     reasons: list[str] = []
     threshold = _reasoning_match_threshold()
@@ -277,30 +328,92 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
 
     if reasons:
         followup_action = "ASK_QUANTITY" if _should_ask_quantity(missing_evidence) else "ASK_CHOICE"
+        return _normalized_group_result(
+            group=group,
+            group_action=followup_action,
+            group_state=_INTERVIEW_STATE_FROM_OUTPUT,
+            gate_reason="; ".join(reasons),
+            decision_rationale=decision_rationale or "Needs user confirmation",
+        )
+
+    resolved_action = group_action if group_action in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE"} else "AUTO_CONFIRM"
+    resolved_rationale = (
+        decision_rationale
+        if "auto-confirm" in decision_rationale.lower()
+        else f"Auto-confirm pass: {decision_rationale}"
+    )
+    return _normalized_group_result(
+        group=group,
+        group_action=resolved_action,
+        group_state=_READY_TO_WRITE_STATE,
+        gate_reason=gate_reason,
+        decision_rationale=resolved_rationale,
+    )
+
+
+def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, Any]) -> dict[str, Any]:
+    normalized = coerce_reasoning_response(reasoning_payload)
+    food_groups = [
+        _evaluate_group_gate(group)
+        for group in list(normalized.get("food_groups", []))
+        if isinstance(group, Mapping)
+    ]
+    segment_count = int(normalized.get("segment_count", 0))
+    trace_id = normalized.get("trace_id")
+
+    if not food_groups:
         return {
-            "action": followup_action,
-            "meal_state": meal_state if meal_state in _INTERVIEW_STATES else _INTERVIEW_STATE_FROM_OUTPUT,
-            "top_3": top_three,
-            "trace_id": normalized.get("trace_id"),
-            "decision_rationale": decision_rationale or "Needs user confirmation",
-            "gate_reason": "; ".join(reasons),
+            "action": _REVIEW_STATE,
+            "meal_state": _REVIEW_STATE,
+            "trace_id": trace_id,
+            "decision_rationale": str(normalized.get("decision_rationale") or "Missing food groups"),
+            "gate_reason": str(normalized.get("gate_reason") or "Missing food groups"),
             "segment_count": segment_count,
+            "food_group_count": 0,
+            "food_groups": [],
+            "top_3": [],
         }
 
-    return {
-        "action": action if action in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE"} else "AUTO_CONFIRM",
-        "meal_state": _READY_TO_WRITE_STATE,
-        "top_3": top_three,
-        "trace_id": normalized.get("trace_id"),
-        "decision_rationale": (
-            decision_rationale
-            if "auto-confirm" in decision_rationale.lower()
-            else f"Auto-confirm pass: {decision_rationale}"
+    if any(group["group_state"] == _REVIEW_STATE for group in food_groups):
+        meal_action = _REVIEW_STATE
+        meal_state = _REVIEW_STATE
+    else:
+        unresolved_groups = [group for group in food_groups if group["group_state"] != _READY_TO_WRITE_STATE]
+        if not unresolved_groups:
+            meal_action = "AUTO_CONFIRM"
+            meal_state = _READY_TO_WRITE_STATE
+        elif len(unresolved_groups) == len(food_groups):
+            meal_action = unresolved_groups[0]["group_action"]
+            meal_state = _INTERVIEW_STATE_FROM_OUTPUT
+        else:
+            meal_action = unresolved_groups[0]["group_action"]
+            meal_state = "PARTIAL_RESOLVED_WAITING"
+
+    meal_reasons = [
+        f"{group['group_id']}: {group['gate_reason']}"
+        for group in food_groups
+        if group.get("gate_reason")
+    ]
+    meal_rationale = str(normalized.get("decision_rationale") or "")
+    if not meal_rationale:
+        meal_rationale = "; ".join(
+            f"{group['group_id']}: {group['decision_rationale']}"
+            for group in food_groups
+            if group.get("decision_rationale")
         )
-        if decision_rationale
-        else "Auto-confirm pass",
-        "gate_reason": gate_reason,
+    if meal_action in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE"} and "auto-confirm" not in meal_rationale.lower():
+        meal_rationale = f"Auto-confirm pass: {meal_rationale}" if meal_rationale else "Auto-confirm pass"
+
+    return {
+        "action": meal_action,
+        "meal_state": meal_state,
+        "trace_id": trace_id,
+        "decision_rationale": meal_rationale or "Grouped reasoning completed",
+        "gate_reason": "; ".join(meal_reasons),
         "segment_count": segment_count,
+        "food_group_count": len(food_groups),
+        "food_groups": food_groups,
+        "top_3": list(food_groups[0].get("top_3", [])),
     }
 
 
@@ -313,6 +426,83 @@ def _normalize_top_three(result: object) -> list[dict[str, Any]]:
                 if isinstance(candidate, Mapping)
             ][:3]
     return []
+
+
+def _fallback_food_groups_from_match_results(
+    match_results: list[tuple[MealSegment, Any]],
+) -> list[dict[str, Any]]:
+    fallback_groups: list[dict[str, Any]] = []
+    for index, (segment, result) in enumerate(match_results, start=1):
+        top_three = _normalize_top_three(result)
+        label = _coerce_str(getattr(segment, "label", None), "label")
+        if not label and top_three:
+            label = _coerce_str(top_three[0].get("label"), "label")
+        segment_id = str(getattr(segment, "id", f"segment-{index}"))
+        selected_candidate_id = _candidate_ids(top_three)[0] if _candidate_ids(top_three) else ""
+        fallback_groups.append(
+            {
+                "group_id": f"group-{index}",
+                "group_label": label or f"food group {index}",
+                "group_action": "AUTO_CONFIRM",
+                "group_state": "READY_TO_WRITE",
+                "primary_segment_id": segment_id,
+                "segment_ids": [segment_id],
+                "selected_candidate_id": selected_candidate_id,
+                "visual_evidence": [],
+                "missing_evidence": [],
+                "decision_rationale": "Synthesized from segment match candidates",
+                "gate_reason": "",
+                "top_3": top_three,
+            }
+        )
+    return fallback_groups
+
+
+def _segment_group_snapshot(
+    *,
+    segment_id: str,
+    food_groups: list[dict[str, Any]],
+    trace_id: str | None,
+) -> dict[str, Any]:
+    owning_group = next(
+        (
+            group
+            for group in food_groups
+            if segment_id in group.get("segment_ids", [])
+            or group.get("primary_segment_id") == segment_id
+        ),
+        None,
+    )
+    if owning_group is None:
+        return {
+            "segment_id": segment_id,
+            "group_id": None,
+            "group_label": None,
+            "group_action": _REVIEW_STATE,
+            "group_state": _REVIEW_STATE,
+            "primary_segment_id": None,
+            "group_segment_ids": [],
+            "selected_candidate_id": None,
+            "candidate_ids": [],
+            "trace_id": trace_id,
+        }
+    top_three = [
+        dict(candidate)
+        for candidate in list(owning_group.get("top_3", []))
+        if isinstance(candidate, Mapping)
+    ][:3]
+    return {
+        "segment_id": segment_id,
+        "group_id": owning_group.get("group_id"),
+        "group_label": owning_group.get("group_label"),
+        "group_action": owning_group.get("group_action"),
+        "group_state": owning_group.get("group_state"),
+        "primary_segment_id": owning_group.get("primary_segment_id"),
+        "group_segment_ids": list(owning_group.get("segment_ids", [])),
+        "selected_candidate_id": owning_group.get("selected_candidate_id"),
+        "candidate_ids": _candidate_ids(top_three),
+        "trace_id": trace_id,
+    }
 
 
 def _resolve_image_reference(image_reference: object) -> str | None:
@@ -358,9 +548,11 @@ def _reasoning_system_prompt() -> str:
         "<CRITICAL_RULES>\n"
         "You are MealTracker's meal-level visual reasoning model. You must inspect the "
         "whole_meal_image and every indexed segment crop before trusting vector candidates. "
-        "Base decisions only on the provided images, detector labels, boxes, and top_3 "
-        "candidate context. Do not invent ingredients, brands, nutrition facts, or hidden "
-        "details. Output strict JSON only.\n"
+        "Base decisions only on the provided images, detector labels, boxes, and per-segment "
+        "top_3 candidate context. First group distinct foods/components, then rank candidates "
+        "inside each group only. Do not compare unrelated foods as if they are alternatives. "
+        "Do not invent ingredients, brands, nutrition facts, or hidden details. Output strict "
+        "JSON only.\n"
         "</CRITICAL_RULES>\n\n"
         "<SPECIFICITY_POLICY>\n"
         "Asian-cuisine specificity matters. For rice, noodles, breads, curries, wraps, "
@@ -389,36 +581,38 @@ def _reasoning_system_prompt() -> str:
         "does not use web tools.\n"
         "- FAILED_UNCLEAR when the visual evidence is unusable even for a targeted "
         "question. NEEDS_SCHEMA_REVIEW is only for schema/contract problems.\n\n"
-        "Ranking policy: return exactly three top_3 records ranked by visual specificity, "
-        "DB/vector match signal, whole-meal context, nutrition-impact clarity, and "
-        "uncertainty honesty. Generic fallback candidates are allowed only when labeled "
-        "as uncertainty candidates with low confidence and clear missing_evidence.\n\n"
+        "Ranking policy: return exactly three top_3 records inside every food group, ranked "
+        "by visual specificity, DB/vector match signal, whole-meal context, nutrition-impact "
+        "clarity, and uncertainty honesty. Generic fallback candidates are allowed only when "
+        "labeled as uncertainty candidates with low confidence and clear missing_evidence.\n\n"
         "</ACTION_POLICY>\n\n"
         "<EXAMPLES>\n"
         "Example 1 - unclear curry detail: whole meal shows pita and a curry crop; "
-        "candidate labels include chicken curry and egg curry with vegetables. If the "
-        "crop visibly contains egg but the vegetable inside is unclear and changes "
-        "nutrition, set action=INTERVIEW or ASK_CHOICE, meal_state=PENDING_INTERVIEW, "
+        "candidate labels include chicken curry and egg curry with vegetables. Create a "
+        "food_group for the curry and another for the bread. If the curry visibly contains "
+        "egg but the vegetable inside is unclear and changes nutrition, set that group's "
+        "group_action=INTERVIEW or ASK_CHOICE, group_state=PENDING_INTERVIEW, "
         "top_3[0].missing_evidence includes `vegetable inside curry`, and do not "
-        "auto-confirm.\n"
+        "auto-confirm the curry group.\n"
         "Example 2 - clear simple side: whole meal and crop clearly show pita bread; "
-        "top-1 is pita bread with a strong margin, no hidden filling, and no meaningful "
-        "missing detail. AUTO_CONFIRM is acceptable; visual_evidence should mention the "
-        "crop and whole-meal support.\n"
+        "the bread group's top-1 is pita bread with a strong margin, no hidden filling, "
+        "and no meaningful missing detail. group_action=AUTO_CONFIRM is acceptable; "
+        "visual_evidence should mention the crop and whole-meal support.\n"
         "Example 3 - portion only: identity is clear as rice, but depth/amount is unclear "
         "and likely changes calories. Use ASK_QUANTITY only if identity detail is already "
         "good enough; missing_evidence should name portion_unit or serving_size.\n"
         "</EXAMPLES>\n\n"
         "<OUTPUT_CONTRACT>\n"
         "Return only strict JSON matching reasoning_contract_v1. All declared fields are "
-        "required, including trace_id, gate_reason, segment_count, exactly three top_3 "
-        "records, and nutrition_impact on every candidate. meal_state must be exactly one "
-        "of READY_TO_WRITE, PENDING_CHOICE, PENDING_INTERVIEW, PARTIAL_RESOLVED_WAITING, "
-        "FAILED_UNCLEAR, or NEEDS_SCHEMA_REVIEW. Use READY_TO_WRITE only with AUTO_CONFIRM; "
-        "use PENDING_INTERVIEW with INTERVIEW, ASK_CHOICE, or ASK_QUANTITY. Use trace_id=\"\" "
-        "if no provider trace is supplied. Include visible evidence, missing evidence, "
-        "decision rationale, gate reason, and confidence scores. Do not expose hidden "
-        "chain-of-thought.\n"
+        "required, including trace_id, gate_reason, segment_count, food_group_count, and "
+        "food_groups. Every food_group must include group_id, group_label, group_action, "
+        "group_state, primary_segment_id, segment_ids, selected_candidate_id, visible "
+        "evidence, missing evidence, gate reason, decision rationale, and exactly three "
+        "top_3 records with nutrition_impact on every candidate. meal_state must be exactly "
+        "one of READY_TO_WRITE, PENDING_CHOICE, PENDING_INTERVIEW, PARTIAL_RESOLVED_WAITING, "
+        "FAILED_UNCLEAR, or NEEDS_SCHEMA_REVIEW. Use READY_TO_WRITE only when every group is "
+        "AUTO_CONFIRM. Use trace_id=\"\" if no provider trace is supplied. Do not expose "
+        "hidden chain-of-thought.\n"
         "</OUTPUT_CONTRACT>"
     )
 
@@ -532,8 +726,9 @@ async def _run_reasoning_parser_retry(
             "role": "system",
             "content": (
                 "Repair this model output into strict JSON matching the reasoning contract. "
-                "The contract requires fields: action, meal_state, top_3, decision_rationale, gate_reason, segment_count, "
-                "and optional trace_id. Return only JSON."
+                "The contract requires fields: action, meal_state, trace_id, decision_rationale, "
+                "gate_reason, segment_count, food_group_count, and food_groups with exactly "
+                "three top_3 candidates per group. Return only JSON."
             ),
         },
         {
@@ -672,11 +867,12 @@ async def _run_reasoning_model(
     failed_payload = {
         "action": _FAILED_UNCLEAR_STATE,
         "meal_state": _FAILED_UNCLEAR_STATE,
-        "top_3": [],
         "trace_id": trace_metadata.get("trace_id"),
         "decision_rationale": "reasoning output unparseable",
         "gate_reason": "unparseable_reasoning_output",
         "segment_count": len(match_results),
+        "food_group_count": 0,
+        "food_groups": [],
     }
     return failed_payload, trace_metadata
 
@@ -701,18 +897,18 @@ async def run_reasoning_request(
         parsed = {
             "action": _FAILED_UNCLEAR_STATE,
             "meal_state": _FAILED_UNCLEAR_STATE,
-            "top_3": [],
             "trace_id": None,
             "decision_rationale": "reasoning request failed",
             "gate_reason": "llm invocation error",
             "segment_count": len(match_results),
+            "food_group_count": 0,
+            "food_groups": [],
         }
         trace_metadata = {"trace_id": None, "cached_tokens": None}
 
-    if not parsed.get("top_3") and match_results:
-        first_result = match_results[0][1]
-        parsed_top_three = _normalize_top_three(first_result)
-        parsed["top_3"] = parsed_top_three[:3]
+    if not parsed.get("food_groups") and match_results:
+        parsed["food_groups"] = _fallback_food_groups_from_match_results(match_results)
+        parsed["food_group_count"] = len(parsed["food_groups"])
 
     parsed = coerce_reasoning_response(parsed)
     parsed["trace_id"] = _normalize_trace_id_from_payload(
@@ -733,6 +929,11 @@ async def persist_reasoning_results(
     persist_candidates: bool = True,
 ) -> dict[str, Any]:
     normalized = coerce_reasoning_response(reasoning_payload)
+    food_groups = [
+        dict(group)
+        for group in list(normalized.get("food_groups", []))
+        if isinstance(group, Mapping)
+    ]
     top_three = normalized.get("top_3", [])
 
     meal_state = str(normalized.get("meal_state") or "")
@@ -748,16 +949,12 @@ async def persist_reasoning_results(
 
     segment_reasoning: list[dict[str, Any]] = []
     for segment in segments:
-        segment_payload = {
-            "segment_id": getattr(segment, "id", None),
-            "action": normalized.get("action"),
-            "meal_state": reason_state,
-            "trace_id": normalized.get("trace_id"),
-            "top_3": top_three,
-            "decision_rationale": normalized.get("decision_rationale"),
-            "gate_reason": normalized.get("gate_reason"),
-            "segment_count": normalized.get("segment_count", 0),
-        }
+        segment_id = str(getattr(segment, "id", ""))
+        segment_payload = _segment_group_snapshot(
+            segment_id=segment_id,
+            food_groups=food_groups,
+            trace_id=_coerce_str(normalized.get("trace_id"), "trace_id"),
+        )
         segment_reasoning.append(segment_payload)
 
         if hasattr(segment, "ai_reasoning"):
@@ -769,14 +966,22 @@ async def persist_reasoning_results(
             and hasattr(segment, "match_candidates_json")
             and getattr(segment, "match_candidates_json", None) is None
         ):
-                segment.match_candidates_json = {
-                    "top_3": top_three,
-                    "match_threshold": float(
-                    getattr(segment, "match_threshold", _reasoning_match_threshold())
+            owning_group = next(
+                (
+                    group
+                    for group in food_groups
+                    if segment_id in group.get("segment_ids", [])
+                    or group.get("primary_segment_id") == segment_id
                 ),
-                    "candidate_count": len(top_three),
-                    "snapshot_version": 1,
-                }
+                None,
+            )
+            candidate_snapshot = list(owning_group.get("top_3", [])) if isinstance(owning_group, Mapping) else top_three
+            segment.match_candidates_json = {
+                "top_3": candidate_snapshot,
+                "match_threshold": float(getattr(segment, "match_threshold", _reasoning_match_threshold())),
+                "candidate_count": len(candidate_snapshot),
+                "snapshot_version": 1,
+            }
 
         if hasattr(session, "add"):
             session.add(segment)
@@ -786,6 +991,7 @@ async def persist_reasoning_results(
     ready_for_final_write = (
         reason_state == _READY_TO_WRITE_STATE
         and normalized.get("action") in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE"}
+        and all(group.get("group_state") == _READY_TO_WRITE_STATE for group in food_groups)
     )
     if hasattr(meal, "reasoning_state_json"):
         meal.reasoning_state_json = {
@@ -809,6 +1015,7 @@ async def persist_reasoning_results(
         "meal_reasoning": meal_reasoning,
         "segment_reasoning": segment_reasoning,
         "ready_for_final_write": ready_for_final_write,
+        "food_groups": food_groups,
         "top_3": top_three,
     }
 
@@ -924,12 +1131,23 @@ async def finalize_meal_from_reasoning(
             "completed_by": "reasoning_service",
         }
 
-    final_segments: list[FinalSegmentResolution] = []
-    for segment in segments:
-        result_match = next((match for seg, match in match_results if seg.id == segment.id), None)
-        if result_match is None:
-            result_match = result
-        final_segments.append(_build_resolution_from_result(segment=segment, result=result_match))
+    final_segments = build_grouped_final_segment_resolutions(
+        food_groups=[
+            dict(group)
+            for group in list(result.get("food_groups", []))
+            if isinstance(group, Mapping)
+        ],
+        segments=segments,
+        match_results=match_results,
+        trace_id=_coerce_str(result.get("trace_id"), "trace_id"),
+    )
+    if not final_segments:
+        final_segments = []
+        for segment in segments:
+            result_match = next((match for seg, match in match_results if seg.id == segment.id), None)
+            if result_match is None:
+                result_match = result
+            final_segments.append(_build_resolution_from_result(segment=segment, result=result_match))
 
     resolved = await apply_final_meal_resolution(
         session=session,

@@ -655,7 +655,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(interview.is_active)
         reply_text.assert_awaited_once_with("Meal confirmation saved.")
-        session.commit.assert_awaited_once()
+        session.commit.assert_awaited()
         engine.dispose.assert_awaited_once()
 
     async def test_meal_interview_text_fails_closed_after_turn_validation_error(self) -> None:

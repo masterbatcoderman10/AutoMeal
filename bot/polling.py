@@ -10,9 +10,9 @@ from typing import Any, Mapping
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.models import InterviewSession, MealSegment, MealLog, MealProcessingStatus
+from app.models import InterviewMessage, InterviewSession, MealSegment, MealLog, MealProcessingStatus
 from app.services.llm_client import get_llm_client
-from app.services import correction_service, interview_service, matching_service
+from app.services import correction_service, interview_service, interview_turn_manager, matching_service
 from app.services.image_service import save_segment_crop
 from app.services.vision_service import (
     dedupe_overlapping_segments,
@@ -33,6 +33,10 @@ from bot.messages import (
 )
 
 logger = logging.getLogger(__name__)
+MEAL_INTERVIEW_KICKOFF_TEXT = (
+    "Start the meal interview for this meal. Ask the most useful first question and mention any clear approval candidates "
+    "the user can confirm or correct in the same reply."
+)
 _MACHINE_STAGE_STATUSES = {
     MealProcessingStatus.DETECTING,
     MealProcessingStatus.SEGMENTING,
@@ -344,6 +348,61 @@ async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None
             await _poll_sleep(interval)
     finally:
         await engine.dispose()
+
+
+async def _start_meal_interview_turn(*, bot, session, interview: InterviewSession, settings) -> interview_turn_manager.InterviewTurnResult:
+    state = dict(interview.current_prompt_payload or {})
+    turn = await interview_turn_manager.run_interview_turn(
+        authoritative_state=state,
+        transcript=interview_service.interview_transcript_from_state(state),
+        latest_user_text=MEAL_INTERVIEW_KICKOFF_TEXT,
+        settings=settings,
+    )
+    sent = await bot.send_message(
+        chat_id=interview.chat_id,
+        text=turn.assistant_prompt,
+    )
+    updated_state = interview_service.apply_interview_turn_result(
+        state,
+        turn_action=turn.turn_action,
+        assistant_prompt=turn.assistant_prompt,
+        clarification_reason=turn.clarification_reason,
+        conversation_summary=turn.conversation_summary,
+        confirmation_items=[item.model_dump(mode="json") for item in turn.confirmation_items],
+    )
+    updated_state = interview_service.append_interview_transcript_entry(
+        updated_state,
+        role="bot",
+        content=turn.assistant_prompt,
+        payload={
+            "type": "meal_turn",
+            "prompt": turn.assistant_prompt,
+            "turn_action": turn.turn_action,
+            "clarification_reason": turn.clarification_reason,
+        },
+        message_id=getattr(sent, "message_id", None),
+    )
+    updated_state["last_prompted_at"] = datetime.now(UTC)
+    interview.current_prompt_payload = interview_service.json_safe_payload(updated_state)
+    if isinstance(getattr(sent, "message_id", None), int):
+        interview.last_bot_message_id = sent.message_id
+    session.add(interview)
+    session.add(
+        InterviewMessage(
+            id=str(uuid.uuid4()),
+            session_id=interview.id,
+            role="bot",
+            payload={
+                "type": "meal_turn",
+                "prompt": turn.assistant_prompt,
+                "turn_action": turn.turn_action,
+                "clarification_reason": turn.clarification_reason,
+            },
+            message_id=getattr(sent, "message_id", None) if isinstance(getattr(sent, "message_id", None), int) else None,
+        )
+    )
+    await session.commit()
+    return turn
 
 
 async def poll_interview_reminders(bot, settings, poll_interval: float | None = None) -> None:
@@ -1166,16 +1225,11 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                                 text=text,
                             )
                         else:
-                            question = interview_service.current_target_question(
-                                interview.current_prompt_payload or {}
-                            )
-                            prompt = str(question.get("prompt") or "").strip()
-                            text = format_unresolved_match_message(meal.id)
-                            if prompt:
-                                text = f"{text}\n\n{prompt}"
-                            await bot.send_message(
-                                chat_id=settings.TELEGRAM_CHAT_ID,
-                                text=text,
+                            await _start_meal_interview_turn(
+                                bot=bot,
+                                session=session,
+                                interview=interview,
+                                settings=settings,
                             )
                     except Exception:
                         logger.exception("Error sending completion match message")

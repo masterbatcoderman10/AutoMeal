@@ -1,3 +1,4 @@
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -7,8 +8,8 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.config import get_settings
-from app.models import DiaryEntry, InterviewSession, MealLog
-from app.services import interview_service
+from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog
+from app.services import interview_service, interview_turn_manager
 from app.services import correction_service
 
 from bot.messages import (
@@ -333,9 +334,20 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if state.get("roadmap_step") == "GROUNDING_PENDING":
                 await update.message.reply_text(format_grounding_pending_message(interview.meal_log_id))
                 return
+            mode = str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL)
+            if mode == interview_service.SESSION_MODE_MEAL and state.get("roadmap_step") != "CONFIRMATION":
+                await _handle_meal_interview_turn(
+                    session=session,
+                    interview=interview,
+                    state=state,
+                    text=text,
+                    update=update,
+                    context=context,
+                    settings=settings,
+                )
+                return
             if state.get("roadmap_step") == "CONFIRMATION":
                 lowered = text.strip().lower()
-                mode = str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL)
                 if lowered in {"cancel", "/cancel"} and mode == interview_service.SESSION_MODE_FIX:
                     interview.is_active = False
                     session.add(interview)
@@ -439,6 +451,160 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(next_prompt["prompt"])
     finally:
         await engine.dispose()
+
+
+async def _handle_meal_interview_turn(*, session, interview: InterviewSession, state: dict, text: str, update: Update, context, settings) -> None:
+    user_message_id = getattr(update.message, "message_id", None)
+    user_payload = {
+        "type": "meal_reply",
+        "text": text,
+        "raw_text": text,
+    }
+    state = interview_service.append_interview_transcript_entry(
+        state,
+        role="user",
+        content=text,
+        payload=user_payload,
+        message_id=user_message_id,
+    )
+    interview.current_prompt_payload = interview_service.json_safe_payload(state)
+    session.add(interview)
+    session.add(
+        InterviewMessage(
+            id=str(uuid.uuid4()),
+            session_id=interview.id,
+            role="user",
+            payload=dict(user_payload),
+            message_id=user_message_id if isinstance(user_message_id, int) else None,
+        )
+    )
+    await session.commit()
+
+    try:
+        turn = await _run_meal_interview_turn(
+            state=state,
+            latest_user_text=text,
+            settings=settings,
+        )
+    except interview_turn_manager.InterviewTurnValidationError as exc:
+        retry_prompt = interview_service.build_neutral_retry_prompt(state)
+        sent = await update.message.reply_text(retry_prompt)
+        failure_state = interview_service.append_interview_transcript_entry(
+            state,
+            role="bot",
+            content=retry_prompt,
+            payload={
+                "type": "validation_retry",
+                "prompt": retry_prompt,
+                "error": str(exc),
+            },
+            message_id=getattr(sent, "message_id", None),
+        )
+        failure_state["last_turn_error"] = str(exc)
+        failure_state["last_prompted_at"] = datetime.now(UTC)
+        interview.current_prompt_payload = interview_service.json_safe_payload(failure_state)
+        if isinstance(getattr(sent, "message_id", None), int):
+            interview.last_bot_message_id = sent.message_id
+        session.add(interview)
+        session.add(
+            InterviewMessage(
+                id=str(uuid.uuid4()),
+                session_id=interview.id,
+                role="bot",
+                payload={
+                    "type": "validation_retry",
+                    "prompt": retry_prompt,
+                    "error": str(exc),
+                },
+                message_id=getattr(sent, "message_id", None) if isinstance(getattr(sent, "message_id", None), int) else None,
+            )
+        )
+        await session.commit()
+        return
+
+    updated_state = interview_service.apply_interview_turn_result(
+        state,
+        turn_action=turn.turn_action,
+        assistant_prompt=turn.assistant_prompt,
+        clarification_reason=turn.clarification_reason,
+        conversation_summary=turn.conversation_summary,
+        confirmation_items=[item.model_dump(mode="json") for item in turn.confirmation_items],
+    )
+
+    if turn.turn_action == "ready_to_confirm":
+        updated_state["last_prompted_at"] = datetime.now(UTC)
+        interview.current_prompt_payload = interview_service.json_safe_payload(updated_state)
+        session.add(interview)
+        finalized = await _finalize_interview_confirmation(session=session, interview=interview)
+        if finalized is None:
+            await update.message.reply_text("I could not find that meal to confirm.")
+            return
+        if finalized["result"].get("grounding_required"):
+            _mark_grounding_pending(interview)
+            session.add(interview)
+            await session.commit()
+            await update.message.reply_text(format_grounding_pending_message(finalized["meal"].id))
+            return
+        interview.is_active = False
+        session.add(interview)
+        await session.commit()
+        recent_entries = _remember_recent_entry_context(
+            context.bot_data,
+            _recent_entries_from_confirmation(
+                meal_id=finalized["meal"].id,
+                meal_entries=list(finalized["result"].get("meal_entries", [])),
+                confirmation_items=list(finalized["confirmation_items"]),
+            ),
+        )
+        reply = "Meal confirmation saved."
+        fix_targets = format_recent_fix_targets(recent_entries)
+        if fix_targets:
+            reply = f"{reply}\n\n{fix_targets}"
+        await update.message.reply_text(reply)
+        return
+
+    sent = await update.message.reply_text(turn.assistant_prompt)
+    updated_state = interview_service.append_interview_transcript_entry(
+        updated_state,
+        role="bot",
+        content=turn.assistant_prompt,
+        payload={
+            "type": "meal_turn",
+            "prompt": turn.assistant_prompt,
+            "turn_action": turn.turn_action,
+            "clarification_reason": turn.clarification_reason,
+        },
+        message_id=getattr(sent, "message_id", None),
+    )
+    updated_state["last_prompted_at"] = datetime.now(UTC)
+    interview.current_prompt_payload = interview_service.json_safe_payload(updated_state)
+    if isinstance(getattr(sent, "message_id", None), int):
+        interview.last_bot_message_id = sent.message_id
+    session.add(interview)
+    session.add(
+        InterviewMessage(
+            id=str(uuid.uuid4()),
+            session_id=interview.id,
+            role="bot",
+            payload={
+                "type": "meal_turn",
+                "prompt": turn.assistant_prompt,
+                "turn_action": turn.turn_action,
+                "clarification_reason": turn.clarification_reason,
+            },
+            message_id=getattr(sent, "message_id", None) if isinstance(getattr(sent, "message_id", None), int) else None,
+        )
+    )
+    await session.commit()
+
+
+async def _run_meal_interview_turn(*, state: dict, latest_user_text: str, settings) -> interview_turn_manager.InterviewTurnResult:
+    return await interview_turn_manager.run_interview_turn(
+        authoritative_state=state,
+        transcript=interview_service.interview_transcript_from_state(state),
+        latest_user_text=latest_user_text,
+        settings=settings,
+    )
 
 
 def _build_fix_patch(*, entry_context: dict, confirmation_items: list[dict]) -> dict:

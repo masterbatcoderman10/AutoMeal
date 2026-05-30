@@ -2,7 +2,7 @@
 
 ## Overview
 
-Six phases transform a blank repo into a fully operational personal meal tracker: the photo arrives via iOS Shortcut, runs through detect → segment → embed → vector-match → LLM reason → Telegram interview, and every confirmed identification grows the FoodVisuals library so future matches are faster. Each phase ends with a working vertical slice — something you can actually fire the Shortcut at and observe improving. Schema correctness (vector(1536), TIMESTAMPTZ, FAILED status) is locked in Phase 1 and never revisited.
+Eight phases transform a blank repo into a fully operational personal meal tracker: the photo arrives via iOS Shortcut, runs through detect → segment → embed → vector-match → LLM reason → AI-assisted Telegram interview, and every confirmed identification grows the FoodVisuals library so future matches are faster. Each phase ends with a working vertical slice — something you can actually fire the Shortcut at and observe improving. Schema correctness (vector(1536), TIMESTAMPTZ, FAILED status) is locked in Phase 1 and never revisited.
 
 ## Phases
 
@@ -11,6 +11,7 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 - [ ] **Phase 3: Embed & Match** - Seeded foods matched by vector similarity produce DiaryEntries and a nutrition push
 - [x] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: segmented foods continue in bounded async parallel; unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes (completed 2026-05-28)
 - [x] **Phase 4.1: Grouped Reasoning & Human Interview Correction** - Correct the Phase 4 UAT gap where whole-meal top-3 candidates and raw segment prompts produce confusing interviews; reasoning must group distinct foods first, produce per-food top-3 candidates, and ask one human question per unresolved food group (completed 2026-05-29)
+- [ ] **Phase 4.2: LLM-Threaded Interview Orchestration** - Replace deterministic interview continuation with an LLM interview agent that receives grouped reasoning context, conversation history, pending unclear targets, and clear auto-proposed items for approval; it asks natural follow-ups, decides when enough information is collected, and hands structured confirmed items back to final write-back/grounding.
 - [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
@@ -136,6 +137,32 @@ Six phases transform a blank repo into a fully operational personal meal tracker
 - [ ] `04.1-02-PLAN.md` — group-target interview prompts plus `IMG_4646.HEIC` UAT and Langfuse trace verification
 
 **Phase note**: This is a corrective polish phase created from Phase 4 UAT on 2026-05-29. It should remain isolated from Phase 5 grounding work: no SearXNG/Firecrawl tool loop, no nutrition derivation expansion, and no broader Telegram command work. The first executable plan should be small enough to run independently with `/gsd-execute-phase 4.1`.
+
+---
+
+### Phase 4.2: LLM-Threaded Interview Orchestration
+
+**Goal**: Replace the deterministic Telegram interview continuation with an LLM-assisted interview agent that starts from grouped reasoning context, includes both unclear targets and clear auto-proposed items for approval, uses conversation history, asks natural follow-ups, determines when the answers are sufficient, and returns structured confirmation items for final write-back or post-interview grounding.
+**Mode:** mvp
+**Depends on**: Phase 4.1
+**Requirements**: REASON-01, REASON-04, INTERVIEW-01, INTERVIEW-02, INTERVIEW-03, INTERVIEW-06
+**Success Criteria** (what must be TRUE):
+
+  1. When reasoning creates unresolved food groups, the interview prompt starter includes the grouped reasoning payload, candidate choices, missing evidence, segment IDs, image/crop references where available, and the current user-facing question.
+  2. Clear/high-confidence food groups are included in the same interview turn as approval candidates, so the user can accept or correct them while answering unclear items.
+  3. Each Telegram user reply is appended to durable conversation history and sent to the interview LLM with unresolved targets, approval candidates, prior assistant prompts, prior user answers, and current structured state.
+  4. The interview LLM returns strict structured output: `continue_interview` with the next natural prompt, `need_clarification` with a targeted correction prompt, or `ready_to_confirm` with normalized confirmation items and explicit approval/correction status for every clear and unclear group.
+  5. A reply like "bottle gourd" to an egg/vegetable curry target resolves the missing vegetable detail and composes the confirmed item name, e.g. `egg curry with bottle gourd`, instead of advancing to a second deterministic "what should I call..." naming question.
+  6. The active interview is scoped to the meal/thread being answered; stale active sessions cannot steal replies from the newest meal.
+  7. On `ready_to_confirm`, the structured confirmation items flow through the existing final write-back/grounding path so FoodItems, DiaryEntries, and FoodVisuals are written by the same authoritative transaction used by Phase 4.1.
+  8. The interview model and fallback are explicit config keys, defaulting to a low-cost text model such as `google/gemini-3.1-flash-lite`, and Langfuse traces show the model, prompt context, and structured response.
+
+**Plans**: 3 plans
+Plans:
+- [ ] `04.2-01-PLAN.md` — strict interview-turn contract, explicit model config, and authoritative grouped state scaffold
+- [ ] `04.2-02-PLAN.md` — single-active-session LLM meal interview kickoff, continuation, and finalizer handoff
+- [ ] `04.2-03-PLAN.md` — prompt-scoped reply routing, `/fix` preservation, and Phase 04.2 live UAT checklist
+**Phase note**: This phase exists because UAT showed the deterministic roadmap `INITIAL_QUESTION -> FOOD_NAME -> SOURCE_TYPE -> PORTION_CONTEXT` cannot interpret natural answers in context. It should not add web grounding or nutrition lookup; it only upgrades the human interview brain and its handoff back into existing write paths.
 
 ---
 

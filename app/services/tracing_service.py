@@ -7,22 +7,9 @@ from typing import Any
 from app.config import get_settings
 
 
-def _is_tracing_enabled() -> bool:
-    settings = get_settings()
-    return bool(
-        settings.LANGFUSE_ENABLED
-        and settings.LANGFUSE_PUBLIC_KEY
-        and settings.LANGFUSE_SECRET_KEY
-    )
-
-
 def _should_capture_images() -> bool:
     settings = get_settings()
-    return bool(
-        settings.LANGFUSE_CAPTURE_IMAGES
-        and settings.LANGFUSE_PUBLIC_KEY
-        and settings.LANGFUSE_SECRET_KEY
-    )
+    return bool(settings.LANGFUSE_CAPTURE_IMAGES)
 
 
 def _scrub_payload(value: Any, *, capture_images: bool) -> Any:
@@ -46,40 +33,31 @@ def _scrub_payload(value: Any, *, capture_images: bool) -> Any:
 def _create_langfuse_client():
     try:
         from langfuse import Langfuse
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError("Langfuse SDK is required for MealTracker LLM calls") from exc
 
     settings = get_settings()
     kwargs: dict[str, Any] = {
         "public_key": settings.LANGFUSE_PUBLIC_KEY,
         "secret_key": settings.LANGFUSE_SECRET_KEY,
+        "base_url": settings.LANGFUSE_BASE_URL,
+        "environment": settings.LANGFUSE_TRACING_ENVIRONMENT,
     }
-    if settings.LANGFUSE_HOST:
-        kwargs["host"] = settings.LANGFUSE_HOST
     try:
         return Langfuse(**kwargs)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError("Langfuse client initialization failed") from exc
 
 
-def _create_trace(client, *, name: str, input_payload: Any | None, metadata: dict[str, Any] | None):
-    trace_factory = getattr(client, "trace", None)
-    if trace_factory is None:
-        trace_factory = getattr(client, "create_trace", None)
-    if trace_factory is None:
-        return None
-    kwargs = {}
-    if input_payload is not None:
-        kwargs["input"] = _scrub_payload(
-            input_payload,
-            capture_images=_should_capture_images(),
-        )
-    if metadata is not None:
-        kwargs["metadata"] = metadata
+def validate_langfuse_required() -> None:
+    client = _create_langfuse_client()
     try:
-        return trace_factory(name=name, **kwargs)
-    except Exception:
-        return None
+        is_valid = client.auth_check()
+    except Exception as exc:
+        raise RuntimeError("Langfuse auth check failed") from exc
+    if not is_valid:
+        raise RuntimeError("Langfuse credentials were rejected")
+    _call_if_available(client, "flush")
 
 
 def _call_if_available(obj: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -101,28 +79,29 @@ def _call_if_available(obj: Any, method_name: str, *args: Any, **kwargs: Any) ->
     return None
 
 
-def _extract_trace_id(trace: Any) -> str | None:
-    return getattr(trace, "id", None) or getattr(trace, "trace_id", None)
-
-
 @dataclass
 class TraceHandle:
     trace: Any
     trace_id: str | None
     span: Any | None = None
     client: Any | None = None
+    context_manager: Any | None = None
+    ended: bool = False
 
     def end(self, output: Any | None = None, error: Exception | None = None) -> None:
+        if self.ended:
+            return
+        self.ended = True
         if self.trace is None:
             return
 
         if error is not None:
             _call_if_available(self.trace, "score", status="error")
-            _call_if_available(self.trace, "update", output=str(error))
+            _call_if_available(self.trace, "update", level="ERROR", status_message=str(error))
         elif output is not None:
             _call_if_available(self.trace, "update", output=copy.deepcopy(output))
 
-        if self.span is not None:
+        if self.span is not None and self.span is not self.trace:
             if error is not None:
                 _call_if_available(self.span, "update", status="error")
             _call_if_available(self.span, "end")
@@ -132,6 +111,11 @@ class TraceHandle:
         _call_if_available(self.client, "flush")
 
     def __enter__(self) -> "TraceHandle":
+        if self.context_manager is not None:
+            self.trace = self.context_manager.__enter__()
+            self.span = self.trace
+            if self.client is not None:
+                self.trace_id = _call_if_available(self.client, "get_current_trace_id") or self.trace_id
         return self
 
     def __exit__(self, exc_type: type | None, exc: Exception | None, tb: Any) -> None:
@@ -139,6 +123,8 @@ class TraceHandle:
             self.end(error=exc)
         else:
             self.end()
+        if self.context_manager is not None:
+            self.context_manager.__exit__(exc_type, exc, tb)
 
 
 def maybe_start_trace(
@@ -148,39 +134,22 @@ def maybe_start_trace(
     metadata: dict[str, Any] | None = None,
     span_name: str | None = None,
 ) -> TraceHandle:
-    if not _is_tracing_enabled():
-        return TraceHandle(trace=None, trace_id=None, span=None, client=None)
-
     client = _create_langfuse_client()
-    if client is None:
-        return TraceHandle(trace=None, trace_id=None, span=None, client=None)
-
     sanitized_input = _scrub_payload(input, capture_images=_should_capture_images())
-    trace = _create_trace(
-        client,
-        name=name,
-        input_payload=sanitized_input,
+    context_manager = client.start_as_current_observation(
+        name=span_name or name,
+        as_type="span",
+        input=sanitized_input,
         metadata=metadata,
+        end_on_exit=False,
     )
-    if trace is None:
-        return TraceHandle(trace=None, trace_id=None, span=None, client=None)
-
-    span = None
-    if span_name is not None:
-        span_factory = getattr(trace, "span", None) or getattr(trace, "create_span", None)
-        if callable(span_factory):
-            try:
-                span = span_factory(name=span_name)
-            except Exception:
-                span = None
-            _call_if_available(span, "update", input=copy.deepcopy(sanitized_input))
-
     return TraceHandle(
-        trace=trace,
-        trace_id=_extract_trace_id(trace),
-        span=span,
+        trace=None,
+        trace_id=None,
+        span=None,
         client=client,
+        context_manager=context_manager,
     )
 
 
-__all__ = ["TraceHandle", "maybe_start_trace"]
+__all__ = ["TraceHandle", "maybe_start_trace", "validate_langfuse_required"]

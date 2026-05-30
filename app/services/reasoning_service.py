@@ -584,8 +584,12 @@ def _reasoning_system_prompt() -> str:
         "You are MealTracker's meal-level visual reasoning model. You must inspect the "
         "whole_meal_image and every indexed segment crop before trusting vector candidates. "
         "Base decisions only on the provided images, detector labels, boxes, and per-segment "
-        "top_3 candidate context. First group distinct foods/components, then rank candidates "
-        "inside each group only. Do not compare unrelated foods as if they are alternatives. "
+        "top_3 candidate context. Food groups must be isolated foods/components, not compound "
+        "plate pairings. Do not group bread with curry, rice with curry, sauce with bread, or "
+        "multiple side-by-side foods unless they are physically integrated into one item "
+        "(for example a stuffed roll, sandwich, wrap, or mixed rice dish). First group each "
+        "distinct isolated food/component, then rank candidates inside each group only. Do not "
+        "compare unrelated foods as if they are alternatives. "
         "Do not invent ingredients, brands, nutrition facts, or hidden details. Output strict "
         "JSON only.\n"
         "</CRITICAL_RULES>\n\n"
@@ -594,7 +598,10 @@ def _reasoning_system_prompt() -> str:
         "meat pieces, sauces, and mixed dishes, capture visible nutrition-relevant detail: "
         "rice/prep type, noodle style, bread type, filling, protein or vegetable inside a "
         "curry, meat cut, oiliness, sauce load, and whether visible components should stay "
-        "together or split. If a nutrition-relevant detail is not visible, mark it as "
+        "together or split. Bread scrutiny is mandatory because chapatti/chapati, parota/"
+        "paratha, khubz, pita, naan, and roti can change nutrition materially. If bread type "
+        "is ambiguous, ask a choice/detail question instead of collapsing it into generic "
+        "`bread` or grouping it with nearby curry. If a nutrition-relevant detail is not visible, mark it as "
         "missing_evidence instead of guessing.\n"
         "</SPECIFICITY_POLICY>\n\n"
         "<TAXONOMY_POLICY>\n"
@@ -620,6 +627,10 @@ def _reasoning_system_prompt() -> str:
         "by visual specificity, DB/vector match signal, whole-meal context, nutrition-impact "
         "clarity, and uncertainty honesty. Generic fallback candidates are allowed only when "
         "labeled as uncertainty candidates with low confidence and clear missing_evidence.\n\n"
+        "No-vector policy: when a segment payload says vector_match_status=NO_VECTOR_CANDIDATES, "
+        "there was no usable FoodVisual match. Do not describe candidates as vector hits, do not "
+        "trust detector labels as names, and set candidate source to visual_reasoning or "
+        "user_needed. Use image evidence plus targeted missing_evidence instead.\n\n"
         "</ACTION_POLICY>\n\n"
         "<EXAMPLES>\n"
         "Example 1 - unclear curry detail: whole meal shows pita and a curry crop; "
@@ -636,6 +647,10 @@ def _reasoning_system_prompt() -> str:
         "Example 3 - portion only: identity is clear as rice, but depth/amount is unclear "
         "and likely changes calories. Use ASK_QUANTITY only if identity detail is already "
         "good enough; missing_evidence should name portion_unit or serving_size.\n"
+        "Example 4 - bread ambiguity: crop could be chapatti, parota/paratha, khubz, or pita. "
+        "Keep it as its own food_group separate from curry, set group_action=ASK_CHOICE or "
+        "INTERVIEW unless the image clearly identifies the bread type, and include those bread "
+        "types in question_examples.\n"
         "</EXAMPLES>\n\n"
         "<OUTPUT_CONTRACT>\n"
         "Return only strict JSON matching reasoning_contract_v1. All declared fields are "
@@ -689,27 +704,45 @@ def _build_reasoning_prompt(
         )
 
     for index, (segment, match_result) in enumerate(match_results, start=1):
-        coerced_snapshot = coerce_reasoning_response(
-            {
-                "action": "AUTO_CONFIRM",
-                "meal_state": "READY_TO_WRITE",
-                "top_3": [payload for payload in getattr(match_result, "top_candidates", [])],
-                "decision_rationale": "",
-                "gate_reason": "",
-                "segment_count": 1,
-                "trace_id": "",
-            }
-        ).get("top_3", [])
+        raw_candidates = [
+            payload
+            for payload in list(getattr(match_result, "top_candidates", []) or [])
+            if isinstance(payload, Mapping)
+        ]
+        if raw_candidates:
+            coerced_snapshot = coerce_reasoning_response(
+                {
+                    "action": "AUTO_CONFIRM",
+                    "meal_state": "READY_TO_WRITE",
+                    "top_3": raw_candidates,
+                    "decision_rationale": "",
+                    "gate_reason": "",
+                    "segment_count": 1,
+                    "trace_id": "",
+                }
+            ).get("top_3", [])
+        else:
+            coerced_snapshot = []
         segment_snapshot = [
             dict(candidate)
             for candidate in coerced_snapshot
             if isinstance(candidate, Mapping)
         ][:3]
+        vector_match_status = "HAS_VECTOR_CANDIDATES" if segment_snapshot else "NO_VECTOR_CANDIDATES"
         segment_payload = {
             "segment_index": f"segment_{index}",
             "segment_id": getattr(segment, "id", "unknown"),
             "detector_label": getattr(segment, "label", None),
             "bounding_box": getattr(segment, "bounding_box", None),
+            "vector_match_status": vector_match_status,
+            "vector_match_note": (
+                "Vector candidates are available; weigh them against the image evidence."
+                if segment_snapshot
+                else "No vector candidates were available for this segment; name from visual reasoning or ask the user."
+            ),
+            "similarity": getattr(match_result, "similarity", None),
+            "is_match": getattr(match_result, "is_match", None),
+            "is_below_threshold": getattr(match_result, "is_below_threshold", None),
             "top_3_candidates": segment_snapshot,
         }
         user_payload.append(

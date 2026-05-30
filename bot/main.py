@@ -7,6 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from app.config import get_settings
+from app.services import tracing_service
 from bot.handlers import fix_command, start
 from bot.handlers import interview_callback, interview_text
 from bot.polling import (
@@ -110,6 +111,7 @@ def main() -> None:
         level=logging.INFO,
     )
     settings = get_settings()
+    tracing_service.validate_langfuse_required()
     application = (
         Application.builder()
         .token(settings.TELEGRAM_BOT_TOKEN)

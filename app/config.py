@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -28,14 +28,22 @@ class Settings(BaseSettings):
     JANITOR_INTERVAL_MINUTES: int = 2
     STALE_TIMEOUT_MINUTES: int = 10
     MAX_RECOVERY_ATTEMPTS: int = 3
-    LANGFUSE_ENABLED: bool = False
     LANGFUSE_CAPTURE_IMAGES: bool = False
-    LANGFUSE_PUBLIC_KEY: str | None = None
-    LANGFUSE_SECRET_KEY: str | None = None
-    LANGFUSE_HOST: str | None = None
+    LANGFUSE_PUBLIC_KEY: str
+    LANGFUSE_SECRET_KEY: str
+    LANGFUSE_BASE_URL: str
+    LANGFUSE_TRACING_ENVIRONMENT: str = "local"
     UPLOADS_DIR: Path = Path("/data/uploads")
     BOT_POLL_INTERVAL: float = 3.0
     DEDUP_WINDOW_SECONDS: int = 60
+
+    @field_validator("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL")
+    @classmethod
+    def _required_langfuse_value(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Langfuse configuration is mandatory")
+        return stripped
 
     model_config = ConfigDict(
         env_file=".env",

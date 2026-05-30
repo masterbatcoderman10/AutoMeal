@@ -312,7 +312,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segment_one.embedding, [0.1] * matching_service.EMBEDDING_DIMENSION)
         self.assertEqual(segment_two.embedding, [0.2] * matching_service.EMBEDDING_DIMENSION)
         self.assertEqual(meal.processing_status, MealProcessingStatus.MATCHING)
-        session.commit.assert_awaited_once()
+        self.assertEqual(session.commit.await_count, 2)
 
     async def test_poll_and_embed_marks_meal_without_segments_failed(self) -> None:
         from bot import polling

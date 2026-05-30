@@ -67,6 +67,7 @@ def upgrade() -> None:
         type_=sa.JSON(),
         existing_type=sa.Text(),
         existing_nullable=True,
+        postgresql_using="ai_reasoning::json",
     )
 
     op.add_column(

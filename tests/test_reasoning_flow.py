@@ -568,6 +568,12 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         self.assertIn("Asian-cuisine", system_text)
+        self.assertIn("Food groups must be isolated foods", system_text)
+        self.assertIn("Do not group bread with curry", system_text)
+        self.assertIn("chapatti", system_text)
+        self.assertIn("parota", system_text)
+        self.assertIn("khubz", system_text)
+        self.assertIn("pita", system_text)
         self.assertIn("AUTO_CONFIRM", system_text)
         self.assertIn("ASK_CHOICE", system_text)
         self.assertIn("INTERVIEW", system_text)
@@ -585,3 +591,45 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(url.startswith("data:image/jpeg;base64,") for url in image_urls))
         self.assertIn("bWVhbCBpbWFnZSBieXRlcw==", image_urls[0])
         self.assertIn("c2VnbWVudCBpbWFnZSBieXRlcw==", image_urls[1])
+
+    def test_reasoning_prompt_marks_empty_vector_context_without_fake_candidates(self) -> None:
+        from app.services import reasoning_service
+
+        meal = type("Meal", (), {"id": "meal-empty-vector", "image_url": None})()
+        segment = type(
+            "MealSegment",
+            (),
+            {
+                "id": "seg-empty-vector",
+                "label": "detector bread hint",
+                "bounding_box": [0.1, 0.2, 0.4, 0.5],
+                "cropped_image_url": None,
+            },
+        )()
+        match_result = type(
+            "Result",
+            (),
+            {
+                "top_candidates": [],
+                "similarity": None,
+                "is_match": False,
+                "is_below_threshold": True,
+            },
+        )()
+
+        messages = reasoning_service._build_reasoning_prompt(
+            meal=meal,
+            match_results=[(segment, match_result)],
+        )
+
+        text_blocks = "\n".join(
+            block["text"]
+            for block in messages[1]["content"]
+            if block.get("type") == "text"
+        )
+
+        self.assertIn('"vector_match_status":"NO_VECTOR_CANDIDATES"', text_blocks)
+        self.assertIn('"top_3_candidates":[]', text_blocks)
+        self.assertIn("No vector candidates were available", text_blocks)
+        self.assertNotIn("candidate-0", text_blocks)
+        self.assertNotIn("unlabeled food", text_blocks)

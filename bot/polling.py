@@ -381,17 +381,24 @@ async def poll_interview_reminders(bot, settings, poll_interval: float | None = 
                     result = await session.execute(statement)
                     interview = result.scalar_one_or_none()
                     if interview is None:
+                        await session.rollback()
                         await _poll_sleep(interval)
                         continue
                     if _is_grounding_pending_session(interview):
+                        await session.rollback()
                         await _poll_sleep(interval)
                         continue
 
-                    await bot.send_message(
-                        chat_id=interview.chat_id,
-                        text=format_interview_reminder_message(interview.meal_log_id),
-                    )
-                    interview.last_reminder_at = datetime.now(UTC)
+                    await session.commit()
+                    reminder_sent_at = datetime.now(UTC)
+                    try:
+                        await bot.send_message(
+                            chat_id=interview.chat_id,
+                            text=format_interview_reminder_message(interview.meal_log_id),
+                        )
+                    except Exception:
+                        logger.exception("Error sending interview reminder")
+                    interview.last_reminder_at = reminder_sent_at
                     interview.reminder_count = int(interview.reminder_count or 0) + 1
                     await session.commit()
             except asyncio.CancelledError:
@@ -440,12 +447,14 @@ async def poll_grounding_handoffs(bot, settings, poll_interval: float | None = N
                         None,
                     )
                     if interview is None:
+                        await session.rollback()
                         await _poll_sleep(interval)
                         continue
 
                     meal = await session.get(MealLog, interview.meal_log_id)
                     now = datetime.now(UTC)
                     payload = dict(interview.current_prompt_payload or {})
+                    await session.commit()
                     await bot.send_message(
                         chat_id=interview.chat_id,
                         text=format_grounding_pending_message(interview.meal_log_id),
@@ -524,11 +533,13 @@ async def poll_post_interview_grounding(
                         None,
                     )
                     if interview is None:
+                        await session.rollback()
                         await _poll_sleep(interval)
                         continue
 
                     meal = await session.get(MealLog, interview.meal_log_id)
                     if meal is None:
+                        await session.rollback()
                         await _poll_sleep(interval)
                         continue
 
@@ -563,6 +574,7 @@ async def poll_post_interview_grounding(
                         meal=meal,
                         segments=segments,
                     )
+                    await session.commit()
                     if missing_segments:
                         meal.reasoning_state_json = _merge_post_interview_reasoning_state(
                             prior_state=prior_state,
@@ -683,6 +695,7 @@ async def poll_and_detect_food(bot, settings, poll_interval: float | None = None
                     meal = result.scalar_one_or_none()
 
                     if meal is not None:
+                        await session.commit()
                         decision = await detect_food_photo(
                             meal.image_url,
                             llm_client=llm_client,
@@ -735,9 +748,11 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                     meal = result.scalar_one_or_none()
 
                     if meal is None:
+                        await session.rollback()
                         await _poll_sleep(interval)
                         continue
 
+                    await session.commit()
                     segments = await segment_food_photo_with_retry(
                         meal.image_url,
                         llm_client=llm_client,
@@ -836,6 +851,7 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                     result = await session.execute(statement)
                     meal = result.scalar_one_or_none()
                     if meal is None:
+                        await session.rollback()
                         await _poll_sleep(interval)
                         continue
 
@@ -852,6 +868,7 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                         await session.commit()
                         continue
 
+                    await session.commit()
                     for segment in segments:
                         segment.embedding = await matching_service.embed_segment_query_embedding(
                             segment=segment,
@@ -920,6 +937,23 @@ async def _match_segment_with_limit(
             session=session,
             llm_client=llm_client,
         )
+    return segment, result
+
+
+async def _match_segment_with_isolated_session(
+    *,
+    segment: MealSegment,
+    session_factory,
+    llm_client,
+    semaphore: asyncio.Semaphore,
+) -> tuple[MealSegment, matching_service.SegmentMatchResult]:
+    async with semaphore:
+        async with session_factory() as match_session:
+            result = await _is_rejection_threshold_reached(
+                segment=segment,
+                session=match_session,
+                llm_client=llm_client,
+            )
     return segment, result
 
 
@@ -1053,6 +1087,7 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                     result = await session.execute(statement)
                     meal = result.scalar_one_or_none()
                     if meal is None:
+                        await session.rollback()
                         await _poll_sleep(interval)
                         continue
 
@@ -1065,12 +1100,13 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                         await session.commit()
                         continue
 
+                    await session.commit()
                     match_sem = asyncio.Semaphore(_resolve_match_parallelism(settings))
                     match_results = await asyncio.gather(
                         *[
-                            _match_segment_with_limit(
+                            _match_segment_with_isolated_session(
                                 segment=segment,
-                                session=session,
+                                session_factory=session_factory,
                                 llm_client=llm_client,
                                 semaphore=match_sem,
                             )

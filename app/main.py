@@ -8,7 +8,7 @@ from telegram import Bot
 from app.config import get_settings
 from app.database import create_engine, get_engine, get_session_factory
 from app.routers import health, ingest
-from app.services import recovery_service
+from app.services import recovery_service, tracing_service
 
 
 scheduler = AsyncIOScheduler()
@@ -27,6 +27,7 @@ async def _run_meal_janitor_job() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    tracing_service.validate_langfuse_required()
     create_engine(settings.DATABASE_URL)
     if scheduler.get_job(recovery_service.MEAL_JANITOR_JOB_ID) is None:
         scheduler.add_job(

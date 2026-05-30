@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from math import isfinite
 
 import httpx
-from openai import AsyncOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+from langfuse.openai import AsyncOpenAI
 
 from app.config import get_settings
+
+OPENAI_CLIENT_WRAPPER = "langfuse.openai.AsyncOpenAI"
 
 OPENROUTER_HEADERS = {
     "HTTP-Referer": "MealTracker",
@@ -19,6 +25,11 @@ _client: "OpenRouterClient | None" = None
 
 class OpenRouterClient:
     def __init__(self, api_key: str, base_url: str = "https://openrouter.ai/api/v1") -> None:
+        settings = get_settings()
+        os.environ["LANGFUSE_PUBLIC_KEY"] = settings.LANGFUSE_PUBLIC_KEY
+        os.environ["LANGFUSE_SECRET_KEY"] = settings.LANGFUSE_SECRET_KEY
+        os.environ["LANGFUSE_BASE_URL"] = settings.LANGFUSE_BASE_URL
+        os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = settings.LANGFUSE_TRACING_ENVIRONMENT
         self.base_url = base_url
         self._chat_client = AsyncOpenAI(
             api_key=api_key,
@@ -43,14 +54,18 @@ class OpenRouterClient:
         response_format: dict[str, Any] | None = None,
         tools: list[dict[str, Any]] | None = None,
         extra_body: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
-        response = await self._chat_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format=response_format,
-            tools=tools,
-            extra_body=extra_body,
-        )
+        request: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "response_format": response_format,
+            "tools": tools,
+            "extra_body": extra_body,
+        }
+        if max_tokens is not None:
+            request["max_tokens"] = max_tokens
+        response = await self._chat_client.chat.completions.create(**request)
         return response.model_dump()
 
     async def embed_multimodal(

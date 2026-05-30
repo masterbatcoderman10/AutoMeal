@@ -292,9 +292,16 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OpenRouterContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_chat_completion_forwards_multimodal_payload_and_extra_body(self) -> None:
+    def test_openrouter_client_uses_langfuse_openai_wrapper(self) -> None:
         from app.services import llm_client
 
+        self.assertEqual(llm_client.OPENAI_CLIENT_WRAPPER, "langfuse.openai.AsyncOpenAI")
+
+    async def test_chat_completion_forwards_multimodal_payload_and_extra_body(self) -> None:
+        from app.config import get_settings
+        from app.services import llm_client
+
+        get_settings.cache_clear()
         create_call = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: {"ok": True}))
 
         class FakeAsyncOpenAI:
@@ -324,6 +331,20 @@ class OpenRouterContractTests(unittest.IsolatedAsyncioTestCase):
         extra_body = {"provider": {"reasoning": {"effort": "low"}}}
 
         with (
+            patch.dict(
+                os.environ,
+                {
+                    "DATABASE_URL": "postgresql+asyncpg://meal:pw@db:5432/meal",
+                    "INGEST_SECRET": "secret",
+                    "TELEGRAM_BOT_TOKEN": "token",
+                    "TELEGRAM_CHAT_ID": "999",
+                    "OPENROUTER_API_KEY": "router-key",
+                    "LANGFUSE_PUBLIC_KEY": "pk-lf-test",
+                    "LANGFUSE_SECRET_KEY": "sk-lf-test",
+                    "LANGFUSE_BASE_URL": "https://cloud.langfuse.com",
+                },
+                clear=True,
+            ),
             patch.object(llm_client, "AsyncOpenAI", FakeAsyncOpenAI),
             patch.object(llm_client.httpx, "AsyncClient", FakeAsyncClient),
         ):
@@ -334,6 +355,7 @@ class OpenRouterContractTests(unittest.IsolatedAsyncioTestCase):
                 response_format=response_format,
                 extra_body=extra_body,
             )
+        get_settings.cache_clear()
 
         self.assertEqual(result, {"ok": True})
         create_call.assert_awaited_once_with(
@@ -346,6 +368,15 @@ class OpenRouterContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SettingsContractTests(unittest.TestCase):
+    def test_container_images_include_reasoning_taxonomy_config(self) -> None:
+        from pathlib import Path
+
+        api_dockerfile = Path("Dockerfile.api").read_text(encoding="utf-8")
+        bot_dockerfile = Path("Dockerfile.bot").read_text(encoding="utf-8")
+
+        self.assertIn("COPY config/ ./config/", api_dockerfile)
+        self.assertIn("COPY config/ ./config/", bot_dockerfile)
+
     def test_settings_ignore_unrelated_env_keys(self) -> None:
         from app.config import Settings
 
@@ -357,6 +388,9 @@ class SettingsContractTests(unittest.TestCase):
                 "TELEGRAM_BOT_TOKEN": "token",
                 "TELEGRAM_CHAT_ID": "999",
                 "OPENROUTER_API_KEY": "router-key",
+                "LANGFUSE_PUBLIC_KEY": "pk-lf-test",
+                "LANGFUSE_SECRET_KEY": "sk-lf-test",
+                "LANGFUSE_BASE_URL": "https://cloud.langfuse.com",
                 "POSTGRES_PASSWORD": "extra-value",
                 "API_HOST_PORT": "18000",
             },
@@ -366,6 +400,27 @@ class SettingsContractTests(unittest.TestCase):
 
         self.assertEqual(settings.OPENROUTER_API_KEY, "router-key")
         self.assertEqual(settings.TELEGRAM_CHAT_ID, "999")
+        self.assertEqual(settings.LANGFUSE_PUBLIC_KEY, "pk-lf-test")
+        self.assertEqual(settings.LANGFUSE_BASE_URL, "https://cloud.langfuse.com")
+
+    def test_langfuse_credentials_are_required(self) -> None:
+        from pydantic import ValidationError
+
+        from app.config import Settings
+
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql+asyncpg://meal:pw@db:5432/meal",
+                "INGEST_SECRET": "secret",
+                "TELEGRAM_BOT_TOKEN": "token",
+                "TELEGRAM_CHAT_ID": "999",
+                "OPENROUTER_API_KEY": "router-key",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(ValidationError):
+                Settings(_env_file=None)
 
 
 class ImageServiceContractTests(unittest.TestCase):
@@ -540,7 +595,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interview.current_prompt_payload["grounding_status"], "HANDOFF_ACKNOWLEDGED")
         self.assertEqual(meal.processing_status, MealProcessingStatus.INTERVIEWING)
         self.assertEqual(meal.reasoning_state_json["grounding_status"], "HANDOFF_ACKNOWLEDGED")
-        session.commit.assert_awaited_once()
+        self.assertEqual(session.commit.await_count, 2)
         engine.dispose.assert_awaited_once()
 
     async def test_post_interview_grounding_worker_runs_reasoning_and_closes_completed_handoff(self) -> None:
@@ -835,7 +890,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_detect_food(bot, settings, poll_interval=0.01)
 
-        session.commit.assert_awaited_once()
+        self.assertEqual(session.commit.await_count, 2)
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
         bot.send_message.assert_not_awaited()
 
@@ -896,7 +951,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_detect_food(bot, settings, poll_interval=0.01)
 
-        session.commit.assert_awaited_once()
+        self.assertEqual(session.commit.await_count, 2)
         self.assertEqual(meal.processing_status, MealProcessingStatus.SEGMENTING)
         bot.send_message.assert_not_awaited()
 
@@ -1044,7 +1099,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 await polling.poll_and_segment_food(bot, settings, poll_interval=0.01)
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.EMBEDDING)
-        session.commit.assert_awaited_once()
+        self.assertEqual(session.commit.await_count, 2)
         bot.send_message.assert_not_awaited()
 
     async def test_poll_segments_rejects_empty_segments_with_no_result_message(self) -> None:
@@ -1108,7 +1163,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 await polling.poll_and_segment_food(bot, settings, poll_interval=0.01)
 
         session.add_all.assert_not_called()
-        session.commit.assert_awaited_once()
+        self.assertEqual(session.commit.await_count, 2)
         self.assertEqual(meal.processing_status, MealProcessingStatus.FAILED)
         bot.send_message.assert_awaited_once_with(chat_id="999", text="soft fail")
 
@@ -1231,7 +1286,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("send", order)
         self.assertLess(order.index("commit"), order.index("send"))
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        self.assertEqual(session.commit.await_count, 2)
+        self.assertEqual(session.commit.await_count, 3)
         bot.send_message.assert_awaited_once_with(chat_id="999", text="meal completed")
         self.assertEqual(formatter.call_count, 1)
         completion_items = list(formatter.call_args[0][0]) if formatter.call_args else []
@@ -1353,8 +1408,8 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        self.assertEqual(order, ["commit", "commit", "send"])
-        self.assertEqual(session.commit.await_count, 2)
+        self.assertEqual(order, ["commit", "commit", "commit", "send"])
+        self.assertEqual(session.commit.await_count, 3)
 
     async def test_poll_match_tracks_recent_entries_for_fix_followups(self) -> None:
         from bot import polling
@@ -1597,6 +1652,7 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(bot_main, "get_settings", return_value=settings),
+            patch.object(bot_main.tracing_service, "validate_langfuse_required"),
             patch.object(bot_main.Application, "builder", return_value=builder),
             patch.object(bot_main, "CommandHandler", side_effect=lambda name, fn: (name, fn)),
         ):

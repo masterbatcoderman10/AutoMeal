@@ -1,5 +1,6 @@
 import uuid
 from datetime import UTC, datetime
+from inspect import isawaitable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -140,6 +141,120 @@ async def _load_active_interview(session, *, chat_id: str, meal_id: str | None =
         statement = statement.where(InterviewSession.meal_log_id == meal_id)
     result = await session.execute(statement)
     return result.scalar_one_or_none()
+
+
+async def _load_active_interviews(session, *, chat_id: str) -> list[InterviewSession]:
+    statement = (
+        select(InterviewSession)
+        .options(selectinload(InterviewSession.interview_messages))
+        .where(
+            InterviewSession.chat_id == chat_id,
+            InterviewSession.is_active.is_(True),
+        )
+        .order_by(InterviewSession.updated_at.desc())
+    )
+    result = await session.execute(statement)
+    scalars_getter = getattr(result, "scalars", None)
+    if callable(scalars_getter):
+        scalars = scalars_getter()
+        if not isawaitable(scalars):
+            all_getter = getattr(scalars, "all", None)
+            if callable(all_getter):
+                rows = all_getter()
+                if isinstance(rows, list):
+                    return list(rows)
+                if isinstance(rows, tuple):
+                    return list(rows)
+    scalar_one_or_none = getattr(result, "scalar_one_or_none", None)
+    if callable(scalar_one_or_none):
+        interview = scalar_one_or_none()
+        if interview is not None:
+            return [interview]
+    return []
+
+
+def _interview_state(interview: InterviewSession) -> dict:
+    return dict(interview.current_prompt_payload or {})
+
+
+def _session_mode_for_interview(interview: InterviewSession) -> str:
+    return str(_interview_state(interview).get("session_mode") or interview_service.SESSION_MODE_MEAL)
+
+
+def _reply_to_message_id(update: Update) -> int | None:
+    message = getattr(update, "message", None)
+    reply_to_message = getattr(message, "reply_to_message", None)
+    message_id = getattr(reply_to_message, "message_id", None)
+    return message_id if isinstance(message_id, int) else None
+
+
+def _latest_bot_interview_message_id(interview: InterviewSession) -> int | None:
+    latest_message_id: int | None = None
+    for message in getattr(interview, "interview_messages", []) or []:
+        if getattr(message, "role", None) != "bot":
+            continue
+        message_id = getattr(message, "message_id", None)
+        if isinstance(message_id, int):
+            latest_message_id = message_id
+    if latest_message_id is not None:
+        return latest_message_id
+    for item in _interview_state(interview).get("interview_messages") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") != "bot":
+            continue
+        message_id = item.get("message_id")
+        if isinstance(message_id, int):
+            latest_message_id = message_id
+    return latest_message_id
+
+
+def _match_interview_by_prompt_message(
+    interviews: list[InterviewSession],
+    *,
+    reply_message_id: int,
+) -> InterviewSession | None:
+    for interview in interviews:
+        if getattr(interview, "last_bot_message_id", None) == reply_message_id:
+            return interview
+    for interview in interviews:
+        if _latest_bot_interview_message_id(interview) == reply_message_id:
+            return interview
+    return None
+
+
+async def _resolve_active_interview_for_text(
+    session,
+    *,
+    chat_id: str,
+    update: Update,
+) -> tuple[InterviewSession | None, str | None]:
+    interviews = await _load_active_interviews(session, chat_id=chat_id)
+    if not interviews:
+        return None, None
+
+    reply_message_id = _reply_to_message_id(update)
+    if reply_message_id is not None:
+        matched = _match_interview_by_prompt_message(interviews, reply_message_id=reply_message_id)
+        if matched is not None:
+            return matched, None
+
+    meal_interviews = [
+        interview for interview in interviews
+        if _session_mode_for_interview(interview) == interview_service.SESSION_MODE_MEAL
+    ]
+    fix_interviews = [
+        interview for interview in interviews
+        if _session_mode_for_interview(interview) == interview_service.SESSION_MODE_FIX
+    ]
+
+    if len(meal_interviews) == 1 and not fix_interviews:
+        return meal_interviews[0], None
+    if len(fix_interviews) == 1 and not meal_interviews:
+        return fix_interviews[0], None
+    if len(meal_interviews) > 1:
+        return None, "Please reply to the specific meal prompt so I know which meal to update."
+    return None, "Please reply to the specific prompt so I know what to update."
 
 
 def _confirmation_items_from_state(state: dict) -> list[dict]:
@@ -326,11 +441,15 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     engine, session_factory = _make_session_factory(settings)
     try:
         async with session_factory() as session:
-            interview = await _load_active_interview(session, chat_id=chat_id)
+            interview, retry_message = await _resolve_active_interview_for_text(
+                session,
+                chat_id=chat_id,
+                update=update,
+            )
             if interview is None:
-                await update.message.reply_text("Got it. I'll update the meal confirmation.")
+                await update.message.reply_text(retry_message or "Got it. I'll update the meal confirmation.")
                 return
-            state = dict(interview.current_prompt_payload or {})
+            state = _interview_state(interview)
             if state.get("roadmap_step") == "GROUNDING_PENDING":
                 await update.message.reply_text(format_grounding_pending_message(interview.meal_log_id))
                 return

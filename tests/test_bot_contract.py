@@ -1209,6 +1209,39 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.commit.await_count, 2)
         engine.dispose.assert_awaited_once()
 
+    def test_rebuild_grounding_match_results_expands_grouped_confirmation_items(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            reasoning_state_json={
+                "confirmation_items": [
+                    {
+                        "group_id": "group-eggs",
+                        "primary_segment_id": "seg-egg-1",
+                        "segment_id": "seg-egg-1",
+                        "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                        "name": "Boiled eggs",
+                        "source_type": "PACKAGED",
+                        "brand_name": "Acme",
+                        "portion_bucket": "STANDARD",
+                        "quantity_display": "2 eggs",
+                    }
+                ],
+            },
+        )
+        segments = [
+            SimpleNamespace(id="seg-egg-1", embedding=[0.1] * 1536, match_candidates_json={}),
+            SimpleNamespace(id="seg-egg-2", embedding=[0.2] * 1536, match_candidates_json={}),
+        ]
+
+        rebuilt, missing = polling._rebuild_grounding_match_results(meal=meal, segments=segments)
+
+        self.assertEqual(missing, [])
+        self.assertEqual([segment.id for segment, _result in rebuilt], ["seg-egg-1", "seg-egg-2"])
+        for _segment, result in rebuilt:
+            self.assertEqual(result.candidate_payloads[0]["label"], "Boiled eggs")
+            self.assertEqual(result.candidate_payloads[0]["brand_name"], "Acme")
+
     async def test_post_interview_grounding_worker_runs_reasoning_and_closes_completed_handoff(self) -> None:
         from bot import polling
 
@@ -1233,6 +1266,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 "confirmation_items": [
                     {
                         "segment_id": "seg-1",
+                        "segment_ids": ["seg-1", "seg-2"],
                         "name": "Protein Bar",
                         "source_type": "PACKAGED",
                         "brand_name": "Acme",
@@ -1243,7 +1277,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             recovery_attempt_count=0,
             last_stage_started_at=None,
         )
-        segment = SimpleNamespace(
+        segment_1 = SimpleNamespace(
             id="seg-1",
             meal_log_id="meal-1",
             label="bar",
@@ -1259,11 +1293,18 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 "match_threshold": 0.9,
             },
         )
+        segment_2 = SimpleNamespace(
+            id="seg-2",
+            meal_log_id="meal-1",
+            label="bar piece",
+            embedding=[0.2] * 1536,
+            match_candidates_json={},
+        )
         session = AsyncMock()
         session.add = Mock()
         session.execute.side_effect = [
             Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[interview])))),
-            Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[segment])))),
+            Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[segment_1, segment_2])))),
         ]
         session.get = AsyncMock(return_value=meal)
         engine = SimpleNamespace(dispose=AsyncMock())
@@ -1330,6 +1371,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         run_reasoning_request.assert_awaited_once()
+        self.assertEqual(len(run_reasoning_request.await_args.kwargs["match_results"]), 2)
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
         self.assertEqual(meal.reasoning_state_json["grounding_status"], "COMPLETED")
         self.assertEqual(meal.reasoning_state_json["confirmation_items"][0]["brand_name"], "Acme")

@@ -43,6 +43,16 @@ class InterviewRoadmapTests(unittest.TestCase):
         )
 
 
+class Phase042PreflightHarnessTests(unittest.TestCase):
+    def test_preflight_accepts_python_313_runtime(self) -> None:
+        import scripts.assert_phase_04_2_preflight as preflight
+
+        completed = SimpleNamespace(stdout='{"major": 3, "minor": 13}\n')
+
+        with patch.object(preflight, "_run", return_value=completed):
+            preflight._assert_python_version()
+
+
 class InterviewProgressionTests(unittest.IsolatedAsyncioTestCase):
     def test_interview_proceeds_through_structured_steps_before_confirmation(self) -> None:
         from bot import handlers

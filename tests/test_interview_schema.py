@@ -56,6 +56,32 @@ class InterviewSchemaContractTests(unittest.TestCase):
         item_properties = confirmation_items["items"]["properties"]
         self.assertIn("approval_status", item_properties)
         self.assertEqual(item_properties["approval_status"]["enum"], ["APPROVED", "CORRECTED"])
+        self.assertIn("segment_ids", item_properties)
+
+    def test_confirmation_item_tracks_group_segment_membership(self) -> None:
+        schema_module = _load_module_or_fail(self, "app.services.interview_schema")
+        if schema_module is None:
+            return
+
+        confirmation_item = getattr(schema_module, "ConfirmationItem", None)
+        self.assertIsNotNone(confirmation_item)
+        if confirmation_item is None:
+            return
+
+        item = confirmation_item.model_validate(
+            {
+                "group_id": "group-egg-curry",
+                "primary_segment_id": "seg-egg-1",
+                "segment_id": "seg-egg-1",
+                "segment_ids": ["seg-egg-2", "seg-egg-1", "seg-egg-2"],
+                "name": "egg curry with bottle gourd",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+            }
+        )
+
+        self.assertEqual(item.segment_ids, ["seg-egg-2", "seg-egg-1"])
 
     def test_confirmation_item_requires_approval_status(self) -> None:
         schema_module = _load_module_or_fail(self, "app.services.interview_schema")
@@ -124,14 +150,28 @@ class InterviewTurnManagerContractTests(unittest.IsolatedAsyncioTestCase):
             result = await run_interview_turn(
                 authoritative_state={
                     "meal_id": "meal-1",
-                    "unresolved_targets": [{"group_id": "group-egg-curry"}],
-                    "approval_candidates": [{"group_id": "group-pita"}],
+                    "unresolved_targets": [
+                        {
+                            "group_id": "group-egg-curry",
+                            "primary_segment_id": "seg-egg-1",
+                            "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                        }
+                    ],
+                    "approval_candidates": [
+                        {
+                            "group_id": "group-pita",
+                            "primary_segment_id": "seg-bread-1",
+                            "segment_ids": ["seg-bread-1"],
+                        }
+                    ],
                 },
                 transcript=[{"role": "assistant", "content": "What is the curry?"}],
                 latest_user_text="It's bottle gourd.",
             )
 
         self.assertEqual(result.turn_action, "ready_to_confirm")
+        self.assertEqual(result.confirmation_items[0].segment_ids, ["seg-egg-1", "seg-egg-2"])
+        self.assertEqual(result.confirmation_items[1].segment_ids, ["seg-bread-1"])
         self.assertEqual(llm_client.chat_completion.await_count, 2)
 
     async def test_invalid_ready_to_confirm_fails_closed_without_mutating_state(self) -> None:

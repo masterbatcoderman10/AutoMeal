@@ -64,10 +64,11 @@ async def run_interview_turn(
             ),
         )
         try:
-            return parse_interview_turn_response_payload(
+            result = parse_interview_turn_response_payload(
                 response,
                 active_group_ids=active_group_ids,
             )
+            return _with_authoritative_segment_ids(result, authoritative_state)
         except InterviewTurnValidationError as exc:
             repair_response = await _run_repair_completion(
                 llm=llm,
@@ -78,10 +79,11 @@ async def run_interview_turn(
                 raw_response=response,
                 validation_error=exc,
             )
-            return parse_interview_turn_response_payload(
+            repaired = parse_interview_turn_response_payload(
                 repair_response,
                 active_group_ids=active_group_ids,
             )
+            return _with_authoritative_segment_ids(repaired, authoritative_state)
 
 
 async def _run_chat_completion(
@@ -130,6 +132,7 @@ async def _run_repair_completion(
                 "Repair this interview turn into strict JSON. "
                 "Choose exactly one turn_action: continue_interview, need_clarification, or ready_to_confirm. "
                 "If you choose ready_to_confirm, include one confirmation item for every active group id in the authoritative state. "
+                "Each confirmation item must include segment_ids copied from that active group. "
                 "Do not invent nutrition facts or mutate state. Return JSON only."
             ),
         },
@@ -175,6 +178,54 @@ def _active_group_ids(authoritative_state: Mapping[str, Any]) -> list[str]:
     return group_ids
 
 
+def _active_group_segment_ids(authoritative_state: Mapping[str, Any]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for key in ("unresolved_targets", "approval_candidates"):
+        for item in authoritative_state.get(key) or []:
+            if not isinstance(item, Mapping):
+                continue
+            group_id = str(item.get("group_id") or "").strip()
+            if not group_id:
+                continue
+            segment_ids: list[str] = []
+            raw_segment_ids = item.get("segment_ids")
+            if isinstance(raw_segment_ids, list):
+                for raw_segment_id in raw_segment_ids:
+                    segment_id = str(raw_segment_id or "").strip()
+                    if segment_id and segment_id not in segment_ids:
+                        segment_ids.append(segment_id)
+            for field_name in ("primary_segment_id", "segment_id"):
+                segment_id = str(item.get(field_name) or "").strip()
+                if segment_id and segment_id not in segment_ids:
+                    segment_ids.append(segment_id)
+            if segment_ids:
+                current = groups.setdefault(group_id, [])
+                for segment_id in segment_ids:
+                    if segment_id not in current:
+                        current.append(segment_id)
+    return groups
+
+
+def _with_authoritative_segment_ids(
+    result: InterviewTurnResult,
+    authoritative_state: Mapping[str, Any],
+) -> InterviewTurnResult:
+    if result.turn_action != "ready_to_confirm":
+        return result
+    group_segment_ids = _active_group_segment_ids(authoritative_state)
+    if not group_segment_ids:
+        return result
+
+    confirmation_items = []
+    for item in result.confirmation_items:
+        segment_ids = list(item.segment_ids)
+        for segment_id in group_segment_ids.get(item.group_id, []):
+            if segment_id not in segment_ids:
+                segment_ids.append(segment_id)
+        confirmation_items.append(item.model_copy(update={"segment_ids": segment_ids}))
+    return result.model_copy(update={"confirmation_items": confirmation_items})
+
+
 def _build_turn_messages(
     *,
     authoritative_state: Mapping[str, Any],
@@ -189,7 +240,8 @@ def _build_turn_messages(
                 "Use the authoritative meal state to resolve natural-language food clarification replies. "
                 "Return strict JSON only. Ask concise follow-ups. "
                 "Do not invent nutrition facts. Do not write database state. "
-                "Fail closed instead of guessing when the user's reply is insufficient."
+                "Fail closed instead of guessing when the user's reply is insufficient. "
+                "For ready_to_confirm, copy each active group's segment_ids into its confirmation item."
             ),
         },
         {

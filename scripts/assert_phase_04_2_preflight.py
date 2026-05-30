@@ -23,6 +23,7 @@ IMPORT_PROBE = (
     "app.services.reasoning_service",
     "bot.handlers",
 )
+SUPPORTED_PYTHON = {(3, 12), (3, 13)}
 
 
 def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -69,8 +70,12 @@ def _assert_python_version() -> None:
         ]
     )
     payload = json.loads(version_probe.stdout.strip() or "{}")
-    if payload.get("major") != 3 or payload.get("minor") != 12:
-        raise SystemExit(f"Expected .venv interpreter to be Python 3.12, got: {version_probe.stdout.strip()}")
+    version = (payload.get("major"), payload.get("minor"))
+    if version not in SUPPORTED_PYTHON:
+        expected = ", ".join(f"{major}.{minor}" for major, minor in sorted(SUPPORTED_PYTHON))
+        raise SystemExit(
+            f"Expected .venv interpreter to be Python {expected}, got: {version_probe.stdout.strip()}"
+        )
 
 
 def _run_preflight_suite() -> None:

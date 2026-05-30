@@ -59,6 +59,25 @@ def _grounding_confirmation_items(state: object) -> list[dict]:
     return [dict(item) for item in items if isinstance(item, dict)]
 
 
+def _grounding_confirmation_items_by_segment(state: object) -> dict[str, dict]:
+    confirmation_items: dict[str, dict] = {}
+    for item in _grounding_confirmation_items(state):
+        segment_ids: list[str] = []
+        raw_segment_ids = item.get("segment_ids")
+        if isinstance(raw_segment_ids, list):
+            for raw_segment_id in raw_segment_ids:
+                segment_id = str(raw_segment_id or "").strip()
+                if segment_id and segment_id not in segment_ids:
+                    segment_ids.append(segment_id)
+        for field_name in ("segment_id", "primary_segment_id"):
+            segment_id = str(item.get(field_name) or "").strip()
+            if segment_id and segment_id not in segment_ids:
+                segment_ids.append(segment_id)
+        for segment_id in segment_ids:
+            confirmation_items.setdefault(segment_id, item)
+    return confirmation_items
+
+
 def _normalize_portion_bucket(value: str | None) -> str:
     if not isinstance(value, str):
         return "STANDARD"
@@ -157,11 +176,7 @@ def _rebuild_grounding_match_results(
     if not segments:
         return [], ["no-segments"]
     state = getattr(meal, "reasoning_state_json", None)
-    confirmation_items = {
-        str(item.get("segment_id")): item
-        for item in _grounding_confirmation_items(state)
-        if item.get("segment_id") is not None
-    }
+    confirmation_items = _grounding_confirmation_items_by_segment(state)
     rebuilt: list[tuple[MealSegment, matching_service.SegmentMatchResult]] = []
     missing_segments: list[str] = []
     for segment in segments:

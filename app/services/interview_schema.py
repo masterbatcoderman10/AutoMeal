@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.services.grounding_stub import normalize_source_type
 
@@ -14,6 +14,7 @@ class ConfirmationItem(BaseModel):
     group_id: str
     primary_segment_id: str
     segment_id: str
+    segment_ids: list[str] = Field(default_factory=list)
     name: str
     source_type: Literal["HOME", "PACKAGED", "RESTAURANT"]
     portion_bucket: Literal["SMALL", "STANDARD", "LARGE"]
@@ -44,6 +45,31 @@ class ConfirmationItem(BaseModel):
             return value
         stripped = value.strip()
         return stripped or None
+
+    @field_validator("segment_ids", mode="before")
+    @classmethod
+    def _normalize_segment_ids(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("segment_ids must be a list")
+        segment_ids: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            segment_id = str(item).strip()
+            if segment_id and segment_id not in segment_ids:
+                segment_ids.append(segment_id)
+        return segment_ids
+
+    @model_validator(mode="after")
+    def _ensure_segment_membership(self) -> "ConfirmationItem":
+        segment_ids = list(self.segment_ids)
+        for segment_id in (self.primary_segment_id, self.segment_id):
+            if segment_id and segment_id not in segment_ids:
+                segment_ids.append(segment_id)
+        self.segment_ids = segment_ids
+        return self
 
     @field_validator("name")
     @classmethod

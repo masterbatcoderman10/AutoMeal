@@ -42,48 +42,96 @@ async def run_interview_turn(
     app_settings = _resolve_settings(settings)
     llm = llm_client or get_llm_client()
     active_group_ids = _active_group_ids(authoritative_state)
+    models_to_try = _models_to_try(app_settings)
+    bounded_transcript = list(transcript[-6:])
+    messages = _build_turn_messages(
+        authoritative_state=authoritative_state,
+        transcript=transcript,
+        latest_user_text=latest_user_text,
+    )
 
     with tracing_service.maybe_start_trace(
         name="interview_turn",
         input={
+            "meal_id": authoritative_state.get("meal_id"),
+            "models": models_to_try,
             "authoritative_state": authoritative_state,
-            "transcript": list(transcript[-6:]),
+            "transcript": bounded_transcript,
             "latest_user_text": latest_user_text,
             "active_group_ids": active_group_ids,
+            "messages": messages,
+            "response_format": interview_turn_response_format(),
         },
-        metadata={"meal_id": authoritative_state.get("meal_id"), "active_group_ids": active_group_ids},
+        metadata={
+            "meal_id": authoritative_state.get("meal_id"),
+            "active_group_ids": active_group_ids,
+            "models": models_to_try,
+        },
         span_name="interview_turn",
-    ):
-        response = await _run_chat_completion(
+    ) as trace:
+        response, selected_model = await _run_chat_completion(
             llm=llm,
-            models=_models_to_try(app_settings),
-            messages=_build_turn_messages(
-                authoritative_state=authoritative_state,
-                transcript=transcript,
-                latest_user_text=latest_user_text,
-            ),
+            models=models_to_try,
+            messages=messages,
         )
         try:
             result = parse_interview_turn_response_payload(
                 response,
                 active_group_ids=active_group_ids,
             )
-            return _with_authoritative_segment_ids(result, authoritative_state)
+            normalized = _with_authoritative_segment_ids(result, authoritative_state)
+            _end_trace(
+                trace,
+                output={
+                    "selected_model": selected_model,
+                    "raw_response": response,
+                    "repair_model": None,
+                    "repair_response": None,
+                    "parsed_response": normalized.model_dump(mode="json"),
+                },
+            )
+            return normalized
         except InterviewTurnValidationError as exc:
-            repair_response = await _run_repair_completion(
+            repair_response, repair_model = await _run_repair_completion(
                 llm=llm,
-                models=_models_to_try(app_settings),
+                models=models_to_try,
                 authoritative_state=authoritative_state,
                 transcript=transcript,
                 latest_user_text=latest_user_text,
                 raw_response=response,
                 validation_error=exc,
             )
-            repaired = parse_interview_turn_response_payload(
-                repair_response,
-                active_group_ids=active_group_ids,
-            )
-            return _with_authoritative_segment_ids(repaired, authoritative_state)
+            try:
+                repaired = parse_interview_turn_response_payload(
+                    repair_response,
+                    active_group_ids=active_group_ids,
+                )
+                normalized = _with_authoritative_segment_ids(repaired, authoritative_state)
+                _end_trace(
+                    trace,
+                    output={
+                        "selected_model": selected_model,
+                        "raw_response": response,
+                        "repair_model": repair_model,
+                        "repair_response": repair_response,
+                        "parsed_response": normalized.model_dump(mode="json"),
+                    },
+                )
+                return normalized
+            except InterviewTurnValidationError as repair_exc:
+                _end_trace(
+                    trace,
+                    output={
+                        "selected_model": selected_model,
+                        "raw_response": response,
+                        "repair_model": repair_model,
+                        "repair_response": repair_response,
+                        "parsed_response": None,
+                        "validation_error": str(exc),
+                        "repair_validation_error": str(repair_exc),
+                    },
+                )
+                raise
 
 
 async def _run_chat_completion(
@@ -91,11 +139,11 @@ async def _run_chat_completion(
     llm: Any,
     models: Sequence[str],
     messages: Sequence[Mapping[str, Any]],
-) -> Mapping[str, Any]:
+) -> tuple[Mapping[str, Any], str]:
     last_error: Exception | None = None
     for index, model in enumerate(models):
         try:
-            return await llm.chat_completion(
+            response = await llm.chat_completion(
                 model=model,
                 messages=[dict(message) for message in messages],
                 response_format=interview_turn_response_format(),
@@ -108,6 +156,7 @@ async def _run_chat_completion(
                 },
                 max_tokens=1600,
             )
+            return response, model
         except Exception as exc:
             last_error = exc
             if index == len(models) - 1:
@@ -124,7 +173,7 @@ async def _run_repair_completion(
     latest_user_text: str,
     raw_response: Mapping[str, Any],
     validation_error: Exception,
-) -> Mapping[str, Any]:
+) -> tuple[Mapping[str, Any], str]:
     repair_messages = [
         {
             "role": "system",
@@ -155,6 +204,12 @@ async def _run_repair_completion(
         models=models,
         messages=repair_messages,
     )
+
+
+def _end_trace(trace: Any, *, output: Mapping[str, Any] | dict[str, Any]) -> None:
+    end = getattr(trace, "end", None)
+    if callable(end):
+        end(output=dict(output))
 
 
 def _models_to_try(app_settings: Any) -> list[str]:

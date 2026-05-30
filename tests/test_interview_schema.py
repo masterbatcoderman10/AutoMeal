@@ -107,6 +107,80 @@ class InterviewSchemaContractTests(unittest.TestCase):
 
 
 class InterviewTurnManagerContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_interview_trace_captures_model_context_and_outputs(self) -> None:
+        manager_module = _load_module_or_fail(self, "app.services.interview_turn_manager")
+        if manager_module is None:
+            return
+
+        run_interview_turn = getattr(manager_module, "run_interview_turn", None)
+        self.assertTrue(callable(run_interview_turn))
+        if not callable(run_interview_turn):
+            return
+
+        raw_response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"turn_action":"continue_interview","assistant_prompt":"What kind of curry is it?",'
+                            '"clarification_reason":"Need the curry vegetable.","conversation_summary":"Asked curry detail.",'
+                            '"confirmation_items":[]}'
+                        )
+                    }
+                }
+            ]
+        }
+        llm_client = SimpleNamespace(chat_completion=AsyncMock(return_value=raw_response))
+
+        class FakeTrace:
+            def __init__(self) -> None:
+                self.ended = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def end(self, *, output=None, error=None) -> None:
+                self.ended.append({"output": output, "error": error})
+
+        fake_trace = FakeTrace()
+        settings = SimpleNamespace(
+            INTERVIEW_MODEL="interview-primary",
+            INTERVIEW_FALLBACK_MODEL="interview-fallback",
+        )
+        authoritative_state = {
+            "meal_id": "meal-trace",
+            "unresolved_targets": [{"group_id": "group-curry"}],
+            "approval_candidates": [{"group_id": "group-pita"}],
+        }
+        transcript = [
+            {"role": "assistant", "content": "Please clarify the curry."},
+            {"role": "user", "content": "Maybe bottle gourd."},
+        ]
+
+        with patch.object(manager_module.tracing_service, "maybe_start_trace", return_value=fake_trace) as start_trace:
+            result = await run_interview_turn(
+                authoritative_state=authoritative_state,
+                transcript=transcript,
+                latest_user_text="It's bottle gourd.",
+                settings=settings,
+                llm_client=llm_client,
+            )
+
+        trace_input = start_trace.call_args.kwargs["input"]
+        self.assertEqual(trace_input["meal_id"], "meal-trace")
+        self.assertEqual(trace_input["models"], ["interview-primary", "interview-fallback"])
+        self.assertEqual(trace_input["authoritative_state"], authoritative_state)
+        self.assertEqual(trace_input["transcript"], transcript)
+        self.assertEqual(trace_input["latest_user_text"], "It's bottle gourd.")
+        self.assertEqual(fake_trace.ended[0]["output"]["raw_response"], raw_response)
+        self.assertEqual(fake_trace.ended[0]["output"]["selected_model"], "interview-primary")
+        self.assertEqual(fake_trace.ended[0]["output"]["parsed_response"]["turn_action"], "continue_interview")
+        self.assertIsNone(fake_trace.ended[0]["output"]["repair_response"])
+        self.assertEqual(result.turn_action, "continue_interview")
+
     async def test_single_repair_retry_recovers_malformed_first_pass(self) -> None:
         manager_module = _load_module_or_fail(self, "app.services.interview_turn_manager")
         if manager_module is None:

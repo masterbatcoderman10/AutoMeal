@@ -28,7 +28,18 @@ Wait for response before continuing.
 ```bash
 # SDK resolution: prefer local node shim, fall back to global gsd-sdk (#3668)
 _GSD_SHIM_NAME="gsd-tools.cjs"
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/${_GSD_SHIM_NAME}"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/${_GSD_SHIM_NAME}"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/${_GSD_SHIM_NAME}" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/${_GSD_SHIM_NAME}"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/${_GSD_SHIM_NAME}" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/${_GSD_SHIM_NAME}"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/${_GSD_SHIM_NAME}" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/${_GSD_SHIM_NAME}"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/${_GSD_SHIM_NAME}"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then

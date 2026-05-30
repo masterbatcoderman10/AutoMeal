@@ -3,7 +3,7 @@ Verify threat mitigations for a completed phase. Confirm PLAN.md threat register
 </purpose>
 
 <required_reading>
-@.agent/get-shit-done/references/ui-brand.md
+@.agents/get-shit-done/references/ui-brand.md
 </required_reading>
 
 <available_agent_types>
@@ -17,7 +17,18 @@ Valid GSD subagent types (use exact names — do not fall back to 'general-purpo
 
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -105,7 +116,7 @@ Call AskUserQuestion with threat table and options:
 
 ```
 Agent(
-  prompt="Read .agent/agents/gsd-security-auditor.md for instructions.\n\n" +
+  prompt="Read .agents/agents/gsd-security-auditor.md for instructions.\n\n" +
     "<files_to_read>{PLAN, SUMMARY, impl files, SECURITY.md}</files_to_read>" +
     "<threat_register>{threat register}</threat_register>" +
     "<config>asvs_level: {SECURITY_ASVS}, block_on: {SECURITY_BLOCK_ON}</config>" +
@@ -127,7 +138,7 @@ Handle return:
 ## 6. Write/Update SECURITY.md
 
 **State B (create):**
-1. Read template from `.agent/get-shit-done/templates/SECURITY.md`
+1. Read template from `.agents/get-shit-done/templates/SECURITY.md`
 2. Fill: frontmatter, threat register, accepted risks, audit trail
 3. Write to `${PHASE_DIR}/${PADDED_PHASE}-SECURITY.md`
 

@@ -50,7 +50,7 @@ When delegating to agents, the orchestrator cannot verify semantic correctness o
 
 ## MCP Tool Schema Cost (Harness Concern)
 
-Every enabled MCP server injects its tool schema into **every turn**, regardless of whether you call any of its tools. Heavyweight servers can cost 20k+ tokens per turn each — often dwarfing whatever GSD itself can save through `model_profile` tuning. This is a Claude Code harness concern, not a GSD concern: GSD does **not** manage MCP enablement. The toggle lives in `.agent/settings.json` under `enabledMcpjsonServers` and `disabledMcpjsonServers`.
+Every enabled MCP server injects its tool schema into **every turn**, regardless of whether you call any of its tools. Heavyweight servers can cost 20k+ tokens per turn each — often dwarfing whatever GSD itself can save through `model_profile` tuning. This is a Claude Code harness concern, not a GSD concern: GSD does **not** manage MCP enablement. The toggle lives in `.agents/settings.json` under `enabledMcpjsonServers` and `disabledMcpjsonServers`.
 
 ### Why this is the biggest cost lever you don't own
 
@@ -69,7 +69,7 @@ Each item disabled removes its schema from every subsequent turn for the rest of
 
 ### How to toggle
 
-The keys live in `.agent/settings.json` (project) or `.agent/settings.json` (global) — **not** in `.planning/config.json`:
+The keys live in `.agents/settings.json` (project) or `.agents/settings.json` (global) — **not** in `.planning/config.json`:
 
 ```json
 {

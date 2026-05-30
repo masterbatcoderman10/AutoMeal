@@ -5,7 +5,7 @@ UI-SPEC.md locks spacing, typography, color, copywriting, and design system deci
 </purpose>
 
 <required_reading>
-@.agent/get-shit-done/references/ui-brand.md
+@.agents/get-shit-done/references/ui-brand.md
 </required_reading>
 
 <available_agent_types>
@@ -20,7 +20,18 @@ Valid GSD subagent types (use exact names — do not fall back to 'general-purpo
 
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -42,7 +53,7 @@ Parse JSON for: `phase_dir`, `phase_number`, `phase_name`, `phase_slug`, `padded
 
 Detect sketch findings:
 ```bash
-SKETCH_FINDINGS_PATH=$(ls ./.agent/skills/sketch-findings-*/SKILL.md 2>/dev/null | head -1 || true)
+SKETCH_FINDINGS_PATH=$(ls ./.agents/skills/sketch-findings-*/SKILL.md 2>/dev/null | head -1 || true)
 ```
 
 Resolve UI agent models:
@@ -134,7 +145,7 @@ Display:
 Build prompt:
 
 ```markdown
-Read .agent/agents/gsd-ui-researcher.md for instructions.
+Read .agents/agents/gsd-ui-researcher.md for instructions.
 
 <objective>
 Create UI design contract for Phase {phase_number}: {phase_name}
@@ -154,7 +165,7 @@ ${AGENT_SKILLS_UI}
 
 <output>
 Write to: {phase_dir}/{padded_phase}-UI-SPEC.md
-Template: .agent/get-shit-done/templates/UI-SPEC.md
+Template: .agents/get-shit-done/templates/UI-SPEC.md
 </output>
 
 <config>
@@ -199,7 +210,7 @@ Display:
 Build prompt:
 
 ```markdown
-Read .agent/agents/gsd-ui-checker.md for instructions.
+Read .agents/agents/gsd-ui-checker.md for instructions.
 
 <objective>
 Validate UI design contract for Phase {phase_number}: {phase_name}

@@ -1,5 +1,7 @@
 name = "gsd-intel-updater"
 description = "Analyzes codebase and writes structured intel files to .planning/intel/."
+model = "gpt-5.4"
+model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = '''
 <required_reading>

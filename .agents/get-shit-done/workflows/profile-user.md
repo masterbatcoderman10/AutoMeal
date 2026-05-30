@@ -8,9 +8,9 @@ This workflow wires Phase 1 (session pipeline) and Phase 2 (profiling engine) in
 Read all files referenced by the invoking prompt's execution_context before starting.
 
 Key references:
-- @.agent/get-shit-done/references/ui-brand.md (display patterns)
-- @.agent/agents/gsd-user-profiler.md (profiler agent definition)
-- @.agent/get-shit-done/references/user-profiling.md (profiling reference doc)
+- @.agents/get-shit-done/references/ui-brand.md (display patterns)
+- @.agents/agents/gsd-user-profiler.md (profiler agent definition)
+- @.agents/get-shit-done/references/user-profiling.md (profiling reference doc)
 </required_reading>
 
 <process>
@@ -24,7 +24,7 @@ Parse flags from $ARGUMENTS:
 Check for existing profile:
 
 ```bash
-PROFILE_PATH=".agent/get-shit-done/USER-PROFILE.md"
+PROFILE_PATH=".agents/get-shit-done/USER-PROFILE.md"
 [ -f "$PROFILE_PATH" ] && echo "EXISTS" || echo "NOT_FOUND"
 ```
 
@@ -48,7 +48,7 @@ If "Cancel": Display "No changes made." and exit.
 
 Backup existing profile:
 ```bash
-cp ".agent/get-shit-done/USER-PROFILE.md" ".agent/USER-PROFILE.backup.md"
+cp ".agents/get-shit-done/USER-PROFILE.md" ".agents/USER-PROFILE.backup.md"
 ```
 
 Display: "Re-analyzing your sessions to update your profile."
@@ -92,7 +92,7 @@ Your recent Claude Code sessions, looking for patterns in these
 
 ✓ Reads session files locally (read-only, nothing modified)
 ✓ Analyzes message patterns (not content meaning)
-✓ Stores profile at .agent/get-shit-done/USER-PROFILE.md
+✓ Stores profile at .agents/get-shit-done/USER-PROFILE.md
 ✗ Nothing is sent to external services
 ✗ Sensitive content (API keys, passwords) is automatically excluded
 ```
@@ -131,7 +131,18 @@ Display: "◆ Scanning sessions..."
 Run session scan:
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -174,13 +185,13 @@ Display: "◆ Analyzing patterns..."
 
 Use the Task tool to spawn the `gsd-user-profiler` agent. Provide it with:
 - The sampled JSONL file path from profile-sample output
-- The user-profiling reference doc at `.agent/get-shit-done/references/user-profiling.md`
+- The user-profiling reference doc at `.agents/get-shit-done/references/user-profiling.md`
 
 The agent prompt should follow this structure:
 ```
 Read the profiling reference document and the sampled session messages, then analyze the developer's behavioral patterns across all 8 dimensions.
 
-Reference: @.agent/get-shit-done/references/user-profiling.md
+Reference: @.agents/get-shit-done/references/user-profiling.md
 Session data: @{temp_dir}/profile-sample.jsonl
 
 Analyze these messages and return your analysis in the <analysis> JSON format specified in the reference document.
@@ -285,7 +296,7 @@ Display: "◆ Writing profile..."
 $GSD_SDK query write-profile --input "$ANALYSIS_PATH" --json
 ```
 
-Display: "✓ Profile written to .agent/get-shit-done/USER-PROFILE.md"
+Display: "✓ Profile written to .agents/get-shit-done/USER-PROFILE.md"
 
 ---
 
@@ -348,9 +359,9 @@ Use AskUserQuestion with multiSelect:
 - options (ALL pre-selected by default):
   - "/gsd-dev-preferences command file" -- "Load your preferences in any session"
   - "GEMINI.md profile section" -- "Add profile to this project's GEMINI.md"
-  - "Global GEMINI.md" -- "Add profile to .agent/GEMINI.md for all projects"
+  - "Global GEMINI.md" -- "Add profile to .agents/GEMINI.md for all projects"
 
-**If no artifacts selected:** Display "No artifacts generated. Your profile is saved at .agent/get-shit-done/USER-PROFILE.md" and jump to step 10.
+**If no artifacts selected:** Display "No artifacts generated. Your profile is saved at .agents/get-shit-done/USER-PROFILE.md" and jump to step 10.
 
 ---
 
@@ -364,7 +375,7 @@ Generate selected artifacts sequentially (file I/O is fast, no benefit from para
 $GSD_SDK query generate-dev-preferences --analysis "$ANALYSIS_PATH" --json
 ```
 
-Display: "✓ Generated /gsd-dev-preferences at .agent/skills/gsd-dev-preferences/SKILL.md"
+Display: "✓ Generated /gsd-dev-preferences at .agents/skills/gsd-dev-preferences/SKILL.md"
 
 **For GEMINI.md profile section (if selected):**
 
@@ -380,7 +391,7 @@ Display: "✓ Added profile section to GEMINI.md"
 $GSD_SDK query generate-claude-profile --analysis "$ANALYSIS_PATH" --global --json
 ```
 
-Display: "✓ Added profile section to .agent/GEMINI.md"
+Display: "✓ Added profile section to .agents/GEMINI.md"
 
 **Error handling:** If any `gsd-sdk query` or gsd-tools.cjs call fails, display the error message and use AskUserQuestion to offer "Retry" or "Skip this artifact". On retry, re-run the command. On skip, continue to next artifact.
 
@@ -394,7 +405,7 @@ Read both old backup and new analysis to compare dimension ratings/confidence.
 
 Read the backed-up profile:
 ```bash
-BACKUP_PATH=".agent/USER-PROFILE.backup.md"
+BACKUP_PATH=".agents/USER-PROFILE.backup.md"
 ```
 
 Compare each dimension's rating and confidence between old and new. Display diff table showing only changed dimensions:
@@ -417,15 +428,15 @@ If nothing changed: Display "No changes detected -- your profile is already up t
  GSD > PROFILE COMPLETE ✓
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Your profile:    .agent/get-shit-done/USER-PROFILE.md
+Your profile:    .agents/get-shit-done/USER-PROFILE.md
 ```
 
 Then list paths for each generated artifact:
 ```
 Artifacts:
-  ✓ /gsd-dev-preferences   .agent/skills/gsd-dev-preferences/SKILL.md
+  ✓ /gsd-dev-preferences   .agents/skills/gsd-dev-preferences/SKILL.md
   ✓ GEMINI.md section       ./GEMINI.md
-  ✓ Global GEMINI.md        .agent/GEMINI.md
+  ✓ Global GEMINI.md        .agents/GEMINI.md
 ```
 
 (Only show artifacts that were actually generated.)

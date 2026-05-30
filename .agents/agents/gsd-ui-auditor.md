@@ -43,7 +43,7 @@ Before auditing, discover project context:
 
 **Project instructions:** Read `./GEMINI.md` if it exists in the working directory. Follow all project-specific guidelines.
 
-**Project skills:** Check `.agent/skills/` or `.agents/skills/` directory if either exists:
+**Project skills:** Check `.agents/skills/` or `.agents/skills/` directory if either exists:
 1. List available skills (subdirectories)
 2. Read `SKILL.md` for each skill
 3. 

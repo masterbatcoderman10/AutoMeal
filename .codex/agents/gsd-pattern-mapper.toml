@@ -1,5 +1,7 @@
 name = "gsd-pattern-mapper"
 description = "Analyzes codebase for existing patterns and produces PATTERNS.md mapping new files to closest analogs. Read-only codebase analysis spawned by $gsd-plan-phase orchestrator before planning."
+model = "gpt-5.3-codex-spark"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 developer_instructions = '''
 <role>

@@ -6,7 +6,29 @@ error here MUST fall through and continue to `verify_phase_goal`. The phase
 is never failed by this gate.
 
 ```bash
-DRIFT=$(gsd-tools verify codebase-drift 2>/dev/null || echo '{"skipped":true,"reason":"sdk-failed"}')
+# SDK resolution: prefer project-local runtime bundles before global gsd-sdk
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
+if [ -f "$GSD_TOOLS" ]; then
+  GSD_SDK="node $GSD_TOOLS"
+elif command -v gsd-sdk >/dev/null 2>&1; then
+  GSD_SDK="gsd-sdk"
+else
+  echo "ERROR: gsd-sdk not found on PATH and $GSD_TOOLS does not exist." >&2
+  echo "Run: npx get-shit-done-cc@latest --claude --local" >&2
+  exit 1
+fi
+DRIFT=$($GSD_SDK query verify codebase-drift 2>/dev/null || echo '{"skipped":true,"reason":"sdk-failed"}')
 ```
 
 Parse JSON for: `skipped`, `reason`, `action_required`, `directive`,

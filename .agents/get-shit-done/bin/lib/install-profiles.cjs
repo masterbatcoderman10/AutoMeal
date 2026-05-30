@@ -411,7 +411,7 @@ const PROFILE_MARKER_NAME = '.gsd-profile';
 /**
  * Read the active profile from a runtime config directory.
  *
- * @param {string} runtimeConfigDir absolute path (e.g. .agent/skills)
+ * @param {string} runtimeConfigDir absolute path (e.g. .agents/skills)
  * @returns {string|null} profile name (e.g. 'core', 'standard', 'core,audit') or null
  */
 function readActiveProfile(runtimeConfigDir) {
@@ -430,7 +430,7 @@ function readActiveProfile(runtimeConfigDir) {
 /**
  * Persist the active profile to a runtime config directory.
  *
- * @param {string} runtimeConfigDir absolute path (e.g. .agent/skills)
+ * @param {string} runtimeConfigDir absolute path (e.g. .agents/skills)
  * @param {string} profileName e.g. 'core', 'standard', 'full'
  */
 function writeActiveProfile(runtimeConfigDir, profileName) {

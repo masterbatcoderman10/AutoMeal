@@ -8,7 +8,7 @@
 ## Dispatch
 
 ```
-Read @.agent/get-shit-done/workflows/discuss-phase-power.md
+Read @.agents/get-shit-done/workflows/discuss-phase-power.md
 ```
 
 Execute it end-to-end. Do not continue with the standard interactive steps.

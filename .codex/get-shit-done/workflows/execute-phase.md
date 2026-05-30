@@ -67,7 +67,18 @@ Load all context in one call:
 
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -103,7 +114,7 @@ fi
 # Sweep orphaned locked worktrees from prior crashed sessions before spawning executors (#3707).
 [ "$USE_WORKTREES" != "false" ] && $GSD_SDK query worktree.reap-orphans 2>/dev/null || true
 ```
-Codex subagents run in isolated forked workspaces. Treat `isolation="worktree"` as mandatory for MealTracker executor dispatch so plan agents do not write concurrently to the main checkout.
+Codex subagents do **not** automatically get git-worktree isolation from the runtime. For MealTracker, `workflow.use_worktrees=true` means the orchestrator must create an explicit `git worktree add -b worktree-agent-*` checkout per executor plan, then hand that `worktree_root`, branch, and expected base to the spawned agent. Conversation isolation is not checkout isolation.
 
 If the project uses git submodules, worktree isolation is unsafe **only when a plan touches a submodule path** — the executor commit protocol cannot correctly handle submodule commits inside isolated worktrees. The previous behavior unconditionally disabled worktree isolation whenever `.gitmodules` existed, which penalised every plan in a submodule project even when the plan was nowhere near a submodule. Compute submodule paths once and intersect them per-plan with the plan's declared `files_modified` frontmatter.
 
@@ -537,6 +548,13 @@ increases monotonically across waves. `{status}` is `complete` (success),
      printf '{"worktrees":[]}\n' > "$WAVE_WORKTREE_MANIFEST"
      export WAVE_WORKTREE_MANIFEST
    fi
+   PLAN_SLUG=$(printf '%s' "{plan_id}" | tr -cs 'A-Za-z0-9._-' '-')
+   WORKTREE_BRANCH="worktree-agent-${PHASE_NUMBER}-${PLAN_SLUG}-$$"
+   WORKTREE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gsd-executor-${PHASE_NUMBER}-${PLAN_SLUG}-XXXXXX")
+   git worktree add -b "$WORKTREE_BRANCH" "$WORKTREE_ROOT" "$EXPECTED_BASE" || {
+     echo "FATAL: git worktree add failed for {plan_id}" >&2
+     exit 1
+   }
    ```
 
    **Sequential dispatch for parallel execution (waves with 2+ agents):**
@@ -557,7 +575,6 @@ increases monotonically across waves. `{status}` is `complete` (success),
      # When executor_model is "inherit", omit this parameter entirely so
      # Claude Code inherits the orchestrator model automatically.
      model="{executor_model}",  # omit this line when executor_model == "inherit"
-     isolation="worktree",
      prompt="
        <objective>
        Execute plan {plan_number} of phase {phase_number}-{phase_name}.
@@ -565,43 +582,50 @@ increases monotonically across waves. `{status}` is `complete` (success),
        Do NOT update STATE.md or ROADMAP.md — the orchestrator owns those writes after all worktree agents in the wave complete.
        </objective>
 
+       <manual_worktree>
+       mode: explicit_git_worktree
+       worktree_root: {WORKTREE_ROOT}
+       worktree_branch: {WORKTREE_BRANCH}
+       expected_base: {EXPECTED_BASE}
+       Rules:
+       - Treat `worktree_root` as the only repo root for implementation work.
+       - Prefix every shell command that inspects, edits, stages, tests, or commits project files with `cd \"{WORKTREE_ROOT}\" &&`.
+       - For Read/Edit/Write calls on project files, use absolute paths rooted at `{WORKTREE_ROOT}`.
+       - Never read or write implementation files through the spawn cwd checkout.
+       </manual_worktree>
+
        <worktree_branch_check>
-       FIRST ACTION: HEAD assertion MUST run before any reset/checkout. Worktrees
-       spawned by Claude Code's `isolation="worktree"` use the `worktree-agent-<id>`
-       namespace. If HEAD is on a protected ref (main/master/develop/trunk/release/*)
-       or detached, HALT — do NOT self-recover by force-rewinding via `git update-ref`,
-       that destroys concurrent commits in multi-active scenarios (#2924). Only after
-       Step 1 passes is `git reset --hard` safe (#2015 — affects all platforms).
+       FIRST ACTION: assert the handed-off worktree is active before any edit or
+       commit. The orchestrator created a real git worktree on a `worktree-agent-*`
+       branch; do not assume the spawn cwd is isolated.
        ```bash
-       HEAD_REF=$(git symbolic-ref --quiet HEAD || echo "DETACHED")
-       ACTUAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+       HEAD_REF=$(git -C "{WORKTREE_ROOT}" symbolic-ref --quiet HEAD || echo "DETACHED")
+       ACTUAL_BRANCH=$(git -C "{WORKTREE_ROOT}" rev-parse --abbrev-ref HEAD)
        if [ "$HEAD_REF" = "DETACHED" ] || echo "$ACTUAL_BRANCH" | grep -Eq '^(main|master|develop|trunk|release/.*)$'; then
-         echo "FATAL: worktree HEAD on '$ACTUAL_BRANCH' (expected worktree-agent-*); refusing to self-recover via 'git update-ref' (#2924)." >&2
+         echo "FATAL: manual worktree HEAD on '$ACTUAL_BRANCH' (expected worktree-agent-*); refusing to self-recover via 'git update-ref' (#2924)." >&2
          exit 1
        fi
-       if ! echo "$ACTUAL_BRANCH" | grep -Eq '^worktree-agent-[A-Za-z0-9._/-]+$'; then
-         echo "FATAL: worktree HEAD '$ACTUAL_BRANCH' is not in the worktree-agent-* namespace; refusing to commit (#2924)." >&2
+       if [ "$ACTUAL_BRANCH" != "{WORKTREE_BRANCH}" ]; then
+         echo "FATAL: manual worktree HEAD '$ACTUAL_BRANCH' does not match expected branch '{WORKTREE_BRANCH}'." >&2
          exit 1
        fi
-       ACTUAL_BASE=$(git merge-base HEAD {EXPECTED_BASE})
+       ACTUAL_BASE=$(git -C "{WORKTREE_ROOT}" merge-base HEAD {EXPECTED_BASE})
        if [ "$ACTUAL_BASE" != "{EXPECTED_BASE}" ]; then
-         git reset --hard {EXPECTED_BASE}
-         [ "$(git rev-parse HEAD)" != "{EXPECTED_BASE}" ] && { echo "ERROR: could not correct worktree base"; exit 1; }
+         git -C "{WORKTREE_ROOT}" reset --hard {EXPECTED_BASE}
+         [ "$(git -C "{WORKTREE_ROOT}" rev-parse HEAD)" != "{EXPECTED_BASE}" ] && { echo "ERROR: could not correct worktree base"; exit 1; }
        fi
        ```
-       Per-commit HEAD/cwd-drift/path-guard: `agents/gsd-executor.md` steps 0/0a/0b + `references/worktree-path-safety.md` (in <execution_context>).
+       Per-commit HEAD/cwd-drift/path-guard: `references/worktree-path-safety.md` (in <execution_context>).
        </worktree_branch_check>
 
        <parallel_execution>
-       You are running as a PARALLEL executor agent in a git worktree. Worktree path safety (cwd-drift, absolute-path guards) is in `worktree-path-safety.md` (loaded below).
+       You are running as a PARALLEL executor agent in an explicitly handed-off git worktree. Worktree path safety (cwd-drift, absolute-path guards) is in `worktree-path-safety.md` (loaded below).
        Run `git commit` normally — hooks run by default. Do NOT pass `--no-verify`
        unless the orchestrator surfaces `workflow.worktree_skip_hooks=true` in this
        prompt; silent bypass violates project AGENTS.md guidance (#2924).
 
-       IMPORTANT: Do NOT modify STATE.md or ROADMAP.md. execute-plan.md
-       auto-detects worktree mode (`.git` is a file, not a directory) and skips
-       shared file updates automatically. The orchestrator updates them centrally
-       after merge.
+       IMPORTANT: Do NOT modify STATE.md or ROADMAP.md. The orchestrator updates
+       shared tracking files centrally after merge.
 
        REQUIRED: SUMMARY.md MUST be committed before you return. In worktree mode the
        git_commit_metadata step in execute-plan.md commits SUMMARY.md and REQUIREMENTS.md
@@ -612,27 +636,27 @@ increases monotonically across waves. `{status}` is `complete` (success),
        </parallel_execution>
 
        <execution_context>
-       @/Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done/workflows/execute-plan.md
-       @/Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done/templates/summary.md
-       @/Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done/references/checkpoints.md
-       @/Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done/references/tdd.md
-       @/Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done/references/worktree-path-safety.md
-       ${CONTEXT_WINDOW < 200000 ? '' : '@/Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done/references/executor-examples.md'}
+       {WORKTREE_ROOT}/.codex/get-shit-done/workflows/execute-plan.md
+       {WORKTREE_ROOT}/.codex/get-shit-done/templates/summary.md
+       {WORKTREE_ROOT}/.codex/get-shit-done/references/checkpoints.md
+       {WORKTREE_ROOT}/.codex/get-shit-done/references/tdd.md
+       {WORKTREE_ROOT}/.codex/get-shit-done/references/worktree-path-safety.md
+       ${CONTEXT_WINDOW < 200000 ? '' : '{WORKTREE_ROOT}/.codex/get-shit-done/references/executor-examples.md'}
        </execution_context>
 
        <files_to_read>
        Read these files at execution start using the Read tool:
-       - {phase_dir}/{plan_file} (Plan)
-       - .planning/PROJECT.md (Project context — core value, requirements, evolution rules)
-       - .planning/STATE.md (State)
-       - .planning/config.json (Config, if exists)
+       - {WORKTREE_ROOT}/{phase_dir}/{plan_file} (Plan)
+       - {WORKTREE_ROOT}/.planning/PROJECT.md (Project context — core value, requirements, evolution rules)
+       - {WORKTREE_ROOT}/.planning/STATE.md (State)
+       - {WORKTREE_ROOT}/.planning/config.json (Config, if exists)
        ${CONTEXT_WINDOW >= 500000 ? `
-       - ${phase_dir}/*-CONTEXT.md (User decisions from discuss-phase — honors locked choices)
-       - ${phase_dir}/*-RESEARCH.md (Technical research — pitfalls and patterns to follow)
+       - {WORKTREE_ROOT}/${phase_dir}/*-CONTEXT.md (User decisions from discuss-phase — honors locked choices)
+       - {WORKTREE_ROOT}/${phase_dir}/*-RESEARCH.md (Technical research — pitfalls and patterns to follow)
        - ${prior_wave_summaries} (SUMMARY.md files from earlier waves in this phase — what was already built)
        ` : ''}
-       - ./AGENTS.md (Project instructions, if exists — follow project-specific guidelines and coding conventions)
-       - .codex/skills/ or .agents/skills/ (Project skills, if either exists — list skills, read SKILL.md for each, follow relevant rules during implementation)
+       - {WORKTREE_ROOT}/AGENTS.md (Project instructions, if exists — follow project-specific guidelines and coding conventions)
+       - {WORKTREE_ROOT}/.codex/skills/ or {WORKTREE_ROOT}/.agents/skills/ (Project skills, if either exists — list skills, read SKILL.md for each, follow relevant rules during implementation)
        </files_to_read>
 
        ${AGENT_SKILLS}
@@ -654,7 +678,7 @@ increases monotonically across waves. `{status}` is `complete` (success),
    )
    ```
 
-   Immediately after each worktree `Agent()` spawn returns metadata, atomically append `{agent_id, worktree_path, branch, expected_base}` to `WAVE_WORKTREE_MANIFEST`. If any field is missing, stop and ask for recovery instead of scanning all agent worktrees.
+   Immediately after each worktree is created, append `{worktree_path, branch, expected_base}` to `WAVE_WORKTREE_MANIFEST`. After the `Agent()` spawn returns metadata, enrich the same manifest entry with `agent_id` when available. If worktree path, branch, or expected base is missing, stop and ask for recovery instead of scanning all agent worktrees.
 
    > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above to spawn executor agent(s), stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
 

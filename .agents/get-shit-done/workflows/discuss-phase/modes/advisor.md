@@ -2,14 +2,14 @@
 
 > **Lazy-loaded and gated.** The parent `workflows/discuss-phase.md` Reads
 > this file ONLY when `ADVISOR_MODE` is true (i.e., when
-> `.agent/get-shit-done/USER-PROFILE.md` exists). Skip the Read
+> `.agents/get-shit-done/USER-PROFILE.md` exists). Skip the Read
 > entirely when no profile is present — that's the inverse of the
 > `--advisor` flag from #2174 (don't pay the cost when unused).
 
 ## Activation
 
 ```bash
-PROFILE_PATH=".agent/get-shit-done/USER-PROFILE.md"
+PROFILE_PATH=".agents/get-shit-done/USER-PROFILE.md"
 if [ -f "$PROFILE_PATH" ]; then
   ADVISOR_MODE=true
 else
@@ -45,7 +45,7 @@ ADVISOR_MODEL=$($GSD_SDK query resolve-model gsd-advisor-researcher --raw)
 Read USER-PROFILE.md and check for product-owner signals:
 
 ```bash
-PROFILE_CONTENT=$(cat ".agent/get-shit-done/USER-PROFILE.md" 2>/dev/null || true)
+PROFILE_CONTENT=$(cat ".agents/get-shit-done/USER-PROFILE.md" 2>/dev/null || true)
 ```
 
 Set `NON_TECHNICAL_OWNER = true` if ANY of the following are present:
@@ -91,7 +91,7 @@ research agents.
 
    ```
    Agent(
-     prompt="First, read @.agent/agents/gsd-advisor-researcher.md for your role and instructions.
+     prompt="First, read @.agents/agents/gsd-advisor-researcher.md for your role and instructions.
 
      <gray_area>{area_name}: {area_description from gray area identification}</gray_area>
      <phase_context>{phase_goal and description from ROADMAP.md}</phase_context>
@@ -100,7 +100,7 @@ research agents.
 
      Research this gray area and return a structured comparison table with rationale.
      ${AGENT_SKILLS_ADVISOR}",
-     subagent_type="general-purpose",
+     subagent_type="gsd-advisor-researcher",
      model="{ADVISOR_MODEL}",
      description="Research: {area_name}"
    )

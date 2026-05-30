@@ -423,10 +423,10 @@ git bisect bad              # or good, based on testing
 ```
 Check code says:  hooksDir = path.join(configDir, 'hooks')
                   configDir = ~/.claude
-                  → checks ~/.codex/hooks/
+                  → checks /Users/mali/Documents/Projects/MealTracker/.codex/hooks/
 
 Installer says:   hooksDest = path.join(targetDir, 'hooks')
-                  targetDir = ~/.codex/get-shit-done
+                  targetDir = /Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done
                   → writes to /Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done/hooks/
 
 MISMATCH: Checker looks in wrong directory → hooks "not found" → reported as stale

@@ -419,6 +419,14 @@ async function main() {
 
   let command = args[0];
 
+  // Compatibility shim for workflows that invoke the SDK-shaped surface through
+  // the local CJS tool: `gsd-tools.cjs query validate.health` should behave like
+  // `gsd-tools.cjs validate health`, not fail with "Unknown command: query".
+  if (command === 'query') {
+    args = args.slice(1);
+    command = args[0];
+  }
+
   // #3243: accept dotted canonical form (e.g. `state.update`) as well as the
   // spaced form (`state update`). Workflow files and stale SDK binaries pass
   // the dotted canonical form directly; any caller that bypasses the SDK

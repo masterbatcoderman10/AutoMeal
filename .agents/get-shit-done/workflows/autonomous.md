@@ -49,7 +49,18 @@ Bootstrap via milestone-level init:
 
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -336,6 +347,7 @@ UI_SPEC_FILE=$(ls "${PHASE_DIR}"/*-UI-SPEC.md 2>/dev/null | head -1)
 
 ```
 Agent(
+  subagent_type="gsd-planner",
   description="Plan phase ${PHASE_NUM}: ${PHASE_NAME}",
   run_in_background=true,
   prompt="Run plan-phase for phase ${PHASE_NUM}: Skill(skill=\"gsd-plan-phase\", args=\"${PHASE_NUM}\")"
@@ -358,6 +370,7 @@ Verify plan produced output — re-run `init phase-op` and check `has_plans`. If
 
 ```
 Agent(
+  subagent_type="gsd-executor",
   description="Execute phase ${PHASE_NUM}: ${PHASE_NAME}",
   run_in_background=true,
   prompt="Run execute-phase for phase ${PHASE_NUM}: Skill(skill=\"gsd-execute-phase\", args=\"${PHASE_NUM} --no-transition\")"
@@ -533,7 +546,7 @@ Smart discuss is an autonomous-optimized variant of `gsd-discuss-phase`. It prop
 
 **Inputs:** `PHASE_NUM` from execute_phase.
 
-Read and execute: `.agent/get-shit-done/references/autonomous-smart-discuss.md`
+Read and execute: `.agents/get-shit-done/references/autonomous-smart-discuss.md`
 
 </step>
 

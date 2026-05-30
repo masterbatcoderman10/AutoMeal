@@ -34,44 +34,34 @@ Execute mode fallback:
   (c) the workflow's documented contract says defaults are safe (e.g. autonomous lifecycle paths).
 - Do NOT write workflow artifacts (CONTEXT.md, DISCUSSION-LOG.md, PLAN.md, checkpoint files) until the user has answered the plain-text questions or one of (a)-(c) above applies. Surfacing the questions and waiting is the correct response — silently defaulting and writing artifacts is the #3018 failure mode.
 
-## C. Task() → spawn_agent Mapping
-GSD workflows use `Task(...)` (Claude Code syntax). Translate to Codex collaboration tools:
+## C. Task() → Codex Multi-Agent Mapping
+GSD workflows use `Task(...)` (Claude Code syntax). Translate to Codex multi-agent tools when they are actually available.
 
-Direct mapping:
-- `Task(subagent_type="X", prompt="Y")` → `spawn_agent(agent_type="X", message="Y")`
-- `Task(model="...")` → omit. `spawn_agent` has no inline `model` parameter;
-  GSD embeds the resolved per-agent model directly into each agent's `.toml`
-  at install time so `model_overrides` from `.planning/config.json` and
-  `~/.gsd/defaults.json` are honored automatically by Codex's agent router.
-- Resolved `reasoning_effort="low|medium|high|xhigh"` (`xhigh` is a GSD/Codex tier, not a generic runtime enum) → pass `reasoning_effort`
-  to `spawn_agent` when the runtime/tool supports it. Omit missing, empty,
-  inherited, or unsupported values; do not invent one-off effort literals in
-  workflow prose.
-- `fork_context: false` by default — GSD agents load their own context via `<files_to_read>` blocks
-- `Task(isolation="worktree")` / `Agent(isolation="worktree")` → no direct Codex mapping.
-  Codex `spawn_agent` does not create or bind a git worktree automatically.
-  Workflows that require this isolation must fail closed or use an explicit
-  manual worktree protocol before spawning (#3360).
+Tool discovery first:
+- Before deciding sub-agents are unavailable, call `tool_search` with a query like `spawn agent multi-agent subagent wait close agent`.
+- If discovery exposes `multi_agent_v1`, use `multi_agent_v1.spawn_agent`, `multi_agent_v1.wait_agent`, and `multi_agent_v1.close_agent`.
+- Do not claim multi-agent spawning is unavailable just because it was not in the initial tool list; Codex may expose the tools lazily after discovery.
+
+Direct mapping after discovery:
+- `Task(subagent_type="X", prompt="Y")` → `multi_agent_v1.spawn_agent(agent_type="X", message="Y")`
+- `Task(model="...")` → omit by default. GSD embeds the resolved per-agent model directly into each agent's `.toml` at install time so `model_overrides` from `.planning/config.json` and `~/.gsd/defaults.json` are honored automatically by Codex's agent router. Only pass a model override when the user explicitly requested it or the runtime contract requires it.
+- Resolved `reasoning_effort="low|medium|high|xhigh"` → pass `reasoning_effort` only when the exposed tool schema supports it. Omit missing, empty, inherited, or unsupported values; do not invent one-off effort literals in workflow prose.
+- `fork_context: false` by default — GSD agents load their own context via `<files_to_read>` blocks.
+- `Task(isolation="worktree")` / `Agent(isolation="worktree")` → no automatic Codex git-worktree binding. For worktree-required flows, the orchestrator must first create an explicit `git worktree add -b worktree-agent-*` checkout, then pass that `worktree_root`, branch, and expected base into the spawned agent prompt. Executor agents must operate only inside that handed-off worktree root (#3360).
 
 Spawn verification guard:
-- Immediately after `spawn_agent` returns an agent id, inspect the matching
-  Codex session JSON under `$CODEX_HOME/sessions/` and verify
-  `turn_context.payload.model` plus reasoning effort match the resolved GSD
-  role. If the child inherited the parent/global model, close the agent before
-  waiting on or merging its work, fix the agent TOML/config route, and retry
-  only after the route is verified.
+- Immediately after `multi_agent_v1.spawn_agent` returns an agent id, inspect the matching Codex session JSON under `$CODEX_HOME/sessions/` and verify `turn_context.payload.model` plus reasoning effort match the resolved GSD role. If the child inherited the parent/global model, close the agent before waiting on or merging its work, fix the agent TOML/config route, and retry only after the route is verified.
 
-Spawn restriction:
-- Codex restricts `spawn_agent` to cases where the user has explicitly
-  requested sub-agents. When automatic spawning is not permitted, do the
-  work inline in the current agent rather than attempting to force a spawn.
+Spawn restriction and fallback:
+- Codex permits sub-agent spawning only when the user explicitly asks for sub-agents, delegation, or parallel agent work, or when the invoked GSD workflow itself explicitly requires sub-agents as part of the user's chosen command.
+- If `tool_search` does not expose multi-agent tools, or spawning is not permitted, do not stop at a tooling complaint. Execute the workflow inline in the current agent where safe, preserving gates and artifacts; if the workflow explicitly requires isolated sub-agents/worktrees and no safe inline path exists, fail closed with the exact missing capability and next remediation.
 
 Parallel fan-out:
-- Spawn multiple agents → collect agent IDs → `wait(ids)` for all to complete
+- Spawn multiple agents → collect agent IDs → `multi_agent_v1.wait_agent(targets=[...])` as needed.
 
 Result parsing:
 - Look for structured markers in agent output: `CHECKPOINT`, `PLAN COMPLETE`, `SUMMARY`, etc.
-- `close_agent(id)` after collecting results from each agent
+- `multi_agent_v1.close_agent(target=id)` after collecting results from each agent.
 </codex_skill_adapter>
 
 <objective>

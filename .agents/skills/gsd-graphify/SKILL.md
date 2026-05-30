@@ -1,12 +1,69 @@
 ---
-name: gsd-graphify
+name: "gsd-graphify"
 description: "Build, query, and inspect the project knowledge graph in .planning/graphs/"
+metadata:
+  short-description: "Build, query, and inspect the project knowledge graph in .planning/graphs/"
 ---
 
+<codex_skill_adapter>
+## A. Skill Invocation
+- This skill is invoked by mentioning `$gsd-graphify`.
+- Treat all user text after `$gsd-graphify` as `{{GSD_ARGS}}`.
+- If no arguments are present, treat `{{GSD_ARGS}}` as empty.
+
+## B. AskUserQuestion → request_user_input Mapping
+GSD workflows use `AskUserQuestion` (Claude Code syntax). Translate to Codex `request_user_input`:
+
+Parameter mapping:
+- `header` → `header`
+- `question` → `question`
+- Options formatted as `"Label" — description` → `{label: "Label", description: "description"}`
+- Generate `id` from header: lowercase, replace spaces with underscores
+
+Batched calls:
+- `AskUserQuestion([q1, q2])` → single `request_user_input` with multiple entries in `questions[]`
+
+Multi-select workaround:
+- Codex has no `multiSelect`. Use sequential single-selects, or present a numbered freeform list asking the user to enter comma-separated numbers.
+
+Execute mode fallback:
+- When `request_user_input` is rejected or unavailable, activate TEXT_MODE: append `--text` to `{{GSD_ARGS}}` so the workflow's built-in text-mode branching takes over. Present every `AskUserQuestion` call as a plain-text numbered list, then stop and wait for the user's reply. Do NOT pick a default and continue (#3018 / #3808).
+- You may only proceed without a user answer when one of these is true:
+  (a) the invocation included an explicit non-interactive flag (`--auto` or `--all`),
+  (b) the user has explicitly approved a specific default for this question, or
+  (c) the workflow's documented contract says defaults are safe (e.g. autonomous lifecycle paths).
+- Do NOT write workflow artifacts (CONTEXT.md, DISCUSSION-LOG.md, PLAN.md, checkpoint files) until the user has answered the plain-text questions or one of (a)-(c) above applies. Surfacing the questions and waiting is the correct response — silently defaulting and writing artifacts is the #3018 failure mode.
+
+## C. Task() → Codex Multi-Agent Mapping
+GSD workflows use `Task(...)` (Claude Code syntax). Translate to Codex multi-agent tools when they are actually available.
+
+Tool discovery first:
+- Before deciding sub-agents are unavailable, call `tool_search` with a query like `spawn agent multi-agent subagent wait close agent`.
+- If discovery exposes `multi_agent_v1`, use `multi_agent_v1.spawn_agent`, `multi_agent_v1.wait_agent`, and `multi_agent_v1.close_agent`.
+- Do not claim multi-agent spawning is unavailable just because it was not in the initial tool list; Codex may expose the tools lazily after discovery.
+
+Direct mapping after discovery:
+- `Task(subagent_type="X", prompt="Y")` → `multi_agent_v1.spawn_agent(agent_type="X", message="Y")`
+- `Task(model="...")` → omit by default. GSD embeds the resolved per-agent model directly into each agent's `.toml` at install time so `model_overrides` from `.planning/config.json` and `~/.gsd/defaults.json` are honored automatically by Codex's agent router. Only pass a model override when the user explicitly requested it or the runtime contract requires it.
+- Resolved `reasoning_effort="low|medium|high|xhigh"` → pass `reasoning_effort` only when the exposed tool schema supports it. Omit missing, empty, inherited, or unsupported values; do not invent one-off effort literals in workflow prose.
+- `fork_context: false` by default — GSD agents load their own context via `<files_to_read>` blocks.
+- `Task(isolation="worktree")` / `Agent(isolation="worktree")` → no automatic Codex worktree binding. Workflows that require worktree isolation must use an explicit manual worktree protocol before spawning (#3360).
+
+Spawn restriction and fallback:
+- Codex permits sub-agent spawning only when the user explicitly asks for sub-agents, delegation, or parallel agent work, or when the invoked GSD workflow itself explicitly requires sub-agents as part of the user's chosen command.
+- If `tool_search` does not expose multi-agent tools, or spawning is not permitted, do not stop at a tooling complaint. Execute the workflow inline in the current agent where safe, preserving gates and artifacts; if the workflow explicitly requires isolated sub-agents/worktrees and no safe inline path exists, fail closed with the exact missing capability and next remediation.
+
+Parallel fan-out:
+- Spawn multiple agents → collect agent IDs → `multi_agent_v1.wait_agent(targets=[...])` as needed.
+
+Result parsing:
+- Look for structured markers in agent output: `CHECKPOINT`, `PLAN COMPLETE`, `SUMMARY`, etc.
+- `multi_agent_v1.close_agent(target=id)` after collecting results from each agent.
+</codex_skill_adapter>
 
 **STOP -- DO NOT READ THIS FILE. You are already reading it. This prompt was injected into your context by Claude Code's command system. Using the Read tool on this file wastes tokens. Begin executing Step 0 immediately.**
 
-**CJS-only (graphify):** `graphify` subcommands are not registered on `gsd-sdk query`. Use `node $HOME/.gemini/antigravity/get-shit-done/bin/gsd-tools.cjs graphify …` as documented in this command and in `docs/CLI-TOOLS.md`. Other tooling may still use `gsd-sdk query` where a handler exists.
+**CJS-only (graphify):** `graphify` subcommands are not registered on `gsd-sdk query`. Use `node /Users/mali/Documents/Projects/MealTracker/.agents/get-shit-done/bin/gsd-tools.cjs graphify …` as documented in this command and in `docs/CLI-TOOLS.md`. Other tooling may still use `gsd-sdk query` where a handler exists.
 
 ## Step 0 -- Banner
 
@@ -37,16 +94,16 @@ GSD > GRAPHIFY
 
 Knowledge graph is disabled. To activate:
 
-  node $HOME/.gemini/antigravity/get-shit-done/bin/gsd-tools.cjs config-set graphify.enabled true
+  node /Users/mali/Documents/Projects/MealTracker/.agents/get-shit-done/bin/gsd-tools.cjs config-set graphify.enabled true
 
-Then run /gsd-graphify build to create the initial graph.
+Then run $gsd-graphify build to create the initial graph.
 ```
 
 ---
 
 ## Step 2 -- Parse Argument
 
-Parse `$ARGUMENTS` to determine the operation mode:
+Parse `{{GSD_ARGS}}` to determine the operation mode:
 
 | Argument | Action |
 |----------|--------|
@@ -61,7 +118,7 @@ Parse `$ARGUMENTS` to determine the operation mode:
 ```
 GSD > GRAPHIFY
 
-Usage: /gsd-graphify <mode>
+Usage: $gsd-graphify <mode>
 
 Modes:
   build           Build or rebuild the knowledge graph
@@ -75,13 +132,13 @@ Modes:
 Run:
 
 ```bash
-node $HOME/.gemini/antigravity/get-shit-done/bin/gsd-tools.cjs graphify query <term>
+node /Users/mali/Documents/Projects/MealTracker/.agents/get-shit-done/bin/gsd-tools.cjs graphify query <term>
 ```
 
 Parse the JSON output and display results:
 - If the output contains `"disabled": true`, display the disabled message from Step 1 and **STOP**
 - If the output contains `"error"` field, display the error message and **STOP**
-- If no nodes found, display: `No graph matches for '<term>'. Try /gsd-graphify build to create or rebuild the graph.`
+- If no nodes found, display: `No graph matches for '<term>'. Try $gsd-graphify build to create or rebuild the graph.`
 - Otherwise, display matched nodes grouped by type, with edge relationships and confidence tiers (EXTRACTED/INFERRED/AMBIGUOUS)
 
 **STOP** after displaying results. Do not spawn an agent.
@@ -91,7 +148,7 @@ Parse the JSON output and display results:
 Run:
 
 ```bash
-node $HOME/.gemini/antigravity/get-shit-done/bin/gsd-tools.cjs graphify status
+node /Users/mali/Documents/Projects/MealTracker/.agents/get-shit-done/bin/gsd-tools.cjs graphify status
 ```
 
 Parse the JSON output and display:
@@ -115,7 +172,7 @@ Surface both so the agent can choose.
 Run:
 
 ```bash
-node $HOME/.gemini/antigravity/get-shit-done/bin/gsd-tools.cjs graphify diff
+node /Users/mali/Documents/Projects/MealTracker/.agents/get-shit-done/bin/gsd-tools.cjs graphify diff
 ```
 
 Parse the JSON output and display:
@@ -133,7 +190,7 @@ If no snapshot exists, suggest running `build` twice (first to create, second to
 Run the pre-flight check first:
 
 ```bash
-node "$HOME/.gemini/antigravity/get-shit-done/bin/gsd-tools.cjs" graphify build
+node "/Users/mali/Documents/Projects/MealTracker/.agents/get-shit-done/bin/gsd-tools.cjs" graphify build
 ```
 
 Parse the JSON output:
@@ -156,8 +213,8 @@ graphify update . \
   && cp graphify-out/graph.json .planning/graphs/graph.json \
   && cp graphify-out/graph.html .planning/graphs/graph.html \
   && cp graphify-out/GRAPH_REPORT.md .planning/graphs/GRAPH_REPORT.md \
-  && node "$HOME/.gemini/antigravity/get-shit-done/bin/gsd-tools.cjs" graphify build snapshot \
-  && node "$HOME/.gemini/antigravity/get-shit-done/bin/gsd-tools.cjs" graphify status
+  && node "/Users/mali/Documents/Projects/MealTracker/.agents/get-shit-done/bin/gsd-tools.cjs" graphify build snapshot \
+  && node "/Users/mali/Documents/Projects/MealTracker/.agents/get-shit-done/bin/gsd-tools.cjs" graphify status
 ```
 
 Do NOT pass `run_in_background: true`. Typical builds complete in 15-60 seconds and the entire chain must run foreground.

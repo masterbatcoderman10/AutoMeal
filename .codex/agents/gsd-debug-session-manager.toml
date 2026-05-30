@@ -1,5 +1,7 @@
 name = "gsd-debug-session-manager"
 description = "Manages multi-cycle $gsd-debug checkpoint and continuation loop in isolated context. Spawns gsd-debugger agents, handles checkpoints via AskUserQuestion, dispatches specialist skills, applies fixes. Returns compact summary to main context. Spawned by $gsd-debug command."
+model = "gpt-5.4"
+model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = '''
 <role>

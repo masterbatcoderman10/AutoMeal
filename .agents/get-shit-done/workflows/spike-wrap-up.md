@@ -1,7 +1,7 @@
 <purpose>
 Package spike experiment findings into a persistent project skill — an implementation blueprint
 for future build conversations. Reads from `.planning/spikes/`, writes skill to
-`./.agent/skills/spike-findings-[project]/` (project-local) and summary to
+`./.agents/skills/spike-findings-[project]/` (project-local) and summary to
 `.planning/spikes/WRAP-UP-SUMMARY.md`. Companion to `/gsd-spike`.
 </purpose>
 
@@ -24,7 +24,7 @@ Read all files referenced by the invoking prompt's execution_context before star
 
 1. Read `.planning/spikes/MANIFEST.md` for the overall idea context and requirements
 2. Glob `.planning/spikes/*/README.md` and parse YAML frontmatter from each
-3. Check if `./.agent/skills/spike-findings-*/SKILL.md` exists for this project
+3. Check if `./.agents/skills/spike-findings-*/SKILL.md` exists for this project
    - If yes: read its `processed_spikes` list from the metadata section and filter those out
    - If no: all spikes are candidates
 
@@ -38,7 +38,18 @@ Exit.
 Check `commit_docs` config:
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -84,7 +95,7 @@ Each group becomes one reference file in the generated skill.
 Derive the skill name from the project directory:
 
 1. Get the project root directory name (e.g., `solana-tracker`)
-2. The skill will be created at `./.agent/skills/spike-findings-[project-dir-name]/`
+2. The skill will be created at `./.agents/skills/spike-findings-[project-dir-name]/`
 
 If a skill already exists at that path (append mode), update in place.
 </step>
@@ -194,7 +205,7 @@ Write `.planning/spikes/WRAP-UP-SUMMARY.md` for project history:
 **Date:** [date]
 **Spikes processed:** [count]
 **Feature areas:** [list]
-**Skill output:** `./.agent/skills/spike-findings-[project]/`
+**Skill output:** `./.agents/skills/spike-findings-[project]/`
 
 ## Processed Spikes
 | # | Name | Type | Verdict | Feature Area |
@@ -269,7 +280,7 @@ $GSD_SDK query commit "docs(spike-wrap-up): package [N] spike findings into proj
 
 **Processed:** {N} spikes
 **Feature areas:** {list}
-**Skill:** `./.agent/skills/spike-findings-[project]/`
+**Skill:** `./.agents/skills/spike-findings-[project]/`
 **Conventions:** `.planning/spikes/CONVENTIONS.md`
 **Summary:** `.planning/spikes/WRAP-UP-SUMMARY.md`
 **GEMINI.md:** routing line added
@@ -307,7 +318,7 @@ After the summary, present next-step options:
 <success_criteria>
 - [ ] All unprocessed spikes auto-included and processed
 - [ ] Spikes grouped by feature area
-- [ ] Spike-findings skill exists at `./.agent/skills/` with SKILL.md (including requirements), references/, sources/
+- [ ] Spike-findings skill exists at `./.agents/skills/` with SKILL.md (including requirements), references/, sources/
 - [ ] Reference files are implementation blueprints with Requirements, How to Build It, What to Avoid, Constraints
 - [ ] `.planning/spikes/CONVENTIONS.md` created or updated with recurring stack/structure/pattern choices
 - [ ] `.planning/spikes/WRAP-UP-SUMMARY.md` written for project history

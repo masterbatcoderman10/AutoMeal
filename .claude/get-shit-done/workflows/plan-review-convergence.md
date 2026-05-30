@@ -44,7 +44,18 @@ echo "$ARGUMENTS" | grep -qE '\-\-ws\s+\S+' && GSD_WS=$(echo "$ARGUMENTS" | grep
 
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -112,6 +123,7 @@ Display: `◆ No plans found — spawning initial planning agent...`
 
 ```text
 Agent(
+  subagent_type="gsd-planner",
   description="Initial planning Phase {PHASE}",
   prompt="Run /gsd-plan-phase for Phase {PHASE}.
 
@@ -148,6 +160,7 @@ Display: `◆ Cycle {cycle}/{MAX_CYCLES} — spawning review agent...`
 
 ```text
 Agent(
+  subagent_type="gsd-plan-checker",
   description="Cross-AI review Phase {PHASE} cycle {cycle}",
   prompt="Run /gsd-review for Phase {PHASE}.
 
@@ -306,6 +319,7 @@ Display: `◆ Spawning replan agent with review feedback...`
 
 ```text
 Agent(
+  subagent_type="gsd-planner",
   description="Replan Phase {PHASE} with review feedback cycle {cycle}",
   prompt="Run /gsd-plan-phase with --reviews for Phase {PHASE}.
 

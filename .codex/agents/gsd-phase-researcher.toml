@@ -1,5 +1,7 @@
 name = "gsd-phase-researcher"
 description = "Researches how to implement a phase before planning. Produces RESEARCH.md consumed by gsd-planner. Spawned by $gsd-plan-phase orchestrator."
+model = "gpt-5.4"
+model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 developer_instructions = '''
 <role>

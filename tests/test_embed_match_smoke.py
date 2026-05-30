@@ -354,3 +354,165 @@ class SmokeReasoningProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report["gate_auto_confirmed"])
         self.assertEqual(report["cached_tokens"], 42)
         self.assertEqual(report["match"]["candidate_count"], 3)
+
+
+class SmokeGroupedUatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_grouped_uat_skips_segment_label_model_and_uses_detector_hints(self) -> None:
+        class FakeEngine:
+            async def dispose(self) -> None:
+                return None
+
+        class FakeSessionContext:
+            def __init__(self) -> None:
+                self.added: list[object] = []
+
+            async def __aenter__(self) -> "FakeSessionContext":
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def add(self, item: object) -> None:
+                self.added.append(item)
+
+            async def flush(self) -> None:
+                return None
+
+            async def commit(self) -> None:
+                return None
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            sample_path = tmp_path / "sample_images" / "meal.jpg"
+            sample_path.parent.mkdir(parents=True, exist_ok=True)
+            sample_path.write_bytes(b"grouped-meal")
+
+            crop_path = tmp_path / "uploads" / "crops" / "seg-1.jpg"
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
+            crop_path.write_bytes(b"crop")
+
+            args = SimpleNamespace(
+                sample=str(sample_path),
+                database_url="postgresql+asyncpg://example",
+            )
+            session = FakeSessionContext()
+            match_result = SimpleNamespace(
+                food_visual_id=None,
+                food_item_id=None,
+                similarity=0.41,
+                is_match=False,
+                is_below_threshold=True,
+                query_embedding=[0.1] * 1536,
+                top_candidates=[
+                    {
+                        "candidate_id": "candidate-curry",
+                        "label": "chicken curry",
+                        "identity_confidence": 0.82,
+                        "quantity_confidence": 0.8,
+                        "match_consistency_confidence": 0.8,
+                        "visual_evidence": ["green herb garnish"],
+                        "missing_evidence": [],
+                        "specificity": "medium",
+                        "nutrition_relevance": "medium",
+                        "source": "vector_match",
+                        "decision_rationale": "Nearest stored curry variant.",
+                        "nutrition_impact": 0.05,
+                    }
+                ],
+            )
+            reasoning_payload = {
+                "action": "AUTO_CONFIRM",
+                "meal_state": "READY_TO_WRITE",
+                "trace_id": "trace-grouped-uat",
+                "decision_rationale": "Reasoning resolved the curry color and style from the whole plate.",
+                "gate_reason": "",
+                "segment_count": 1,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_id": "group-curry",
+                        "group_label": "green chicken curry",
+                        "group_action": "AUTO_CONFIRM",
+                        "group_state": "READY_TO_WRITE",
+                        "primary_segment_id": "segment-grouped",
+                        "segment_ids": ["segment-grouped"],
+                        "selected_candidate_id": "candidate-curry",
+                        "top_3": match_result.top_candidates,
+                    }
+                ],
+            }
+
+            with (
+                patch.object(smoke, "create_async_engine", return_value=FakeEngine()),
+                patch.object(smoke, "async_sessionmaker", return_value=lambda: session),
+                patch.object(
+                    smoke,
+                    "get_settings",
+                    return_value=SimpleNamespace(
+                        DATABASE_URL="postgresql+asyncpg://example",
+                        DETECT_MODEL="detect-model",
+                        SEGMENT_MODEL="segment-model",
+                        SEGMENT_RETRY_MODEL="segment-retry-model",
+                        VISION_MAX_SEGMENTS=4,
+                        LABEL_MODEL="label-model",
+                    ),
+                ),
+                patch.object(
+                    smoke,
+                    "detect_food_photo",
+                    AsyncMock(return_value={"next_action": "segment"}),
+                ),
+                patch.object(
+                    smoke,
+                    "segment_food_photo_with_retry",
+                    AsyncMock(
+                        return_value=[
+                            SimpleNamespace(
+                                box_2d=[0.1, 0.1, 0.8, 0.9],
+                                label_hint="curry",
+                            )
+                        ]
+                    ),
+                ),
+                patch.object(smoke, "dedupe_overlapping_segments", side_effect=lambda segments: segments),
+                patch.object(smoke, "save_segment_crop", return_value=crop_path),
+                patch.object(
+                    smoke,
+                    "label_food_segment",
+                    AsyncMock(return_value="generic curry"),
+                ) as label_food_segment,
+                patch.object(
+                    smoke.matching_service,
+                    "match_segment_against_visual_corpus",
+                    AsyncMock(return_value=match_result),
+                ),
+                patch.object(smoke.matching_service, "persist_match_candidate_snapshot"),
+                patch.object(
+                    smoke.reasoning_service,
+                    "run_reasoning_request",
+                    AsyncMock(return_value=(reasoning_payload, {"trace_id": "trace-grouped-uat"})),
+                ),
+                patch.object(
+                    smoke.reasoning_service,
+                    "finalize_meal_from_reasoning",
+                    AsyncMock(
+                        return_value={
+                            "finalized": True,
+                            "food_groups": reasoning_payload["food_groups"],
+                        }
+                    ),
+                ),
+            ):
+                report = await smoke._run_grouped_uat(args, llm_client=object())
+
+        label_food_segment.assert_not_awaited()
+        self.assertEqual(
+            report["segment_labels"],
+            [
+                {
+                    "segment_id": report["segment_labels"][0]["segment_id"],
+                    "label": "curry",
+                    "crop_path": str(crop_path),
+                }
+            ],
+        )

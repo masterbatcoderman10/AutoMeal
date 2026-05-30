@@ -458,6 +458,91 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_segments[0].food.canonical_name, "pita bread")
         self.assertTrue(result["finalized"])
 
+    async def test_grouped_auto_confirm_prefers_reasoning_group_label_over_generic_candidate_label(self) -> None:
+        from app.services import reasoning_service
+
+        segment = SimpleNamespace(
+            id="segment-curry-1",
+            label="curry",
+            cropped_image_url="/data/uploads/crops/curry-1.jpg",
+            embedding=[0.33] * EMBEDDING_DIMENSION,
+        )
+        meal = SimpleNamespace(
+            id="meal-grouped-authority",
+            processing_status=MealProcessingStatus.REASONING,
+            reasoning_state_json=None,
+            last_stage_started_at=None,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+
+        candidate = {
+            "candidate_id": "candidate-curry",
+            "food_item_id": "food-item-curry",
+            "label": "chicken curry",
+            "identity_confidence": 0.95,
+            "quantity_confidence": 0.88,
+            "match_consistency_confidence": 0.93,
+            "missing_evidence": [],
+            "nutrition_impact": 0.02,
+            "portion_bucket": "STANDARD",
+        }
+        match_results = [
+            (
+                segment,
+                SimpleNamespace(
+                    food_item_id="food-item-curry",
+                    trace_id="trace-grouped-authority",
+                    top_candidates=[candidate],
+                ),
+            ),
+        ]
+        reasoning_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-grouped-authority",
+            "decision_rationale": "Whole-plate reasoning identified the green herb curry variant.",
+            "gate_reason": "",
+            "segment_count": 1,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-curry",
+                    "group_label": "green chicken curry",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-curry-1",
+                    "segment_ids": ["segment-curry-1"],
+                    "selected_candidate_id": "candidate-curry",
+                    "top_3": [candidate, candidate, candidate],
+                }
+            ],
+        }
+
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with patch.object(
+            reasoning_service,
+            "apply_final_meal_resolution",
+            new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ):
+            result = await reasoning_service.finalize_meal_from_reasoning(
+                session=session,
+                meal=meal,
+                segments=[segment],
+                match_results=match_results,
+                reasoning_payload=reasoning_payload,
+            )
+
+        final_segments = captured["final_segments"]
+        self.assertEqual(len(final_segments), 1)
+        self.assertEqual(final_segments[0].food.canonical_name, "green chicken curry")
+        self.assertTrue(result["finalized"])
+
 
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:

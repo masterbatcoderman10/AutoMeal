@@ -10,6 +10,17 @@ from app.models.meal_log import MealProcessingStatus
 from app.services.interview_schema import InterviewTurnResult, InterviewTurnValidationError
 
 
+class _ActiveInterviewQueryResult:
+    def __init__(self, interviews):
+        self._interviews = list(interviews)
+
+    def scalar_one_or_none(self):
+        return self._interviews[0] if self._interviews else None
+
+    def scalars(self):
+        return SimpleNamespace(all=lambda: list(self._interviews))
+
+
 class MessageTemplateTests(unittest.TestCase):
     def test_ack_message_truncates_meal_id(self) -> None:
         from bot.messages import format_ack_message
@@ -525,6 +536,157 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         reply_text.assert_awaited_once_with("Please answer just the bread type: pita bread or something else?")
         session.commit.assert_awaited()
+        engine.dispose.assert_awaited_once()
+
+    async def test_meal_interview_text_routes_reply_to_matching_prompt_message_id(self) -> None:
+        from bot.handlers import interview_text
+
+        newest = SimpleNamespace(
+            id="interview-newest",
+            meal_log_id="meal-newest",
+            is_active=True,
+            last_bot_message_id=333,
+            current_prompt_payload={
+                "meal_id": "meal-newest",
+                "session_mode": "MEAL_INTERVIEW",
+                "roadmap_step": "INITIAL_QUESTION",
+                "current_question": {"prompt": "What bread is this?"},
+                "interview_messages": [],
+            },
+        )
+        intended = SimpleNamespace(
+            id="interview-intended",
+            meal_log_id="meal-intended",
+            is_active=True,
+            last_bot_message_id=222,
+            current_prompt_payload={
+                "meal_id": "meal-intended",
+                "session_mode": "MEAL_INTERVIEW",
+                "roadmap_step": "INITIAL_QUESTION",
+                "current_question": {"prompt": "What vegetable is in the egg curry?"},
+                "interview_messages": [],
+            },
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        session.execute = AsyncMock(return_value=_ActiveInterviewQueryResult([newest, intended]))
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id="999"),
+                text="bottle gourd",
+                message_id=901,
+                reply_to_message=SimpleNamespace(message_id=222),
+                reply_text=reply_text,
+            ),
+            callback_query=None,
+        )
+        context = SimpleNamespace(bot_data={})
+        turn = InterviewTurnResult.model_validate(
+            {
+                "turn_action": "continue_interview",
+                "assistant_prompt": "Do you mean egg curry with bottle gourd?",
+                "clarification_reason": None,
+                "conversation_summary": "Follow up on the curry vegetable.",
+                "confirmation_items": [],
+            }
+        )
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._run_meal_interview_turn", AsyncMock(return_value=turn), create=True) as run_turn,
+        ):
+            await interview_text(update, context)
+
+        self.assertEqual(run_turn.await_args.kwargs["state"]["meal_id"], "meal-intended")
+        reply_text.assert_awaited_once_with("Do you mean egg curry with bottle gourd?")
+        engine.dispose.assert_awaited_once()
+
+    async def test_meal_interview_text_fails_closed_when_multiple_meal_sessions_are_ambiguous(self) -> None:
+        from bot.handlers import interview_text
+
+        newest = SimpleNamespace(
+            id="interview-newest",
+            meal_log_id="meal-newest",
+            is_active=True,
+            last_bot_message_id=333,
+            current_prompt_payload={
+                "meal_id": "meal-newest",
+                "session_mode": "MEAL_INTERVIEW",
+                "roadmap_step": "INITIAL_QUESTION",
+                "current_question": {"prompt": "What bread is this?"},
+                "interview_messages": [],
+            },
+        )
+        older = SimpleNamespace(
+            id="interview-older",
+            meal_log_id="meal-older",
+            is_active=True,
+            last_bot_message_id=222,
+            current_prompt_payload={
+                "meal_id": "meal-older",
+                "session_mode": "MEAL_INTERVIEW",
+                "roadmap_step": "INITIAL_QUESTION",
+                "current_question": {"prompt": "What sauce is on the pasta?"},
+                "interview_messages": [],
+            },
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        session.execute = AsyncMock(return_value=_ActiveInterviewQueryResult([newest, older]))
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id="999"),
+                text="yes",
+                message_id=902,
+                reply_to_message=None,
+                reply_text=reply_text,
+            ),
+            callback_query=None,
+        )
+        context = SimpleNamespace(bot_data={})
+        turn = InterviewTurnResult.model_validate(
+            {
+                "turn_action": "continue_interview",
+                "assistant_prompt": "Which meal do you mean?",
+                "clarification_reason": None,
+                "conversation_summary": "This should not run when the reply is ambiguous.",
+                "confirmation_items": [],
+            }
+        )
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._run_meal_interview_turn", AsyncMock(return_value=turn), create=True) as run_turn,
+        ):
+            await interview_text(update, context)
+
+        run_turn.assert_not_awaited()
+        reply_text.assert_awaited_once_with(
+            "Please reply to the specific meal prompt so I know which meal to update."
+        )
+        session.commit.assert_not_awaited()
         engine.dispose.assert_awaited_once()
 
     async def test_meal_interview_text_routes_ready_to_confirm_through_finalizer_with_approval_statuses(self) -> None:

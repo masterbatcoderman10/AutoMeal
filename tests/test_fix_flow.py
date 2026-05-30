@@ -433,3 +433,87 @@ class FixInterviewFlowTests(unittest.IsolatedAsyncioTestCase):
         reply_text.assert_awaited_once_with("Updated Better Protein Bar. Invalidated 1 linked visual.")
         session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()
+
+    async def test_fix_confirmation_stays_on_deterministic_correction_path(self) -> None:
+        from bot.handlers import interview_text
+
+        interview = SimpleNamespace(
+            id="interview-fix-2",
+            meal_log_id="meal-1",
+            is_active=True,
+            state_key="CONFIRMATION",
+            current_prompt_payload={
+                "session_mode": "ENTRY_FIX",
+                "fix_entry_id": "entry-1",
+                "roadmap_step": "CONFIRMATION",
+                "pending_targets": [{"segment_id": "seg-1", "label": "Protein Bar"}],
+                "answers_by_segment": [
+                    {
+                        "segment_id": "seg-1",
+                        "entry_id": "entry-1",
+                        "name": "Better Protein Bar",
+                        "source_type": "PACKAGED",
+                        "brand_name": "Acme",
+                        "portion_bucket": "SMALL",
+                        "quantity_display": "1 bar",
+                    }
+                ],
+            },
+        )
+        entry = SimpleNamespace(id="entry-1")
+        session = AsyncMock()
+        session.get = AsyncMock(return_value=entry)
+        session.add = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            message=SimpleNamespace(chat=SimpleNamespace(id="999"), text="confirm", reply_text=reply_text),
+            callback_query=None,
+        )
+        context = SimpleNamespace(bot_data={})
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch(
+                "bot.handlers.correction_service.build_entry_correction_context",
+                AsyncMock(
+                    return_value={
+                        "food_name": "Protein Bar",
+                        "source_type": "PACKAGED",
+                        "brand_name": "Acme",
+                        "restaurant_name": None,
+                        "portion_bucket": "STANDARD",
+                        "quantity_display": "1 bar",
+                    }
+                ),
+            ),
+            patch(
+                "bot.handlers.correction_service.apply_confirmed_entry_correction",
+                AsyncMock(
+                    return_value={
+                        "applied": True,
+                        "entry": {"food_name": "Better Protein Bar"},
+                        "invalidated_visual_ids": ["visual-1"],
+                        "recompute_nutrition": False,
+                    }
+                ),
+            ) as apply_fix,
+            patch("bot.handlers._run_meal_interview_turn", AsyncMock(), create=True) as run_turn,
+        ):
+            await interview_text(update, context)
+
+        run_turn.assert_not_awaited()
+        apply_fix.assert_awaited_once()
+        reply_text.assert_awaited_once_with("Updated Better Protein Bar. Invalidated 1 linked visual.")
+        session.commit.assert_awaited_once()
+        engine.dispose.assert_awaited_once()

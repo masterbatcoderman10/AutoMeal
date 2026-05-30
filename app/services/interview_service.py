@@ -350,6 +350,10 @@ def answer_to_confirmation_item(answer: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def confirmation_items_from_state(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    explicit_items = state.get("confirmation_items")
+    if isinstance(explicit_items, list) and explicit_items:
+        return [dict(item) for item in explicit_items if isinstance(item, Mapping)]
+
     items: list[dict[str, Any]] = []
     for target in list(state.get("pending_targets") or []):
         answer = _answer_for_target(state, target)
@@ -365,6 +369,94 @@ def confirmation_items_from_state(state: Mapping[str, Any]) -> list[dict[str, An
         if isinstance(payload, dict):
             legacy_items.append(answer_to_confirmation_item(payload))
     return legacy_items
+
+
+def interview_transcript_from_state(state: Mapping[str, Any]) -> list[dict[str, str]]:
+    transcript: list[dict[str, str]] = []
+    for message in state.get("interview_messages") or []:
+        if not isinstance(message, Mapping):
+            continue
+        role = _transcript_role(message.get("role"))
+        if role is None:
+            continue
+        content = _optional_text(message.get("content")) or _transcript_content_from_payload(
+            role=role,
+            payload=message.get("payload"),
+        )
+        if not content:
+            continue
+        transcript.append({"role": role, "content": content})
+    return transcript
+
+
+def append_interview_transcript_entry(
+    state: Mapping[str, Any],
+    *,
+    role: str,
+    content: str,
+    payload: Mapping[str, Any] | None = None,
+    message_id: int | None = None,
+) -> dict[str, Any]:
+    updated = dict(state)
+    messages = [dict(item) for item in updated.get("interview_messages") or [] if isinstance(item, Mapping)]
+    entry: dict[str, Any] = {
+        "role": role,
+        "content": content.strip(),
+        "payload": dict(payload or {}),
+    }
+    if message_id is not None:
+        entry["message_id"] = message_id
+    messages.append(entry)
+    updated["interview_messages"] = messages
+    return updated
+
+
+def apply_interview_turn_result(
+    state: Mapping[str, Any],
+    *,
+    turn_action: str,
+    assistant_prompt: str,
+    clarification_reason: str | None = None,
+    conversation_summary: str | None = None,
+    confirmation_items: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    updated = dict(state)
+    if conversation_summary:
+        updated["conversation_summary"] = conversation_summary
+    updated["last_turn_action"] = turn_action
+
+    if turn_action == "ready_to_confirm":
+        items = [dict(item) for item in confirmation_items or [] if isinstance(item, Mapping)]
+        updated["roadmap_step"] = "CONFIRMATION"
+        updated["current_target_index"] = len(list(updated.get("pending_targets") or []))
+        updated["confirmation_items"] = items
+        updated["answers_by_segment"] = [dict(item) for item in items]
+    else:
+        question = dict(updated.get("current_question") or {})
+        question["prompt"] = assistant_prompt
+        question["invalid_prompt"] = assistant_prompt
+        question["session_mode"] = str(updated.get("session_mode") or SESSION_MODE_MEAL)
+        question["roadmap_step"] = str(updated.get("roadmap_step") or "INITIAL_QUESTION")
+        if clarification_reason:
+            question["clarification_reason"] = clarification_reason
+        updated["current_question"] = question
+
+    return updated
+
+
+def build_neutral_retry_prompt(state: Mapping[str, Any]) -> str:
+    question = dict(state.get("current_question") or {})
+    prompt = _optional_text(question.get("prompt"))
+    if prompt:
+        return (
+            "I couldn't safely apply that answer yet. "
+            f"Please answer the same meal question again: {prompt}"
+        )
+    return "I couldn't safely apply that answer yet. Please answer the same meal question again."
+
+
+def json_safe_payload(value: object) -> Any:
+    return _json_safe_payload(value)
 
 
 def build_interview_turn_state(
@@ -458,17 +550,6 @@ async def prepare_interview_session(
         is_active=True,
     )
     session.add(interview)
-    session.add(
-        InterviewMessage(
-            id=str(uuid.uuid4()),
-            session_id=interview.id,
-            role="bot",
-            payload={
-                "type": "prompt",
-                "prompt": dict(prompt_payload.get("current_question") or current_target_question(prompt_payload)),
-            },
-        )
-    )
     return interview
 
 
@@ -765,6 +846,36 @@ def _json_safe_payload(value: object) -> Any:
     if isinstance(value, tuple):
         return [_json_safe_payload(item) for item in value]
     return value
+
+
+def _transcript_role(value: object) -> str | None:
+    role = str(value or "").strip().lower()
+    if role == "bot":
+        return "assistant"
+    if role in {"assistant", "user", "system"}:
+        return role
+    return None
+
+
+def _transcript_content_from_payload(*, role: str, payload: object) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    prompt_payload = payload.get("prompt")
+    if isinstance(prompt_payload, Mapping):
+        prompt = _optional_text(prompt_payload.get("prompt"))
+        if prompt:
+            return prompt
+    prompt = _optional_text(payload.get("prompt"))
+    if prompt:
+        return prompt
+    if role == "assistant":
+        return _optional_text(payload.get("assistant_prompt"))
+    return (
+        _optional_text(payload.get("raw_text"))
+        or _optional_text(payload.get("text"))
+        or _optional_text(payload.get("name"))
+        or _optional_text(payload.get("value"))
+    )
 
 
 def _current_target(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -1166,16 +1277,21 @@ __all__ = [
     "apply_confirmation_edits",
     "build_all_wrong_prompt",
     "build_best_effort_closeout",
+    "build_neutral_retry_prompt",
     "build_confirmation_message",
     "build_grounding_reasoning_state",
     "build_interview_turn_state",
     "complete_target_question",
     "confirmation_items_from_state",
+    "append_interview_transcript_entry",
     "current_target_question",
     "final_resolution_from_confirmation",
     "finalize_confirmed_interview",
     "get_interview_roadmap",
     "is_pinned_chat_update",
+    "interview_transcript_from_state",
+    "apply_interview_turn_result",
+    "json_safe_payload",
     "parse_confirmation_bulk_text",
     "parse_interview_text",
     "persist_interview_step",

@@ -730,6 +730,62 @@ class InterviewPersistencePrepTests(unittest.TestCase):
         self.assertEqual(items[0]["brand_name"], "Acme")
         self.assertEqual(items[0]["portion_bucket"], "SMALL")
 
+    def test_confirmation_items_from_state_preserve_explicit_approval_statuses(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "pending_targets": [
+                {"group_id": "group-egg", "segment_id": "seg-egg-1"},
+                {"group_id": "group-pita", "segment_id": "seg-pita-1"},
+            ],
+            "answers_by_segment": [
+                {
+                    "group_id": "group-egg",
+                    "primary_segment_id": "seg-egg-1",
+                    "segment_id": "seg-egg-1",
+                    "name": "egg curry with bottle gourd",
+                    "source_type": "HOME",
+                    "portion_bucket": "STANDARD",
+                },
+                {
+                    "group_id": "group-pita",
+                    "primary_segment_id": "seg-pita-1",
+                    "segment_id": "seg-pita-1",
+                    "name": "pita bread",
+                    "source_type": "HOME",
+                    "portion_bucket": "STANDARD",
+                },
+            ],
+            "confirmation_items": [
+                {
+                    "group_id": "group-egg",
+                    "primary_segment_id": "seg-egg-1",
+                    "segment_id": "seg-egg-1",
+                    "name": "egg curry with bottle gourd",
+                    "source_type": "HOME",
+                    "portion_bucket": "STANDARD",
+                    "approval_status": "CORRECTED",
+                },
+                {
+                    "group_id": "group-pita",
+                    "primary_segment_id": "seg-pita-1",
+                    "segment_id": "seg-pita-1",
+                    "name": "pita bread",
+                    "source_type": "HOME",
+                    "portion_bucket": "STANDARD",
+                    "approval_status": "APPROVED",
+                },
+            ],
+        }
+
+        items = interview_service.confirmation_items_from_state(state)
+
+        self.assertEqual(
+            items,
+            state["confirmation_items"],
+            "Explicit ready_to_confirm items must survive unchanged, including approval_status coverage.",
+        )
+
     def test_grounding_handoff_state_preserves_confirmation_context(self) -> None:
         from app.services import interview_service
 

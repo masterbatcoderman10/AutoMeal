@@ -83,7 +83,7 @@ def current_target_question(state: Mapping[str, Any]) -> dict[str, Any]:
         current_name = _optional_text(answer.get("name"))
         if mode == SESSION_MODE_FIX and current_name:
             prompt = (
-                f"What should I call {label}? "
+                f"What exact name should I log for {label}? "
                 "You can include the style, filling, bread type, or main ingredient if that helps. "
                 f"Reply with the corrected name, or `same` to keep `{current_name}`."
             )
@@ -367,6 +367,61 @@ def confirmation_items_from_state(state: Mapping[str, Any]) -> list[dict[str, An
     return legacy_items
 
 
+def build_interview_turn_state(
+    *,
+    meal: MealLog,
+    segments: list[MealSegment],
+    prior_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    state = dict(prior_state or {})
+    unresolved_targets, approval_candidates = _targets_from_reasoning_state(
+        getattr(meal, "reasoning_state_json", None),
+    )
+    if not unresolved_targets and not approval_candidates:
+        unresolved_targets = [
+            {
+                "segment_id": segment.id,
+                "primary_segment_id": segment.id,
+                "segment_ids": [segment.id],
+                "label": getattr(segment, "label", None) or "this item",
+                "question_kind": "IDENTITY",
+                "candidate_choices": [],
+                "missing_evidence": [],
+            }
+            for segment in segments
+        ]
+
+    pending_targets = [dict(target) for target in unresolved_targets]
+    roadmap_step = _initial_roadmap_step_for_target(pending_targets[0]) if pending_targets else "CONFIRMATION"
+    state.update(
+        {
+            "meal_id": meal.id,
+            "session_mode": str(state.get("session_mode") or SESSION_MODE_MEAL),
+            "roadmap_step": roadmap_step,
+            "pending_targets": pending_targets,
+            "unresolved_targets": [dict(target) for target in unresolved_targets],
+            "approval_candidates": [dict(candidate) for candidate in approval_candidates],
+            "current_target_index": 0,
+            "answers_by_segment": list(state.get("answers_by_segment") or []),
+            "interview_messages": list(state.get("interview_messages") or []),
+            "segment_refs": _segment_refs(segments),
+            "reasoning_summary": _reasoning_summary(getattr(meal, "reasoning_state_json", None)),
+        }
+    )
+    current_question = current_target_question(state) if pending_targets else {
+        "segment_id": None,
+        "roadmap_step": "CONFIRMATION",
+        "prompt": "Confirm or correct the identified meal items.",
+        "invalid_prompt": "Confirm or correct the identified meal items.",
+        "session_mode": str(state.get("session_mode") or SESSION_MODE_MEAL),
+    }
+    state["current_question"] = _question_with_approval_candidates(
+        current_question,
+        approval_candidates=approval_candidates,
+    )
+    return state
+
+
 async def prepare_interview_session(
     *,
     session,
@@ -387,31 +442,17 @@ async def prepare_interview_session(
     if existing is not None:
         return existing
 
-    pending_targets = _pending_targets_from_food_groups(getattr(meal, "reasoning_state_json", None))
-    if not pending_targets:
-        pending_targets = [
-            {
-                "segment_id": segment.id,
-                "label": getattr(segment, "label", None) or "this item",
-            }
-            for segment in segments
-        ]
-    initial_step = _initial_roadmap_step_for_target(pending_targets[0]) if pending_targets else "CONFIRMATION"
-    prompt_payload = _json_safe_payload({
-        "meal_id": meal.id,
-        "session_mode": SESSION_MODE_MEAL,
-        "roadmap_step": initial_step,
-        "pending_targets": pending_targets,
-        "current_target_index": 0,
-        "answers_by_segment": [],
-        "interview_messages": [],
-        "last_prompted_at": datetime.now(UTC),
-    })
+    prompt_payload = build_interview_turn_state(
+        meal=meal,
+        segments=segments,
+    )
+    prompt_payload["last_prompted_at"] = datetime.now(UTC)
+    prompt_payload = _json_safe_payload(prompt_payload)
     interview = InterviewSession(
         id=str(uuid.uuid4()),
         meal_log_id=meal.id,
         chat_id=str(chat_id),
-        state_key=initial_step,
+        state_key=str(prompt_payload.get("roadmap_step") or "CONFIRMATION"),
         current_prompt_payload=prompt_payload,
         reminder_count=0,
         is_active=True,
@@ -424,7 +465,7 @@ async def prepare_interview_session(
             role="bot",
             payload={
                 "type": "prompt",
-                "prompt": current_target_question(prompt_payload),
+                "prompt": dict(prompt_payload.get("current_question") or current_target_question(prompt_payload)),
             },
         )
     )
@@ -817,6 +858,70 @@ def _pending_targets_from_food_groups(reasoning_state: object) -> list[dict[str,
     return sorted(pending_targets, key=_pending_target_sort_key)
 
 
+def _targets_from_reasoning_state(reasoning_state: object) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not isinstance(reasoning_state, Mapping):
+        return [], []
+    groups = reasoning_state.get("food_groups")
+    if not isinstance(groups, list):
+        meal_reasoning = reasoning_state.get("meal_reasoning")
+        groups = meal_reasoning.get("food_groups") if isinstance(meal_reasoning, Mapping) else None
+    if not isinstance(groups, list):
+        return [], []
+
+    pending_targets: list[dict[str, Any]] = []
+    approval_candidates: list[dict[str, Any]] = []
+    for group in groups:
+        if not isinstance(group, Mapping):
+            continue
+        group_payload = _group_state_payload(
+            group,
+            ordinal=len(pending_targets) + len(approval_candidates) + 1,
+        )
+        if _group_needs_interview(group):
+            pending_targets.append(group_payload)
+        elif _group_is_approval_candidate(group):
+            approval_candidates.append(
+                {
+                    **group_payload,
+                    "proposed_name": _selected_group_name(group),
+                }
+            )
+
+    return (
+        sorted(pending_targets, key=_pending_target_sort_key),
+        approval_candidates,
+    )
+
+
+def _group_state_payload(group: Mapping[str, Any], *, ordinal: int) -> dict[str, Any]:
+    segment_ids = [
+        str(segment_id)
+        for segment_id in group.get("segment_ids") or []
+        if segment_id is not None
+    ]
+    target = {
+        "group_id": _optional_text(group.get("group_id")) or f"group-{ordinal}",
+        "primary_segment_id": _optional_text(group.get("primary_segment_id")) or (segment_ids[0] if segment_ids else None),
+        "segment_ids": segment_ids,
+        "label": _optional_text(group.get("group_label") or group.get("label")) or "this item",
+        "question_kind": _question_kind(group.get("question_kind")),
+        "question_focus": _optional_text(group.get("question_focus")),
+        "question_examples": [
+            str(example).strip()
+            for example in group.get("question_examples") or []
+            if str(example).strip()
+        ],
+        "candidate_choices": _candidate_choices(group.get("top_3")),
+        "missing_evidence": [
+            str(item).strip()
+            for item in group.get("missing_evidence") or []
+            if str(item).strip()
+        ],
+        "decision_rationale": _optional_text(group.get("decision_rationale")),
+    }
+    return {key: value for key, value in target.items() if value not in (None, [], "")}
+
+
 def _group_needs_interview(group: Mapping[str, Any]) -> bool:
     action = str(group.get("group_action") or group.get("action") or "").upper()
     state = str(group.get("group_state") or group.get("state") or "").upper()
@@ -827,6 +932,14 @@ def _group_needs_interview(group: Mapping[str, Any]) -> bool:
         "PARTIAL_RESOLVED_WAITING",
         "INTERVIEWING",
     }
+
+
+def _group_is_approval_candidate(group: Mapping[str, Any]) -> bool:
+    if _group_needs_interview(group):
+        return False
+    action = str(group.get("group_action") or group.get("action") or "").upper()
+    state = str(group.get("group_state") or group.get("state") or "").upper()
+    return action in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE", "READY_TO_WRITE"} or state == "READY_TO_WRITE"
 
 
 def _pending_target_sort_key(target: Mapping[str, Any]) -> tuple[int, str]:
@@ -860,6 +973,80 @@ def _candidate_choices(top_candidates: object) -> list[str]:
             if label:
                 choices.append(label)
     return choices
+
+
+def _selected_group_name(group: Mapping[str, Any]) -> str:
+    selected_candidate_id = _optional_text(group.get("selected_candidate_id"))
+    if isinstance(group.get("top_3"), list):
+        for candidate in group.get("top_3") or []:
+            if not isinstance(candidate, Mapping):
+                continue
+            candidate_id = _optional_text(candidate.get("candidate_id"))
+            label = _optional_text(candidate.get("label") or candidate.get("candidate_name") or candidate.get("name"))
+            if selected_candidate_id and candidate_id == selected_candidate_id and label:
+                return label
+    return _optional_text(group.get("group_label") or group.get("label")) or "this item"
+
+
+def _segment_refs(segments: list[MealSegment]) -> dict[str, dict[str, Any]]:
+    refs: dict[str, dict[str, Any]] = {}
+    for segment in segments:
+        refs[str(segment.id)] = {
+            "label": getattr(segment, "label", None),
+            "crop_path": getattr(segment, "cropped_image_url", None),
+            "image_path": getattr(segment, "image_url", None),
+        }
+    return refs
+
+
+def _reasoning_summary(reasoning_state: object) -> str:
+    if not isinstance(reasoning_state, Mapping):
+        return "No grouped reasoning summary available."
+    meal_reasoning = reasoning_state.get("meal_reasoning")
+    if not isinstance(meal_reasoning, Mapping):
+        meal_reasoning = reasoning_state
+    trace_id = _optional_text(meal_reasoning.get("trace_id"))
+    rationale = _optional_text(meal_reasoning.get("decision_rationale")) or "No reasoning rationale recorded."
+    if trace_id:
+        return f"trace_id={trace_id}; {rationale}"
+    return rationale
+
+
+def _question_with_approval_candidates(
+    prompt_payload: Mapping[str, Any],
+    *,
+    approval_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    question = dict(prompt_payload)
+    approvals = [
+        _optional_text(candidate.get("proposed_name") or candidate.get("label"))
+        for candidate in approval_candidates
+    ]
+    approvals = [name for name in approvals if name]
+    if not approvals:
+        return question
+
+    approvals_text = _human_join(approvals)
+    prompt = _text(question.get("prompt"), default="Tell me about this meal.")
+    question["prompt"] = (
+        f"{prompt} I also have {approvals_text} as likely matches. "
+        "Confirm or correct those in the same reply if needed."
+    )
+    invalid_prompt = _text(question.get("invalid_prompt"), default=prompt)
+    question["invalid_prompt"] = (
+        f"{invalid_prompt} You can also confirm or correct {approvals_text} in the same reply."
+    )
+    return question
+
+
+def _human_join(items: list[str]) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
 
 
 def _initial_roadmap_step_for_target(target: Mapping[str, Any]) -> str:
@@ -981,6 +1168,7 @@ __all__ = [
     "build_best_effort_closeout",
     "build_confirmation_message",
     "build_grounding_reasoning_state",
+    "build_interview_turn_state",
     "complete_target_question",
     "confirmation_items_from_state",
     "current_target_question",

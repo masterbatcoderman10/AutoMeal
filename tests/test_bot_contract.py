@@ -239,7 +239,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
-            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
             patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value={"grounding_required": False})) as finalize,
         ):
             await interview_text(update, context)
@@ -289,7 +289,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
-            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
             patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value={"grounding_required": True, "meal_entries": []})),
         ):
             await interview_text(update, context)
@@ -441,7 +441,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
-            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
             patch("bot.handlers._run_meal_interview_turn", AsyncMock(return_value=turn), create=True) as run_turn,
             patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock()) as finalize,
         ):
@@ -519,7 +519,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
-            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
             patch("bot.handlers._run_meal_interview_turn", AsyncMock(return_value=turn), create=True) as run_turn,
             patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock()) as finalize,
         ):
@@ -798,7 +798,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
-            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
             patch("bot.handlers._run_meal_interview_turn", AsyncMock(return_value=turn), create=True) as run_turn,
             patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value={"grounding_required": False, "meal_entries": []})) as finalize,
         ):
@@ -885,7 +885,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
-            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
             patch("bot.handlers._run_meal_interview_turn", AsyncMock(side_effect=InterviewTurnValidationError("coverage mismatch")), create=True) as run_turn,
             patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock()) as finalize,
         ):

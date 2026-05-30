@@ -400,7 +400,7 @@ class FixInterviewFlowTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
-            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
             patch(
                 "bot.handlers.correction_service.build_entry_correction_context",
                 AsyncMock(
@@ -483,7 +483,7 @@ class FixInterviewFlowTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
-            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
             patch(
                 "bot.handlers.correction_service.build_entry_correction_context",
                 AsyncMock(

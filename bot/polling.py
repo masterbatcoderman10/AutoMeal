@@ -17,8 +17,8 @@ from app.services.image_service import save_segment_crop
 from app.services.vision_service import (
     dedupe_overlapping_segments,
     detect_food_photo,
-    label_food_segment,
     segment_food_photo_with_retry,
+    segment_debug_label,
 )
 from app.services import reasoning_service
 from bot.messages import (
@@ -772,22 +772,13 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                             MealSegment(
                                 id=segment_id,
                                 meal_log_id=meal.id,
+                                label=segment_debug_label(segment),
                                 bounding_box=segment.box_2d,
                                 cropped_image_url=str(crop_path),
                             )
                         )
 
                     session.add_all(segment_rows)
-
-                    for segment_row in segment_rows:
-                        label = await label_food_segment(
-                            segment_row.cropped_image_url,
-                            llm_client=llm_client,
-                            model=settings.LABEL_MODEL,
-                        )
-                        if label is None:
-                            raise ValueError("segment label missing")
-                        segment_row.label = label
 
                     _transition_meal_status(meal, MealProcessingStatus.EMBEDDING)
                     await session.commit()

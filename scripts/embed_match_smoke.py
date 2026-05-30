@@ -27,8 +27,8 @@ from app.services.llm_client import get_llm_client
 from app.services.vision_service import (
     dedupe_overlapping_segments,
     detect_food_photo,
-    label_food_segment,
     segment_food_photo_with_retry,
+    segment_debug_label,
 )
 
 EMBEDDING_MODEL = "google/gemini-embedding-2-preview"
@@ -293,15 +293,10 @@ async def _run_grouped_uat(args: argparse.Namespace, llm_client) -> dict[str, An
                         normalized_box=decision.box_2d,
                         uploads_dir=uploads_dir,
                     )
-                    label = await label_food_segment(
-                        str(crop_path),
-                        llm_client=llm_client,
-                        model=settings.LABEL_MODEL,
-                    )
                     segment_row = MealSegment(
                         id=segment_id,
                         meal_log_id=meal.id,
-                        label=label or decision.label_hint or "unlabeled food",
+                        label=segment_debug_label(decision),
                         bounding_box=decision.box_2d,
                         cropped_image_url=str(crop_path),
                     )

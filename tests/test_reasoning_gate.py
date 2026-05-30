@@ -135,7 +135,7 @@ class ReasoningGateTests(unittest.TestCase):
                 },
             },
             {
-                "label": "high nutrition impact requires interview",
+                "label": "high nutrition impact alone does not require interview",
                 "payload": {
                     "action": "AUTO_CONFIRM",
                     "meal_state": "READY_TO_WRITE",
@@ -159,11 +159,39 @@ class ReasoningGateTests(unittest.TestCase):
         for row in matrix:
             with self.subTest(row["label"]):
                 result = _run_gate(row["payload"])
-                self.assertIn(
-                    result["meal_state"],
-                    INTERVIEW_STATES,
-                    msg=f"{row['label']} should route to interview",
-                )
+                if row["label"] == "high nutrition impact alone does not require interview":
+                    self.assertEqual(result["meal_state"], "READY_TO_WRITE")
+                    self.assertIn(result["action"], {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE", "READY_TO_WRITE"})
+                else:
+                    self.assertIn(
+                        result["meal_state"],
+                        INTERVIEW_STATES,
+                        msg=f"{row['label']} should route to interview",
+                    )
+
+    def test_high_nutrition_impact_supports_existing_uncertainty_signal(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-high-nutrition-supporting",
+            "top_3": [
+                _candidate_payload(
+                    candidate_id="best",
+                    similarity=0.98,
+                    nutrition_impact=0.55,
+                ),
+                _candidate_payload(candidate_id="fallback_1", similarity=0.95),
+                _candidate_payload(candidate_id="fallback_2", similarity=0.8),
+            ],
+            "decision_rationale": "best candidate is strong but close to fallback",
+            "gate_reason": "",
+            "segment_count": 1,
+        }
+
+        result = _run_gate(payload)
+
+        self.assertIn(result["meal_state"], INTERVIEW_STATES)
+        self.assertIn("nutrition impact", result.get("gate_reason") or "")
 
     def test_gate_prefers_ready_to_write_when_confidence_and_context_are_clean(self) -> None:
         payload = {

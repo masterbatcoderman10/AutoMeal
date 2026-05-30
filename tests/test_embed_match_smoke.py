@@ -477,11 +477,6 @@ class SmokeGroupedUatTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(smoke, "dedupe_overlapping_segments", side_effect=lambda segments: segments),
                 patch.object(smoke, "save_segment_crop", return_value=crop_path),
                 patch.object(
-                    smoke,
-                    "label_food_segment",
-                    AsyncMock(return_value="generic curry"),
-                ) as label_food_segment,
-                patch.object(
                     smoke.matching_service,
                     "match_segment_against_visual_corpus",
                     AsyncMock(return_value=match_result),
@@ -505,7 +500,7 @@ class SmokeGroupedUatTests(unittest.IsolatedAsyncioTestCase):
             ):
                 report = await smoke._run_grouped_uat(args, llm_client=object())
 
-        label_food_segment.assert_not_awaited()
+        self.assertFalse(hasattr(smoke, "label_food_segment"))
         self.assertEqual(
             report["segment_labels"],
             [

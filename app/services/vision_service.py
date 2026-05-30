@@ -31,6 +31,19 @@ class SegmentDecision:
     confidence: float | None
 
 
+def segment_debug_label(segment: SegmentDecision | Mapping[str, Any] | object, *, default: str = "unlabeled food") -> str:
+    if isinstance(segment, Mapping):
+        raw_hint = segment.get("label_hint")
+    else:
+        raw_hint = getattr(segment, "label_hint", None)
+
+    if isinstance(raw_hint, str):
+        normalized = " ".join(raw_hint.strip().split())
+        if normalized:
+            return normalized
+    return default
+
+
 def _resolve_image_reference(image_url: str) -> str:
     if image_url.startswith(("http://", "https://", "data:")):
         return image_url
@@ -480,6 +493,7 @@ __all__ = [
     "SEGMENT_MIN_AREA",
     "WEAK_SEGMENT_CONFIDENCE_THRESHOLD",
     "SegmentDecision",
+    "segment_debug_label",
     "dedupe_overlapping_segments",
     "segment_prompt",
     "segment_response_format",

@@ -170,6 +170,32 @@ def _should_ask_quantity(missing_evidence: list[str]) -> bool:
     return False
 
 
+def _has_nutrition_relevant_missing_evidence(missing_evidence: list[str]) -> bool:
+    if not missing_evidence:
+        return False
+    needle = {
+        "portion",
+        "portion_unit",
+        "serving",
+        "quantity",
+        "ingredient",
+        "vegetable",
+        "protein",
+        "meat",
+        "bread",
+        "rice",
+        "sauce",
+        "oil",
+        "filling",
+        "inside",
+    }
+    for item in missing_evidence:
+        normalized = item.casefold()
+        if any(term in normalized for term in needle):
+            return True
+    return False
+
+
 def _safe_parse_json(value: str | bytes | bytearray | None) -> dict[str, Any] | None:
     if not isinstance(value, (str, bytes, bytearray)):
         return None
@@ -318,6 +344,8 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     fallback_identity = _candidate_score(top_two if isinstance(top_two, Mapping) else {})
     margin = top_identity - fallback_identity
     missing_evidence = _coerce_string_list(top_one.get("missing_evidence") if isinstance(top_one, Mapping) else None)
+    if not missing_evidence:
+        missing_evidence = _coerce_string_list(group.get("missing_evidence"))
     nutrition_impact = _coerce_float(top_one.get("nutrition_impact"), default=0.0) if isinstance(top_one, Mapping) else 0.0
 
     if top_identity < threshold:
@@ -326,7 +354,9 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
         reasons.append(f"candidate margin {margin:.3f} is too narrow")
     if missing_evidence:
         reasons.append("missing evidence: " + ", ".join(sorted(set(missing_evidence))))
-    if nutrition_impact > _NUTRITION_IMPACT_THRESHOLD:
+    if nutrition_impact > _NUTRITION_IMPACT_THRESHOLD and (
+        reasons or _has_nutrition_relevant_missing_evidence(missing_evidence)
+    ):
         reasons.append(f"nutrition impact {nutrition_impact:.3f} exceeds policy threshold")
 
     if reasons:
@@ -640,7 +670,7 @@ def _build_reasoning_prompt(
                 f"Meal {meal.id}: perform one meal-level reasoning pass. "
                 f"segment_count={len(match_results)}. "
                 "The whole_meal_image follows first, then each indexed segment crop with "
-                "its detector label, bounding_box, and top_3_candidates. Return the "
+                "its detector hint, bounding_box, and top_3_candidates. Return the "
                 "strict reasoning_contract_v1 JSON only."
             ),
         },
@@ -1107,6 +1137,25 @@ def _coerce_top_candidate(result: Any) -> dict[str, Any]:
     return {}
 
 
+def _prefer_reasoning_group_labels(food_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized_groups: list[dict[str, Any]] = []
+    for group in food_groups:
+        if not isinstance(group, Mapping):
+            continue
+        normalized_group = dict(group)
+        group_label = _coerce_str(normalized_group.get("group_label"), "group_label")
+        top_three = [
+            dict(candidate)
+            for candidate in list(normalized_group.get("top_3", []))
+            if isinstance(candidate, Mapping)
+        ]
+        if group_label and top_three:
+            top_three[0]["label"] = group_label
+            normalized_group["top_3"] = top_three
+        normalized_groups.append(normalized_group)
+    return normalized_groups
+
+
 async def finalize_meal_from_reasoning(
     *,
     session,
@@ -1137,12 +1186,15 @@ async def finalize_meal_from_reasoning(
             "completed_by": "reasoning_service",
         }
 
-    final_segments = build_grouped_final_segment_resolutions(
-        food_groups=[
+    grouped_food_groups = _prefer_reasoning_group_labels(
+        [
             dict(group)
             for group in list(result.get("food_groups", []))
             if isinstance(group, Mapping)
-        ],
+        ]
+    )
+    final_segments = build_grouped_final_segment_resolutions(
+        food_groups=grouped_food_groups,
         segments=segments,
         match_results=match_results,
         trace_id=_coerce_str(result.get("trace_id"), "trace_id"),

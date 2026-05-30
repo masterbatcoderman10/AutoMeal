@@ -948,8 +948,8 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 "segment_food_photo_with_retry",
                 AsyncMock(
                     return_value=[
-                        SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6], confidence=0.9),
-                        SimpleNamespace(box_2d=[0.6, 0.6, 1.0, 1.0], confidence=0.9),
+                        SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6], confidence=0.9, label_hint="flatbread"),
+                        SimpleNamespace(box_2d=[0.6, 0.6, 1.0, 1.0], confidence=0.9, label_hint="vegetable curry"),
                     ],
                 ),
             ),
@@ -960,11 +960,6 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                     Path("/data/uploads/crops/aaa.jpg"),
                     Path("/data/uploads/crops/bbb.jpg"),
                 ],
-            ),
-            patch.object(
-                polling,
-                "label_food_segment",
-                AsyncMock(side_effect=["pita bread", "mixed vegetables"]),
             ),
             patch.object(
                 polling,
@@ -981,6 +976,10 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(segment.bounding_box)
             self.assertIn(segment.cropped_image_url, {"/data/uploads/crops/aaa.jpg", "/data/uploads/crops/bbb.jpg"})
             self.assertIsNotNone(segment.label)
+        self.assertEqual(
+            [segment.label for segment in session.add_all.call_args.args[0]],
+            ["flatbread", "vegetable curry"],
+        )
         self.assertEqual(meal.processing_status, MealProcessingStatus.EMBEDDING)
         bot.send_message.assert_not_awaited()
 
@@ -1030,18 +1029,11 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 polling,
                 "segment_food_photo_with_retry",
-                AsyncMock(return_value=[SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6], confidence=0.9)]),
+                AsyncMock(
+                    return_value=[SimpleNamespace(box_2d=[0.0, 0.0, 0.6, 0.6], confidence=0.9, label_hint="pita bread")]
+                ),
             ),
-            patch.object(
-                polling,
-                "save_segment_crop",
-                return_value=Path("/data/uploads/crops/aaa.jpg"),
-            ),
-            patch.object(
-                polling,
-                "label_food_segment",
-                AsyncMock(return_value="pita bread"),
-            ),
+            patch.object(polling, "save_segment_crop", return_value=Path("/data/uploads/crops/aaa.jpg")),
             patch.object(
                 polling,
                 "get_llm_client",
@@ -1110,7 +1102,6 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 "get_llm_client",
                 return_value=SimpleNamespace(chat_completion=AsyncMock()),
             ),
-            patch.object(polling, "label_food_segment", AsyncMock()),
             patch.object(polling, "format_soft_failure_message", return_value="soft fail"),
         ):
             with self.assertRaises(asyncio.CancelledError):

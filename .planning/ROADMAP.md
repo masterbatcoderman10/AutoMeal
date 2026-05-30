@@ -157,11 +157,12 @@ Eight phases transform a blank repo into a fully operational personal meal track
   7. On `ready_to_confirm`, the structured confirmation items flow through the existing final write-back/grounding path so FoodItems, DiaryEntries, and FoodVisuals are written by the same authoritative transaction used by Phase 4.1.
   8. The interview model and fallback are explicit config keys, defaulting to a low-cost text model such as `google/gemini-3.1-flash-lite`, and Langfuse traces show the model, prompt context, and structured response.
 
-**Plans**: 3 plans
-Plans:
-- [ ] `04.2-01-PLAN.md` — strict interview-turn contract, explicit model config, and authoritative grouped state scaffold
-- [ ] `04.2-02-PLAN.md` — single-active-session LLM meal interview kickoff, continuation, and finalizer handoff
+**Plans**: 3 plansPlans:
+
+- [ ] `04.2-01-PLAN.md` — Wave 0 Python 3.12 bootstrap, strict interview-turn contract, explicit model config, and authoritative grouped state scaffold
+- [ ] `04.2-02-PLAN.md` — single-active-session LLM meal interview kickoff, continuation, bounded repair, and fail-closed finalizer handoff
 - [ ] `04.2-03-PLAN.md` — prompt-scoped reply routing, `/fix` preservation, and Phase 04.2 live UAT checklist
+
 **Phase note**: This phase exists because UAT showed the deterministic roadmap `INITIAL_QUESTION -> FOOD_NAME -> SOURCE_TYPE -> PORTION_CONTEXT` cannot interpret natural answers in context. It should not add web grounding or nutrition lookup; it only upgrades the human interview brain and its handoff back into existing write paths.
 
 ---

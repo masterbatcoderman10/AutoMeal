@@ -435,6 +435,112 @@ class InterviewConfirmationEditTests(unittest.TestCase):
 
 
 class InterviewPersistencePrepTests(unittest.TestCase):
+    def test_build_interview_turn_state_includes_unresolved_and_approval_groups(self) -> None:
+        from app.services import interview_service
+
+        build_interview_turn_state = getattr(interview_service, "build_interview_turn_state", None)
+        self.assertTrue(callable(build_interview_turn_state), "build_interview_turn_state() must exist for Phase 04.2")
+        if not callable(build_interview_turn_state):
+            return
+
+        meal = SimpleNamespace(
+            id="meal-threaded",
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "trace_id": "trace-interview-1",
+                    "decision_rationale": "Need the curry vegetable but the bread and chicken look ready to approve.",
+                    "food_groups": [
+                        {
+                            "group_id": "group-egg-curry",
+                            "group_label": "egg curry",
+                            "group_action": "INTERVIEW",
+                            "group_state": "PENDING_INTERVIEW",
+                            "primary_segment_id": "seg-egg-1",
+                            "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                            "missing_evidence": ["vegetable inside curry"],
+                            "question_kind": "DETAIL",
+                            "question_focus": "vegetable inside egg curry",
+                            "question_examples": [
+                                "egg curry with bottle gourd",
+                                "egg curry with zucchini",
+                            ],
+                            "top_3": [
+                                {"label": "egg curry with bottle gourd"},
+                                {"label": "egg curry with zucchini"},
+                                {"label": "egg curry with spinach"},
+                            ],
+                        },
+                        {
+                            "group_id": "group-pita",
+                            "group_label": "pita bread",
+                            "group_action": "AUTO_CONFIRM_WITH_TRACE",
+                            "group_state": "READY_TO_WRITE",
+                            "primary_segment_id": "seg-bread-1",
+                            "segment_ids": ["seg-bread-1"],
+                            "missing_evidence": [],
+                            "selected_candidate_id": "candidate-pita",
+                            "decision_rationale": "Strong bread match.",
+                            "top_3": [
+                                {"candidate_id": "candidate-pita", "label": "pita bread"},
+                                {"candidate_id": "candidate-naan", "label": "naan bread"},
+                                {"candidate_id": "candidate-flatbread", "label": "flatbread"},
+                            ],
+                        },
+                        {
+                            "group_id": "group-chicken-curry",
+                            "group_label": "chicken curry",
+                            "group_action": "AUTO_CONFIRM",
+                            "group_state": "READY_TO_WRITE",
+                            "primary_segment_id": "seg-chicken-1",
+                            "segment_ids": ["seg-chicken-1"],
+                            "missing_evidence": [],
+                            "selected_candidate_id": "candidate-chicken-curry",
+                            "decision_rationale": "High-confidence curry match.",
+                            "top_3": [
+                                {"candidate_id": "candidate-chicken-curry", "label": "chicken curry"},
+                                {"candidate_id": "candidate-chicken-leg-curry", "label": "chicken leg curry"},
+                                {"candidate_id": "candidate-chicken-stew", "label": "chicken stew"},
+                            ],
+                        },
+                    ],
+                }
+            },
+        )
+        segments = [
+            SimpleNamespace(id="seg-egg-1", label="egg curry", cropped_image_url="/tmp/egg-1.jpg"),
+            SimpleNamespace(id="seg-egg-2", label="egg vegetable curry", cropped_image_url="/tmp/egg-2.jpg"),
+            SimpleNamespace(id="seg-bread-1", label="bread", cropped_image_url="/tmp/pita.jpg"),
+            SimpleNamespace(id="seg-chicken-1", label="chicken curry", cropped_image_url="/tmp/chicken.jpg"),
+        ]
+
+        state = build_interview_turn_state(meal=meal, segments=segments)
+
+        self.assertEqual(state["meal_id"], "meal-threaded")
+        self.assertEqual([item["group_id"] for item in state["unresolved_targets"]], ["group-egg-curry"])
+        self.assertEqual(
+            [item["group_id"] for item in state["approval_candidates"]],
+            ["group-pita", "group-chicken-curry"],
+        )
+        self.assertEqual(
+            state["unresolved_targets"][0]["candidate_choices"],
+            [
+                "egg curry with bottle gourd",
+                "egg curry with zucchini",
+                "egg curry with spinach",
+            ],
+        )
+        self.assertEqual(state["unresolved_targets"][0]["missing_evidence"], ["vegetable inside curry"])
+        self.assertEqual(
+            [item["proposed_name"] for item in state["approval_candidates"]],
+            ["pita bread", "chicken curry"],
+        )
+        self.assertIn("trace-interview-1", state["reasoning_summary"])
+        self.assertIn("seg-egg-1", state["segment_refs"])
+        self.assertEqual(state["segment_refs"]["seg-bread-1"]["crop_path"], "/tmp/pita.jpg")
+        self.assertIn("egg curry", state["current_question"]["prompt"].lower())
+        self.assertIn("pita bread", state["current_question"]["prompt"].lower())
+        self.assertIn("chicken curry", state["current_question"]["prompt"].lower())
+
     def test_prepare_interview_session_targets_unresolved_food_groups_before_quantity(self) -> None:
         import asyncio
 

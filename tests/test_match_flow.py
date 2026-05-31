@@ -593,6 +593,30 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
+        prepared_interview = SimpleNamespace(
+            id="interview-1",
+            chat_id="999",
+            current_prompt_payload={
+                "roadmap_step": "INITIAL_QUESTION",
+                "pending_targets": [
+                    {
+                        "group_id": "group-egg-curry",
+                        "primary_segment_id": "segment-1",
+                        "segment_ids": ["segment-1", "segment-2"],
+                        "label": "egg curry",
+                        "question_kind": "DETAIL",
+                        "question_focus": "vegetable inside egg curry",
+                        "question_examples": [
+                            "egg curry with bottle gourd",
+                            "egg curry with zucchini",
+                        ],
+                    }
+                ],
+                "current_target_index": 0,
+                "answers_by_segment": [],
+                "session_mode": "MEAL_INTERVIEW",
+            },
+        )
 
         async def _finalize_unresolved(**_kwargs):
             meal.processing_status = MealProcessingStatus.INTERVIEWING
@@ -623,11 +647,6 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ],
             ),
-            patch.object(
-                polling,
-                "format_unresolved_match_message",
-                return_value="I can see your meal, but I do not know it yet.",
-            ),
             patch.object(polling, "get_llm_client", return_value=object()),
             patch.object(
                 polling.reasoning_service,
@@ -642,46 +661,30 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 polling.interview_service,
                 "prepare_interview_session",
-                AsyncMock(
-                    return_value=SimpleNamespace(
-                        current_prompt_payload={
-                            "roadmap_step": "INITIAL_QUESTION",
-                            "pending_targets": [
-                                {
-                                    "group_id": "group-egg-curry",
-                                    "primary_segment_id": "segment-1",
-                                    "segment_ids": ["segment-1", "segment-2"],
-                                    "label": "egg curry",
-                                    "question_kind": "DETAIL",
-                                    "question_focus": "vegetable inside egg curry",
-                                    "question_examples": [
-                                        "egg curry with bottle gourd",
-                                        "egg curry with zucchini",
-                                    ],
-                                }
-                            ],
-                            "current_target_index": 0,
-                            "answers_by_segment": [],
-                            "session_mode": "MEAL_INTERVIEW",
-                        },
-                    )
-                ),
+                AsyncMock(return_value=prepared_interview),
             ) as prepare_interview_session,
+            patch.object(
+                polling,
+                "_start_meal_interview_turn",
+                AsyncMock(return_value=SimpleNamespace(turn_action="continue_interview")),
+            ) as start_meal_interview_turn,
             patch.object(polling.asyncio, "sleep", new=_noop_sleep),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.INTERVIEWING)
-        prepare_interview_session.assert_awaited_once()
-        bot.send_message.assert_awaited_once_with(
+        prepare_interview_session.assert_awaited_once_with(
+            session=session,
+            meal=meal,
+            segments=[segment_one, segment_two],
             chat_id="999",
-            text=(
-                "I can see your meal, but I do not know it yet.\n\n"
-                "I can see the egg curry, but I can't tell which vegetable is in it. "
-                "What should I call it? For example: egg curry with bottle gourd, "
-                "egg curry with zucchini, or the name you normally use."
-            ),
+        )
+        start_meal_interview_turn.assert_awaited_once_with(
+            bot=bot,
+            session=session,
+            interview=prepared_interview,
+            settings=settings,
         )
         session.add.assert_not_called()
 

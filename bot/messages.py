@@ -37,6 +37,23 @@ def format_grounding_pending_message(meal_id: str) -> str:
     )
 
 
+def format_grounding_blocker_message(
+    meal_id: str,
+    *,
+    blocker: str,
+    saved_as_unverified: bool,
+) -> str:
+    if saved_as_unverified:
+        return (
+            f"I hit a grounding blocker for meal {meal_id[:8]}: {blocker}. "
+            "I saved the confirmed items as unverified and marked them for grounding follow-up."
+        )
+    return (
+        f"I hit a grounding blocker for meal {meal_id[:8]}: {blocker}. "
+        "I couldn't safely save the meal yet, so it is on hold until that blocker is resolved."
+    )
+
+
 def format_interview_confirmation_message(items: list[dict], *, action: str = "log it") -> str:
     if not items:
         return f"Please confirm before I write this. Reply `confirm` to {action}."
@@ -228,6 +245,7 @@ __all__ = [
     "format_interview_confirmation_message",
     "format_interview_reminder_message",
     "format_fix_confirmation_message",
+    "format_grounding_blocker_message",
     "format_grounding_pending_message",
     "format_match_completion_message",
     "format_recent_fix_targets",

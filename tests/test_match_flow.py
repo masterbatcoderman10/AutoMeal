@@ -918,11 +918,20 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
         bot = SimpleNamespace(send_message=AsyncMock())
 
+        async def _capture_degraded_finalize(**_kwargs):
+            meal.processing_status = MealProcessingStatus.COMPLETED
+            meal.reasoning_state_json = {
+                "grounding_status": "DEGRADED_SAVED",
+                "grounding_failure": {"category": "provider_quota"},
+            }
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
             patch.object(polling, "get_llm_client", return_value=object()),
             patch.object(polling.reasoning_service, "run_reasoning_request", AsyncMock(side_effect=quota_error)),
+            patch.object(polling.interview_service, "finalize_confirmed_interview", AsyncMock(side_effect=_capture_degraded_finalize)),
             patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
         ):
             with self.assertRaises(asyncio.CancelledError):

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,6 +32,7 @@ from bot.callback_data import (
 from bot.messages import (
     CompletionItem,
     format_ack_message,
+    format_grounding_blocker_message,
     format_grounding_pending_message,
     format_interview_reminder_message,
     format_match_completion_message,
@@ -281,6 +283,132 @@ def _set_grounding_interview_status(
     interview.current_prompt_payload = payload
     interview.state_key = "GROUNDING_PENDING" if active else "GROUNDING_COMPLETED"
     interview.is_active = active
+
+
+def _classify_grounding_failure(error: Exception, *, fallback_category: str = "tool_execution") -> dict[str, Any]:
+    message = str(error or "").strip()
+    lowered = message.casefold()
+    category = fallback_category
+    blocker = "the grounding tools failed"
+    retryable = False
+    status_code: int | None = None
+
+    if isinstance(error, httpx.HTTPStatusError):
+        status_code = int(error.response.status_code) if error.response is not None else None
+        if status_code == 429 or "quota" in lowered or "limit" in lowered or "rate" in lowered:
+            category = "provider_quota"
+            blocker = "the provider quota was exceeded"
+        elif status_code in {401, 403}:
+            category = "provider_auth"
+            blocker = "provider authentication failed"
+        else:
+            category = "tool_execution"
+            blocker = "the grounding provider returned an unexpected error"
+    elif isinstance(
+        error,
+        (
+            httpx.ConnectError,
+            httpx.ReadError,
+            httpx.ReadTimeout,
+            httpx.WriteError,
+            httpx.WriteTimeout,
+            httpx.TimeoutException,
+            httpx.NetworkError,
+        ),
+    ):
+        category = "network"
+        blocker = "a network request failed"
+        retryable = True
+    elif "tool" in lowered or "firecrawl" in lowered or "searxng" in lowered:
+        category = "tool_execution"
+        blocker = "one of the grounding tools failed"
+        retryable = True
+    elif fallback_category == "missing_context":
+        category = "missing_context"
+        blocker = "the confirmed meal context was incomplete"
+
+    failure = {
+        "category": category,
+        "message": blocker,
+        "retryable": retryable,
+    }
+    if status_code is not None:
+        failure["status_code"] = status_code
+    return failure
+
+
+async def _apply_grounding_failure_policy(
+    *,
+    session: AsyncSession,
+    meal: MealLog,
+    interview: InterviewSession,
+    segments: list[MealSegment],
+    failure: Mapping[str, Any],
+    bot,
+    settings,
+) -> None:
+    confirmation_items = _grounding_confirmation_items(getattr(meal, "reasoning_state_json", None))
+    now = datetime.now(UTC)
+    can_degraded_save = bool(confirmation_items)
+    blocker = str(failure.get("message") or "the grounding tools failed")
+
+    if can_degraded_save:
+        await interview_service.finalize_confirmed_interview(
+            session=session,
+            meal=meal,
+            confirmation_items=confirmation_items,
+            segments=segments,
+            best_effort=True,
+            interview_state=dict(interview.current_prompt_payload or {}),
+            force_degraded_save=True,
+            degraded_grounding_failure=failure,
+        )
+        _set_grounding_interview_status(
+            interview=interview,
+            status="DEGRADED_SAVED",
+            updated_at=now,
+            active=False,
+            consumer="poll_post_interview_grounding",
+        )
+        session.add(interview)
+        await session.commit()
+        await bot.send_message(
+            chat_id=settings.TELEGRAM_CHAT_ID,
+            text=format_grounding_blocker_message(
+                meal.id,
+                blocker=blocker,
+                saved_as_unverified=True,
+            ),
+        )
+        return
+
+    meal.processing_status = MealProcessingStatus.INTERVIEWING
+    meal.reasoning_state_json = _merge_post_interview_reasoning_state(
+        prior_state=getattr(meal, "reasoning_state_json", None),
+        finalization=None,
+        current_state=getattr(meal, "reasoning_state_json", None),
+        status="HOLD_REQUIRED",
+        updated_at=now,
+        extra={"grounding_failure": dict(failure)},
+    )
+    _set_grounding_interview_status(
+        interview=interview,
+        status="HOLD_REQUIRED",
+        updated_at=now,
+        active=True,
+        consumer="poll_post_interview_grounding",
+    )
+    session.add(meal)
+    session.add(interview)
+    await session.commit()
+    await bot.send_message(
+        chat_id=settings.TELEGRAM_CHAT_ID,
+        text=format_grounding_blocker_message(
+            meal.id,
+            blocker=blocker,
+            saved_as_unverified=False,
+        ),
+    )
 
 
 async def _run_reasoning_pipeline(
@@ -786,37 +914,46 @@ async def poll_post_interview_grounding(
                     )
                     await session.commit()
                     if missing_segments:
-                        meal.reasoning_state_json = _merge_post_interview_reasoning_state(
-                            prior_state=prior_state,
-                            finalization=None,
-                            current_state=getattr(meal, "reasoning_state_json", None),
-                            status="RETRY_PENDING",
-                            updated_at=now,
-                            extra={
-                                "grounding_retry_reason": "missing_match_candidates",
-                                "grounding_missing_segments": missing_segments,
-                            },
-                        )
-                        _set_grounding_interview_status(
+                        await _apply_grounding_failure_policy(
+                            session=session,
+                            meal=meal,
                             interview=interview,
-                            status="RETRY_PENDING",
-                            updated_at=now,
-                            active=True,
-                            consumer="poll_post_interview_grounding",
+                            segments=segments,
+                            failure={
+                                "category": "missing_context",
+                                "message": "the confirmed meal context was incomplete",
+                                "missing_segments": missing_segments,
+                                "retryable": False,
+                            },
+                            bot=bot,
+                            settings=settings,
                         )
-                        await session.commit()
                         await _poll_sleep(interval)
                         continue
 
                     llm_client = get_llm_client()
-                    _reasoning_result, finalization = await _run_reasoning_pipeline(
-                        llm_client=llm_client,
-                        meal=meal,
-                        match_results=match_results,
-                        segments=segments,
-                        session=session,
-                        settings=settings,
-                    )
+                    try:
+                        _reasoning_result, finalization = await _run_reasoning_pipeline(
+                            llm_client=llm_client,
+                            meal=meal,
+                            match_results=match_results,
+                            segments=segments,
+                            session=session,
+                            settings=settings,
+                        )
+                    except Exception as exc:
+                        logger.exception("Error in poll_post_interview_grounding")
+                        await _apply_grounding_failure_policy(
+                            session=session,
+                            meal=meal,
+                            interview=interview,
+                            segments=segments,
+                            failure=_classify_grounding_failure(exc),
+                            bot=bot,
+                            settings=settings,
+                        )
+                        await _poll_sleep(interval)
+                        continue
 
                     state_status = "COMPLETED" if finalization.get("finalized") else "RETRY_PENDING"
                     result_timestamp = datetime.now(UTC)

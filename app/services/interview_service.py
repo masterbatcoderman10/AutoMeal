@@ -736,6 +736,12 @@ def final_resolution_from_confirmation(
     reasoning = "NEEDS_GROUNDING" if needs_grounding else parsed.evidence
     segment_id = parsed.segment_id or (getattr(segment, "id", None) if segment is not None else None)
     embedding = getattr(segment, "embedding", None) if segment is not None else None
+    segment_embedding = _embedding_payload(embedding)
+    can_preserve_visual_learning = (
+        segment is not None
+        and getattr(segment, "cropped_image_url", None) is not None
+        and segment_embedding is not None
+    )
     return FinalSegmentResolution(
         food=ResolvedFoodInput(
             canonical_name=parsed.name,
@@ -751,13 +757,13 @@ def final_resolution_from_confirmation(
         ),
         segment_id=segment_id,
         segment_cropped_image_url=getattr(segment, "cropped_image_url", None) if segment is not None else None,
-        segment_embedding=_embedding_payload(embedding),
+        segment_embedding=segment_embedding,
         portion_bucket=parsed.portion_bucket,
         identification_method="INTERVIEW_BEST_EFFORT" if best_effort else "INTERVIEW",
         quantity_json={"grounding_prep": grounding_prep} if grounding_prep else None,
         quantity_display=parsed.quantity_display,
-        create_food_visual=not best_effort,
-        visual_learning_eligible=not best_effort,
+        create_food_visual=(not best_effort) or can_preserve_visual_learning,
+        visual_learning_eligible=(not best_effort) or can_preserve_visual_learning,
     )
 
 
@@ -808,6 +814,8 @@ async def finalize_confirmed_interview(
     segments: list[MealSegment] | None = None,
     best_effort: bool = False,
     interview_state: Mapping[str, Any] | None = None,
+    force_degraded_save: bool = False,
+    degraded_grounding_failure: Mapping[str, Any] | None = None,
 ):
     segments_by_id = {segment.id: segment for segment in segments or []}
     final_segments = [
@@ -818,7 +826,7 @@ async def finalize_confirmed_interview(
         )
         for item in confirmation_items
     ]
-    if any(resolution.food.needs_grounding for resolution in final_segments):
+    if any(resolution.food.needs_grounding for resolution in final_segments) and not force_degraded_save:
         meal.processing_status = MealProcessingStatus.INTERVIEWING
         meal.reasoning_state_json = build_grounding_reasoning_state(
             confirmation_items=confirmation_items,
@@ -850,6 +858,12 @@ async def finalize_confirmed_interview(
             confirmation_items=confirmation_items,
             best_effort=best_effort,
             interview_state=interview_state,
+            grounding_status=(
+                "DEGRADED_SAVED"
+                if force_degraded_save and degraded_grounding_failure is not None
+                else None
+            ),
+            grounding_failure=degraded_grounding_failure,
         ),
     )
     if hasattr(session, "commit"):
@@ -865,6 +879,8 @@ def _build_finalization_reasoning_state(
     confirmation_items: list[Mapping[str, Any]],
     best_effort: bool,
     interview_state: Mapping[str, Any] | None,
+    grounding_status: str | None = None,
+    grounding_failure: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = dict(getattr(meal, "reasoning_state_json", None) or {})
     interview_payload = dict(interview_state or {})
@@ -878,6 +894,15 @@ def _build_finalization_reasoning_state(
             "completed_at": completed_at,
         }
     )
+    if grounding_status:
+        state["grounding_required"] = True
+        state["post_interview_grounding"] = True
+        state["grounding_status"] = grounding_status
+    if isinstance(grounding_failure, Mapping):
+        state["grounding_failure"] = {
+            str(key): _json_safe_payload(value)
+            for key, value in grounding_failure.items()
+        }
 
     clarification_answers = interview_payload.get("answers_by_question_id")
     if isinstance(clarification_answers, Mapping):

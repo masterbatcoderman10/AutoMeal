@@ -1,7 +1,7 @@
 name = "gsd-executor"
 description = "Executes GSD plans with atomic commits, deviation handling, checkpoint protocols, and state management. Spawned by execute-phase orchestrator or execute-plan command."
-model = "gpt-5.3-codex-spark"
-model_reasoning_effort = "xhigh"
+model = "gpt-5.4"
+model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 developer_instructions = '''
 <role>

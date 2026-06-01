@@ -532,8 +532,8 @@ def _dedupe_string_choices(values: list[str]) -> list[str]:
     return deduped
 
 
-def _normalized_choice_payloads(choices: list[dict[str, str]]) -> list[dict[str, str]]:
-    deduped: list[dict[str, str]] = []
+def _normalized_choice_payloads(choices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
     for choice in choices:
         value = _coerce_str(choice.get("value"), "value")
@@ -545,18 +545,21 @@ def _normalized_choice_payloads(choices: list[dict[str, str]]) -> list[dict[str,
         if key in seen:
             continue
         seen.add(key)
-        deduped.append(
-            {
-                "value": value,
-                "label": label,
-                "quick_prompt": quick_prompt or label,
-            }
-        )
+        payload = {
+            "value": value,
+            "label": label,
+            "quick_prompt": quick_prompt or label,
+        }
+        for key in ("food_item_id", "source_type", "brand_name", "restaurant_name"):
+            extra_value = _coerce_str(choice.get(key), key)
+            if extra_value:
+                payload[key] = extra_value
+        deduped.append(payload)
     return deduped
 
 
-def _identity_choice_payloads(group: Mapping[str, Any]) -> list[dict[str, str]]:
-    choices: list[dict[str, str]] = []
+def _identity_choice_payloads(group: Mapping[str, Any]) -> list[dict[str, Any]]:
+    choices: list[dict[str, Any]] = []
     seen_candidate_ids: set[str] = set()
     for candidate in list(group.get("top_3", [])):
         if not isinstance(candidate, Mapping):
@@ -566,13 +569,16 @@ def _identity_choice_payloads(group: Mapping[str, Any]) -> list[dict[str, str]]:
         if not candidate_id or not label or candidate_id in seen_candidate_ids:
             continue
         seen_candidate_ids.add(candidate_id)
-        choices.append(
-            {
-                "value": candidate_id,
-                "label": label,
-                "quick_prompt": label,
-            }
-        )
+        choice = {
+            "value": candidate_id,
+            "label": label,
+            "quick_prompt": label,
+        }
+        for key in ("food_item_id", "source_type", "brand_name", "restaurant_name"):
+            extra_value = _coerce_str(candidate.get(key), key)
+            if extra_value:
+                choice[key] = extra_value
+        choices.append(choice)
     choices.append({"value": "OTHER", "label": "Other", "quick_prompt": "Other"})
     return _normalized_choice_payloads(choices)
 
@@ -1514,6 +1520,7 @@ async def run_reasoning_request(
     meal: MealLog,
     match_results: list[tuple[MealSegment, Any]],
     settings=None,
+    propagate_errors: bool = False,
 ) -> tuple[dict[str, Any], dict[str, int | str | None] | None]:
     app_settings = settings or get_settings()
     try:
@@ -1524,6 +1531,8 @@ async def run_reasoning_request(
             app_settings=app_settings,
         )
     except Exception:
+        if propagate_errors:
+            raise
         parsed = {
             "action": _FAILED_UNCLEAR_STATE,
             "meal_state": _FAILED_UNCLEAR_STATE,

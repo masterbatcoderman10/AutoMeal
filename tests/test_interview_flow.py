@@ -1030,6 +1030,92 @@ class InterviewPersistencePrepTests(unittest.TestCase):
         self.assertEqual(resolution.food.llm_reasoning, "NEEDS_GROUNDING")
         self.assertEqual(resolution.quantity_json["grounding_prep"]["status"], "NEEDS_GROUNDING")
 
+    def test_source_origin_store_bought_preserves_state_and_requires_grounding(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "question_order": ["q-source"],
+            "questions_by_id": {
+                "q-source": {
+                    "question_id": "q-source",
+                    "group_id": "group-flatbread",
+                    "primary_segment_id": "seg-flatbread",
+                    "segment_ids": ["seg-flatbread"],
+                    "question_kind": "SOURCE_ORIGIN",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "label": "flatbread",
+                    "choices": [
+                        {
+                            "choice_id": "STORE_BOUGHT_PREPARED",
+                            "label": "store bought",
+                            "value": "STORE_BOUGHT_PREPARED",
+                        }
+                    ],
+                }
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["q-source"],
+            "remaining_required_question_ids": ["q-source"],
+            "interview_messages": [],
+        }
+
+        answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="store bought",
+            context=state["questions_by_id"]["q-source"],
+        )
+        updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
+        item = updated["confirmation_items"][0]
+        resolution = interview_service.final_resolution_from_confirmation(item=item)
+
+        self.assertEqual(item["source_origin_state"], "STORE_BOUGHT_PREPARED")
+        self.assertEqual(item["source_type"], "PACKAGED")
+        self.assertTrue(resolution.food.needs_grounding)
+        self.assertFalse(resolution.food.is_verified)
+
+    def test_identity_choice_preserves_selected_candidate_food_item_id(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "question_order": ["q-choice"],
+            "questions_by_id": {
+                "q-choice": {
+                    "question_id": "q-choice",
+                    "group_id": "group-bread",
+                    "primary_segment_id": "seg-bread",
+                    "segment_ids": ["seg-bread"],
+                    "question_kind": "IDENTITY",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "label": "bread",
+                    "choices": [
+                        {
+                            "choice_id": "candidate-khubz",
+                            "label": "White Khubz",
+                            "value": "White Khubz",
+                            "food_item_id": "food-khubz",
+                            "source_type": "HOME",
+                        }
+                    ],
+                }
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["q-choice"],
+            "remaining_required_question_ids": ["q-choice"],
+            "interview_messages": [],
+        }
+
+        answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="White Khubz",
+            context=state["questions_by_id"]["q-choice"],
+        )
+        updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
+        item = updated["confirmation_items"][0]
+        resolution = interview_service.final_resolution_from_confirmation(item=item)
+
+        self.assertEqual(item["food_item_id"], "food-khubz")
+        self.assertEqual(resolution.food.food_item_id, "food-khubz")
+
     def test_existing_food_item_id_is_preserved_for_resolution_reuse(self) -> None:
         from app.services import interview_service
 

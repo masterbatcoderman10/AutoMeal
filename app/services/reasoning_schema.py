@@ -167,6 +167,10 @@ def reasoning_response_format() -> dict[str, Any]:
         "value": {"type": "string"},
         "label": {"type": "string"},
         "quick_prompt": {"type": "string"},
+        "food_item_id": {"type": "string"},
+        "source_type": {"type": "string"},
+        "brand_name": {"type": "string"},
+        "restaurant_name": {"type": "string"},
     }
     clarification_validation_hints_properties = {
         "required": {"type": "boolean"},
@@ -558,11 +562,16 @@ def _coerce_choice_option(value: object, idx: int) -> dict[str, Any]:
             label = candidate_value
         if not quick_prompt:
             quick_prompt = label
-        return {
+        choice = {
             "value": candidate_value,
             "label": label,
             "quick_prompt": quick_prompt,
         }
+        for field in ("food_item_id", "source_type", "brand_name", "restaurant_name"):
+            extra_value = _coerce_str(value.get(field), field)
+            if extra_value:
+                choice[field] = extra_value
+        return choice
 
     if not isinstance(value, str):
         raise TypeError("clarification choice must be text")

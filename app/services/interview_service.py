@@ -1460,8 +1460,8 @@ def _normalize_answer_type(value: object) -> str:
     return "free_text"
 
 
-def _normalize_question_choices(value: object) -> list[dict[str, str]]:
-    choices: list[dict[str, str]] = []
+def _normalize_question_choices(value: object) -> list[dict[str, Any]]:
+    choices: list[dict[str, Any]] = []
     if not isinstance(value, list):
         return choices
     for raw_choice in value:
@@ -1479,13 +1479,16 @@ def _normalize_question_choices(value: object) -> list[dict[str, str]]:
             choice_id = raw_choice_id or _slugify_choice_id(display_label)
             if choice_id.upper() == "OTHER":
                 choice_id = "__other__"
-            choices.append(
-                {
-                    "choice_id": choice_id,
-                    "label": display_label,
-                    "value": resolved_value or display_label,
-                }
-            )
+            choice = {
+                "choice_id": choice_id,
+                "label": display_label,
+                "value": resolved_value or display_label,
+            }
+            for key in ("food_item_id", "source_type", "brand_name", "restaurant_name"):
+                extra_value = _optional_text(raw_choice.get(key))
+                if extra_value:
+                    choice[key] = extra_value
+            choices.append(choice)
             continue
         label = _optional_text(raw_choice)
         if label:
@@ -1602,12 +1605,20 @@ def _parse_clarification_text(*, text: str, context: Mapping[str, Any]) -> dict[
         payload["choice_id"] = matched_choice["choice_id"]
         payload["value"] = matched_choice.get("value") or matched_choice["label"]
         if payload["question_kind"] == "SOURCE_ORIGIN":
-            payload["source_type"] = _source_type_from_choice(matched_choice["choice_id"], matched_choice["label"])
+            source_origin_state = _source_origin_state_from_choice(
+                matched_choice["choice_id"],
+                matched_choice["label"],
+            )
+            payload["source_origin_state"] = source_origin_state
+            payload["source_type"] = _source_type_from_source_origin_state(source_origin_state)
         elif answer_type == "confirm":
             payload["approval_status"] = _approval_status_from_choice_id(matched_choice["choice_id"])
         else:
             payload["name"] = matched_choice.get("value") or matched_choice["label"]
             payload["approval_status"] = "CORRECTED"
+            for key in ("food_item_id", "source_type", "brand_name", "restaurant_name"):
+                if matched_choice.get(key):
+                    payload[key] = matched_choice[key]
         return payload
     if answer_type == "multi_choice":
         payload["values"] = [part.strip() for part in re.split(r"\s*,\s*", str(text or "").strip()) if part.strip()]
@@ -1648,18 +1659,34 @@ def _approval_status_from_choice_id(choice_id: str | None) -> str:
     return "APPROVED" if normalized in {"APPROVE", "APPROVED", "YES", "Y"} else "CORRECTED"
 
 
-def _source_type_from_choice(choice_id: str, label: str) -> str:
+def _source_origin_state_from_choice(choice_id: str, label: str) -> str:
     normalized_choice = str(choice_id or "").strip().upper()
-    if normalized_choice == "PACKAGED_BRANDED":
-        return "PACKAGED"
-    if normalized_choice == "RESTAURANT":
-        return "RESTAURANT"
+    if normalized_choice in {
+        "HOME_COOKED",
+        "STORE_BOUGHT_PREPARED",
+        "PACKAGED_BRANDED",
+        "RESTAURANT",
+        "UNKNOWN",
+    }:
+        return normalized_choice
     lowered = f"{choice_id} {label}".casefold()
+    if "home" in lowered or "homemade" in lowered:
+        return "HOME_COOKED"
+    if "store" in lowered:
+        return "STORE_BOUGHT_PREPARED"
     if "pack" in lowered or "brand" in lowered:
-        return "PACKAGED"
+        return "PACKAGED_BRANDED"
     if "restaurant" in lowered or "takeout" in lowered:
         return "RESTAURANT"
-    return "HOME"
+    return "UNKNOWN"
+
+
+def _source_type_from_source_origin_state(source_origin_state: str) -> str:
+    if source_origin_state == "HOME_COOKED":
+        return "HOME"
+    if source_origin_state == "RESTAURANT":
+        return "RESTAURANT"
+    return "PACKAGED"
 
 
 def _apply_clarification_answer(state: Mapping[str, Any], answer: Mapping[str, Any]) -> dict[str, Any]:
@@ -1732,7 +1759,11 @@ def _answer_record_for_question(*, question: Mapping[str, Any], answer: Mapping[
         "choice_id": _optional_text(answer.get("choice_id")),
         "value": answer.get("value"),
         "name": _optional_text(answer.get("name")),
+        "food_item_id": _optional_text(answer.get("food_item_id")),
         "source_type": _optional_text(answer.get("source_type")),
+        "source_origin_state": _optional_text(answer.get("source_origin_state")),
+        "brand_name": _optional_text(answer.get("brand_name")),
+        "restaurant_name": _optional_text(answer.get("restaurant_name")),
         "portion_bucket": _optional_text(answer.get("portion_bucket")),
         "quantity_display": _optional_text(answer.get("quantity_display")),
         "approval_status": _optional_text(answer.get("approval_status")),
@@ -1822,6 +1853,8 @@ def _confirmation_items_from_clarification_answers(state: Mapping[str, Any]) -> 
         question_kind = _question_kind(answer.get("question_kind"))
         if question_kind == "SOURCE_ORIGIN" and answer.get("source_type"):
             item["source_type"] = answer["source_type"]
+            if answer.get("source_origin_state"):
+                item["source_origin_state"] = answer["source_origin_state"]
         elif question_kind == "QUANTITY":
             if answer.get("portion_bucket"):
                 item["portion_bucket"] = answer["portion_bucket"]
@@ -1829,6 +1862,9 @@ def _confirmation_items_from_clarification_answers(state: Mapping[str, Any]) -> 
                 item["quantity_display"] = answer["quantity_display"]
         elif answer.get("name"):
             item["name"] = answer["name"]
+            for key in ("food_item_id", "source_type", "brand_name", "restaurant_name"):
+                if answer.get(key):
+                    item[key] = answer[key]
         if answer.get("approval_status"):
             item["approval_status"] = answer["approval_status"]
 

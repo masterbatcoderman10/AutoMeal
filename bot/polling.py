@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import httpx
+from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -304,6 +305,31 @@ def _classify_grounding_failure(error: Exception, *, fallback_category: str = "t
         else:
             category = "tool_execution"
             blocker = "the grounding provider returned an unexpected error"
+    elif isinstance(error, RateLimitError):
+        status_code = int(error.status_code) if getattr(error, "status_code", None) is not None else None
+        category = "provider_quota"
+        blocker = "the provider quota was exceeded"
+        retryable = True
+    elif isinstance(error, AuthenticationError):
+        status_code = int(error.status_code) if getattr(error, "status_code", None) is not None else None
+        category = "provider_auth"
+        blocker = "provider authentication failed"
+    elif isinstance(error, APIConnectionError):
+        category = "network"
+        blocker = "a network request failed"
+        retryable = True
+    elif isinstance(error, APIStatusError):
+        status_code = int(error.status_code) if getattr(error, "status_code", None) is not None else None
+        if status_code == 429 or "quota" in lowered or "limit" in lowered or "rate" in lowered:
+            category = "provider_quota"
+            blocker = "the provider quota was exceeded"
+            retryable = True
+        elif status_code in {401, 403}:
+            category = "provider_auth"
+            blocker = "provider authentication failed"
+        else:
+            category = "tool_execution"
+            blocker = "the grounding provider returned an unexpected error"
     elif isinstance(
         error,
         (
@@ -426,6 +452,7 @@ async def _run_reasoning_pipeline(
         meal=meal,
         match_results=match_results,
         settings=settings,
+        propagate_errors=True,
     )
     finalization = await reasoning_service.finalize_meal_from_reasoning(
         session=session,

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import numpy as np
+from openai import RateLimitError
 
 from app.models import MealProcessingStatus
 from app.services.embedding_service import (
@@ -911,10 +912,13 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
-        quota_error = httpx.HTTPStatusError(
+        quota_error = RateLimitError(
             "Error code: 403 - Key limit exceeded (total limit)",
-            request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
-            response=httpx.Response(403),
+            response=httpx.Response(
+                429,
+                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+            ),
+            body={"error": {"message": "Key limit exceeded"}},
         )
         bot = SimpleNamespace(send_message=AsyncMock())
 
@@ -926,11 +930,12 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             }
             return {"meal_entries": [], "food_visuals": [], "correction_events": []}
 
+        reasoning_mock = AsyncMock(side_effect=quota_error)
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
             patch.object(polling, "get_llm_client", return_value=object()),
-            patch.object(polling.reasoning_service, "run_reasoning_request", AsyncMock(side_effect=quota_error)),
+            patch.object(polling.reasoning_service, "run_reasoning_request", reasoning_mock),
             patch.object(polling.interview_service, "finalize_confirmed_interview", AsyncMock(side_effect=_capture_degraded_finalize)),
             patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
         ):
@@ -948,6 +953,10 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(interview.is_active)
         self.assertEqual(interview.current_prompt_payload["grounding_status"], "DEGRADED_SAVED")
         self.assertIn("quota", bot.send_message.await_args.kwargs["text"].lower())
+        reasoning_mock.assert_awaited_once()
+        self.assertTrue(
+            reasoning_mock.await_args.kwargs["propagate_errors"],
+        )
         engine.dispose.assert_awaited_once()
 
     async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:

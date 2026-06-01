@@ -50,7 +50,7 @@ class InterviewSchemaContractTests(unittest.TestCase):
         schema = response_format["json_schema"]["schema"]
         self.assertEqual(
             schema["properties"]["turn_action"]["enum"],
-            ["continue_interview", "need_clarification", "ready_to_confirm"],
+            ["ready_to_confirm"],
         )
         confirmation_items = schema["properties"]["confirmation_items"]
         item_properties = confirmation_items["items"]["properties"]

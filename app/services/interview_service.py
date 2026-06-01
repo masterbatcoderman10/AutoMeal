@@ -454,6 +454,7 @@ def apply_interview_turn_result(
     clarification_reason: str | None = None,
     conversation_summary: str | None = None,
     confirmation_items: list[Mapping[str, Any]] | None = None,
+    resolver_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     updated = dict(state)
     if conversation_summary:
@@ -466,6 +467,11 @@ def apply_interview_turn_result(
         updated["current_target_index"] = len(list(updated.get("pending_targets") or []))
         updated["confirmation_items"] = items
         updated["answers_by_segment"] = [dict(item) for item in items]
+        if isinstance(resolver_payload, Mapping):
+            updated["resolver_payload"] = {
+                str(key): _json_safe_payload(value)
+                for key, value in resolver_payload.items()
+            }
     else:
         question = dict(updated.get("current_question") or {})
         question["prompt"] = assistant_prompt
@@ -801,6 +807,7 @@ async def finalize_confirmed_interview(
     confirmation_items: list[Mapping[str, Any]],
     segments: list[MealSegment] | None = None,
     best_effort: bool = False,
+    interview_state: Mapping[str, Any] | None = None,
 ):
     segments_by_id = {segment.id: segment for segment in segments or []}
     final_segments = [
@@ -838,18 +845,72 @@ async def finalize_confirmed_interview(
         meal=meal,
         final_segments=final_segments,
         meal_status=MealProcessingStatus.COMPLETED,
-        reasoning_state_json={
-            "completed_by": "interview_service",
-            "best_effort": best_effort,
-            "confirmation_items": [dict(item) for item in confirmation_items],
-            "completed_at": datetime.now(UTC).isoformat(),
-        },
+        reasoning_state_json=_build_finalization_reasoning_state(
+            meal=meal,
+            confirmation_items=confirmation_items,
+            best_effort=best_effort,
+            interview_state=interview_state,
+        ),
     )
     if hasattr(session, "commit"):
         maybe = session.commit()
         if hasattr(maybe, "__await__"):
             await maybe
     return result
+
+
+def _build_finalization_reasoning_state(
+    *,
+    meal: MealLog,
+    confirmation_items: list[Mapping[str, Any]],
+    best_effort: bool,
+    interview_state: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    state = dict(getattr(meal, "reasoning_state_json", None) or {})
+    interview_payload = dict(interview_state or {})
+    completed_at = datetime.now(UTC).isoformat()
+
+    state.update(
+        {
+            "completed_by": "interview_service",
+            "best_effort": best_effort,
+            "confirmation_items": [dict(item) for item in confirmation_items],
+            "completed_at": completed_at,
+        }
+    )
+
+    clarification_answers = interview_payload.get("answers_by_question_id")
+    if isinstance(clarification_answers, Mapping):
+        state["answers_by_question_id"] = {
+            str(key): dict(value)
+            for key, value in clarification_answers.items()
+            if isinstance(value, Mapping)
+        }
+    elif isinstance(state.get("answers_by_question_id"), Mapping):
+        state["answers_by_question_id"] = {
+            str(key): dict(value)
+            for key, value in dict(state.get("answers_by_question_id") or {}).items()
+            if isinstance(value, Mapping)
+        }
+
+    resolver_payload = interview_payload.get("resolver_payload")
+    if isinstance(resolver_payload, Mapping):
+        state["resolver_payload"] = {
+            str(key): _json_safe_payload(value)
+            for key, value in resolver_payload.items()
+        }
+    else:
+        state["resolver_payload"] = {
+            "turn_action": "ready_to_confirm",
+            "confirmation_items": [dict(item) for item in confirmation_items],
+            "remaining_required_question_ids": list(
+                interview_payload.get("remaining_required_question_ids") or []
+            ),
+            "conversation_summary": _optional_text(interview_payload.get("conversation_summary")),
+            "completed_at": completed_at,
+        }
+
+    return state
 
 
 def _clean_identity_text(text: object) -> str:

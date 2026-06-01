@@ -120,13 +120,36 @@ class InterviewTurnResult(BaseModel):
         return stripped or None
 
 
+class FinalResolverResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turn_action: Literal["ready_to_confirm"]
+    assistant_prompt: str
+    clarification_reason: str | None
+    conversation_summary: str | None
+    confirmation_items: list[ConfirmationItem]
+
+    @field_validator("assistant_prompt", mode="before")
+    @classmethod
+    def _require_prompt(cls, value: object) -> str:
+        return InterviewTurnResult._require_prompt(value)
+
+    @field_validator("clarification_reason", "conversation_summary", mode="before")
+    @classmethod
+    def _normalize_optional_text(cls, value: object) -> str | None:
+        return InterviewTurnResult._normalize_optional_text(value)
+
+
 class InterviewTurnValidationError(ValueError):
     pass
 
 
 def interview_turn_response_format() -> dict[str, Any]:
-    schema = InterviewTurnResult.model_json_schema()
+    schema = FinalResolverResult.model_json_schema()
     definitions = schema.pop("$defs", {})
+    turn_action = schema.get("properties", {}).get("turn_action")
+    if isinstance(turn_action, dict) and "const" in turn_action:
+        turn_action["enum"] = [turn_action.pop("const")]
     confirmation_items = schema.get("properties", {}).get("confirmation_items")
     if isinstance(confirmation_items, dict):
         item_schema = confirmation_items.get("items")
@@ -149,6 +172,7 @@ def parse_interview_turn_result(
     payload: str | Mapping[str, Any],
     *,
     active_group_ids: Sequence[str],
+    resolver_only: bool = False,
 ) -> InterviewTurnResult:
     try:
         if isinstance(payload, str):
@@ -158,7 +182,11 @@ def parse_interview_turn_result(
     except ValidationError as exc:
         raise InterviewTurnValidationError(str(exc)) from exc
 
-    _validate_turn_result(result, active_group_ids=active_group_ids)
+    _validate_turn_result(
+        result,
+        active_group_ids=active_group_ids,
+        resolver_only=resolver_only,
+    )
     return result
 
 
@@ -166,10 +194,12 @@ def parse_interview_turn_response_payload(
     response_payload: Mapping[str, Any],
     *,
     active_group_ids: Sequence[str],
+    resolver_only: bool = False,
 ) -> InterviewTurnResult:
     return parse_interview_turn_result(
         _extract_message_content(response_payload),
         active_group_ids=active_group_ids,
+        resolver_only=resolver_only,
     )
 
 
@@ -177,7 +207,10 @@ def _validate_turn_result(
     result: InterviewTurnResult,
     *,
     active_group_ids: Sequence[str],
+    resolver_only: bool = False,
 ) -> None:
+    if resolver_only and result.turn_action != "ready_to_confirm":
+        raise InterviewTurnValidationError("final resolver must emit ready_to_confirm")
     if result.turn_action != "ready_to_confirm":
         if result.confirmation_items:
             raise InterviewTurnValidationError(

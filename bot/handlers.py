@@ -328,6 +328,7 @@ async def _finalize_interview_confirmation(*, session, interview: InterviewSessi
         meal=meal,
         confirmation_items=confirmation_items,
         segments=list(meal.segments),
+        interview_state=state,
     )
     return {
         "mode": interview_service.SESSION_MODE_MEAL,
@@ -449,6 +450,7 @@ async def _handle_deterministic_meal_text(
     state: dict,
     text: str,
     update: Update,
+    settings,
 ) -> None:
     prompt = interview_service.current_target_question(state)
     answer = interview_service.parse_interview_text(text=text, context=prompt)
@@ -456,17 +458,16 @@ async def _handle_deterministic_meal_text(
         await update.message.reply_text(str(prompt.get("invalid_prompt") or prompt.get("prompt") or "Please try again."))
         return
     updated_state = interview_service.complete_target_question(state, answer)
-    if updated_state.get("roadmap_step") == "CONFIRMATION":
-        updated_state["last_prompted_at"] = datetime.now(UTC)
-        await interview_service.persist_interview_step(
+    if not list(updated_state.get("remaining_required_question_ids") or []):
+        await _resolve_deterministic_confirmation(
             session=session,
             interview=interview,
             state=updated_state,
             user_payload=answer,
+            latest_user_text=text,
+            reply_callable=update.message.reply_text,
+            settings=settings,
             user_message_id=getattr(update.message, "message_id", None),
-        )
-        await update.message.reply_text(
-            format_interview_confirmation_message(_confirmation_items_from_state(updated_state), action="log it")
         )
         return
     next_prompt = interview_service.current_target_question(updated_state)
@@ -491,6 +492,7 @@ async def _handle_deterministic_meal_callback(
     meal_id: str,
     question_id: str,
     choice_id: str,
+    settings,
 ) -> None:
     if callback_query.message is None:
         return
@@ -551,16 +553,15 @@ async def _handle_deterministic_meal_callback(
         answer["approval_status"] = "CORRECTED"
 
     updated_state = interview_service.complete_target_question(state, answer)
-    if updated_state.get("roadmap_step") == "CONFIRMATION":
-        updated_state["last_prompted_at"] = datetime.now(UTC)
-        await interview_service.persist_interview_step(
+    if not list(updated_state.get("remaining_required_question_ids") or []):
+        await _resolve_deterministic_confirmation(
             session=session,
             interview=interview,
             state=updated_state,
             user_payload=answer,
-        )
-        await callback_query.message.reply_text(
-            format_interview_confirmation_message(_confirmation_items_from_state(updated_state), action="log it")
+            latest_user_text=str(matched_choice.get("label") or ""),
+            reply_callable=callback_query.message.reply_text,
+            settings=settings,
         )
         return
     next_prompt = interview_service.current_target_question(updated_state)
@@ -605,6 +606,7 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     meal_id=meal_id,
                     question_id=question_id,
                     choice_id=choice_id,
+                    settings=settings,
                 )
             return
         finally:
@@ -704,6 +706,7 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     state=state,
                     text=text,
                     update=update,
+                    settings=settings,
                 )
                 return
             if mode == interview_service.SESSION_MODE_MEAL and state.get("roadmap_step") != "CONFIRMATION":
@@ -976,6 +979,81 @@ async def _run_meal_interview_turn(*, state: dict, latest_user_text: str, settin
         latest_user_text=latest_user_text,
         settings=settings,
     )
+
+
+async def _resolve_deterministic_confirmation(
+    *,
+    session,
+    interview: InterviewSession,
+    state: dict,
+    user_payload: Mapping[str, object],
+    latest_user_text: str,
+    reply_callable,
+    settings,
+    user_message_id: int | None = None,
+) -> None:
+    try:
+        turn = await _run_meal_interview_turn(
+            state=state,
+            latest_user_text=latest_user_text,
+            settings=settings,
+        )
+    except interview_turn_manager.InterviewTurnValidationError as exc:
+        failure_state = dict(state)
+        failure_state["last_turn_error"] = str(exc)
+        failure_state["last_prompted_at"] = datetime.now(UTC)
+        await interview_service.persist_interview_step(
+            session=session,
+            interview=interview,
+            state=failure_state,
+            user_payload=user_payload,
+            user_message_id=user_message_id,
+        )
+        await reply_callable(interview_service.build_neutral_retry_prompt(state))
+        return
+
+    confirmation_items = _turn_confirmation_items_payload(turn.confirmation_items)
+    resolver_payload = {
+        "turn_action": getattr(turn, "turn_action", "ready_to_confirm"),
+        "clarification_reason": getattr(turn, "clarification_reason", None),
+        "conversation_summary": getattr(turn, "conversation_summary", None),
+        "remaining_required_question_ids": list(state.get("remaining_required_question_ids") or []),
+        "confirmation_items": confirmation_items,
+    }
+    resolved_state = interview_service.apply_interview_turn_result(
+        state,
+        turn_action="ready_to_confirm",
+        assistant_prompt=str(getattr(turn, "assistant_prompt", "") or "Resolved meal confirmation."),
+        clarification_reason=getattr(turn, "clarification_reason", None),
+        conversation_summary=getattr(turn, "conversation_summary", None),
+        confirmation_items=confirmation_items,
+        resolver_payload=resolver_payload,
+    )
+    resolved_state["last_prompted_at"] = datetime.now(UTC)
+    await interview_service.persist_interview_step(
+        session=session,
+        interview=interview,
+        state=resolved_state,
+        user_payload=user_payload,
+        user_message_id=user_message_id,
+    )
+    await reply_callable(
+        format_interview_confirmation_message(
+            _confirmation_items_from_state(resolved_state),
+            action="log it",
+        )
+    )
+
+
+def _turn_confirmation_items_payload(items) -> list[dict]:
+    payloads: list[dict] = []
+    for item in items or []:
+        if hasattr(item, "model_dump"):
+            payloads.append(item.model_dump(mode="json"))
+            continue
+        if isinstance(item, Mapping):
+            payloads.append(dict(item))
+    return payloads
 
 
 def _build_fix_patch(*, entry_context: dict, confirmation_items: list[dict]) -> dict:

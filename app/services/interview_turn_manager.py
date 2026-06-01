@@ -41,6 +41,12 @@ async def run_interview_turn(
 ) -> InterviewTurnResult:
     app_settings = _resolve_settings(settings)
     llm = llm_client or get_llm_client()
+    resolver_only = _resolver_only(authoritative_state)
+    remaining_required_question_ids = _remaining_required_question_ids(authoritative_state)
+    if resolver_only and remaining_required_question_ids:
+        raise InterviewTurnValidationError(
+            "final resolver cannot run before remaining required clarification questions are answered"
+        )
     active_group_ids = _active_group_ids(authoritative_state)
     models_to_try = _models_to_try(app_settings)
     bounded_transcript = list(transcript[-6:])
@@ -48,6 +54,7 @@ async def run_interview_turn(
         authoritative_state=authoritative_state,
         transcript=transcript,
         latest_user_text=latest_user_text,
+        resolver_only=resolver_only,
     )
 
     with tracing_service.maybe_start_trace(
@@ -59,6 +66,9 @@ async def run_interview_turn(
             "transcript": bounded_transcript,
             "latest_user_text": latest_user_text,
             "active_group_ids": active_group_ids,
+            "resolver_only": resolver_only,
+            "remaining_required_question_ids": remaining_required_question_ids,
+            "clarification_answers": authoritative_state.get("answers_by_question_id") or {},
             "messages": messages,
             "response_format": interview_turn_response_format(),
         },
@@ -66,6 +76,7 @@ async def run_interview_turn(
             "meal_id": authoritative_state.get("meal_id"),
             "active_group_ids": active_group_ids,
             "models": models_to_try,
+            "resolver_only": resolver_only,
         },
         span_name="interview_turn",
     ) as trace:
@@ -78,6 +89,7 @@ async def run_interview_turn(
             result = parse_interview_turn_response_payload(
                 response,
                 active_group_ids=active_group_ids,
+                resolver_only=resolver_only,
             )
             normalized = _with_authoritative_segment_ids(result, authoritative_state)
             _validate_ready_to_confirm_evidence(
@@ -111,6 +123,7 @@ async def run_interview_turn(
                 repaired = parse_interview_turn_response_payload(
                     repair_response,
                     active_group_ids=active_group_ids,
+                    resolver_only=resolver_only,
                 )
                 normalized = _with_authoritative_segment_ids(repaired, authoritative_state)
                 _validate_ready_to_confirm_evidence(
@@ -191,10 +204,11 @@ async def _run_repair_completion(
             "role": "system",
             "content": (
                 "Repair this interview turn into strict JSON. "
-                "Choose exactly one turn_action: continue_interview, need_clarification, or ready_to_confirm. "
-                "Use ready_to_confirm only when the user's replies explicitly answer every unresolved group "
-                "and explicitly confirm or correct every approval candidate. If any active group is unanswered, ask a follow-up. "
-                "If you choose ready_to_confirm, include one confirmation item for every active group id in the authoritative state. "
+                "Choose exactly one turn_action: ready_to_confirm. "
+                "The deterministic clarification step is already complete, so you must not ask a follow-up question. "
+                "Use the authoritative grouped reasoning, structured clarification answers, and prior confirmations "
+                "to normalize the final meal into confirmation_items only. "
+                "Include one confirmation item for every active group id in the authoritative state. "
                 "Each confirmation item must include segment_ids copied from that active group. "
                 "Do not invent nutrition facts or mutate state. Return JSON only."
             ),
@@ -458,20 +472,32 @@ def _build_turn_messages(
     authoritative_state: Mapping[str, Any],
     transcript: Sequence[Mapping[str, Any]],
     latest_user_text: str,
+    resolver_only: bool,
 ) -> list[dict[str, Any]]:
+    instruction = (
+        "You are MealTracker's interview turn manager. "
+        "Use the authoritative meal state to resolve natural-language food clarification replies. "
+        "Return strict JSON only. Ask concise follow-ups. "
+        "Do not invent nutrition facts. Do not write database state. "
+        "Fail closed instead of guessing when the user's reply is insufficient. "
+        "Use ready_to_confirm only when the user's replies explicitly answer each unresolved group "
+        "and explicitly confirm or correct each approval candidate. Otherwise ask one concise follow-up. "
+        "For ready_to_confirm, copy each active group's segment_ids into its confirmation item."
+    )
+    if resolver_only:
+        instruction = (
+            "You are MealTracker's final resolver. "
+            "The deterministic clarification step is already complete. "
+            "You must not ask user-facing follow-up questions or request more information. "
+            "Use the authoritative grouped reasoning, structured clarification answers, and prior confirmations "
+            "to emit strict JSON with turn_action=ready_to_confirm and one confirmation item per active group. "
+            "Do not invent nutrition facts. Do not write database state. "
+            "Copy each active group's segment_ids into its confirmation item."
+        )
     messages: list[dict[str, Any]] = [
         {
             "role": "system",
-            "content": (
-                "You are MealTracker's interview turn manager. "
-                "Use the authoritative meal state to resolve natural-language food clarification replies. "
-                "Return strict JSON only. Ask concise follow-ups. "
-                "Do not invent nutrition facts. Do not write database state. "
-                "Fail closed instead of guessing when the user's reply is insufficient. "
-                "Use ready_to_confirm only when the user's replies explicitly answer each unresolved group "
-                "and explicitly confirm or correct each approval candidate. Otherwise ask one concise follow-up. "
-                "For ready_to_confirm, copy each active group's segment_ids into its confirmation item."
-            ),
+            "content": instruction,
         },
         {
             "role": "system",
@@ -489,6 +515,21 @@ def _build_turn_messages(
         messages.append({"role": role, "content": content.strip()})
     messages.append({"role": "user", "content": latest_user_text.strip()})
     return messages
+
+
+def _resolver_only(authoritative_state: Mapping[str, Any]) -> bool:
+    return isinstance(authoritative_state.get("questions_by_id"), Mapping) and isinstance(
+        authoritative_state.get("question_order"),
+        list,
+    )
+
+
+def _remaining_required_question_ids(authoritative_state: Mapping[str, Any]) -> list[str]:
+    return [
+        str(question_id)
+        for question_id in authoritative_state.get("remaining_required_question_ids") or []
+        if str(question_id).strip()
+    ]
 
 
 __all__ = ["InterviewTurnValidationError", "run_interview_turn"]

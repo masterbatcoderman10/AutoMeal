@@ -466,7 +466,7 @@ class ReasoningGateTests(unittest.TestCase):
         result = _run_gate(payload)
 
         self.assertIn(result["meal_state"], INTERVIEW_STATES)
-        self.assertEqual(result["food_groups"][0]["group_action"], "ASK_CHOICE")
+        self.assertEqual(result["food_groups"][0]["group_action"], "AFFIRMATION_REQUIRED")
         self.assertIn("visual-only", result["food_groups"][0]["gate_reason"])
 
     def test_gate_adds_derived_question_when_source_schema_omits_gated_group(self) -> None:
@@ -561,8 +561,8 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertIn("group_bread", question_group_ids)
         self.assertIn("group_chicken", question_group_ids)
         chicken_question = next(question for question in questions if question["group_id"] == "group_chicken")
-        self.assertEqual(chicken_question["question_kind"], "CHOICE")
-        self.assertIn("Chicken Drumstick Curry", chicken_question["choices"])
+        self.assertEqual(chicken_question["question_kind"], "AFFIRMATION")
+        self.assertEqual(chicken_question["choices"], ["Yes", "No"])
 
     def test_source_origin_question_only_for_ambiguous_material_foods(self) -> None:
         payload = {
@@ -773,7 +773,7 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertEqual(groups["group-pita"]["group_state"], "READY_TO_WRITE")
         self.assertIn(
             groups["group-curry"]["group_action"],
-            {"ASK_CHOICE", "ASK_QUANTITY", "INTERVIEW"},
+            {"ASK_CHOICE", "ASK_QUANTITY", "INTERVIEW", "IDENTITY_CLARIFICATION_REQUIRED"},
         )
         self.assertEqual(groups["group-curry"]["group_state"], "PENDING_INTERVIEW")
 

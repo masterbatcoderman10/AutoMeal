@@ -486,6 +486,7 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         candidate["candidate_id"] = "candidate-wrap"
         candidate["identity_confidence"] = 0.99
         candidate["source"] = "visual_reasoning"
+        candidate["missing_evidence"] = []
         response_payload = {
             "action": "AUTO_CONFIRM",
             "meal_state": "READY_TO_WRITE",

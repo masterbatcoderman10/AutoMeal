@@ -40,13 +40,15 @@ _SOURCE_ORIGIN_CHOICES = (
     "RESTAURANT",
     "UNKNOWN",
 )
+_SOURCE_ORIGIN_LABELS = {
+    "HOME_COOKED": "homemade",
+    "STORE_BOUGHT_PREPARED": "store bought",
+    "PACKAGED_BRANDED": "packaged",
+    "RESTAURANT": "restaurant",
+    "UNKNOWN": "not sure",
+}
 _SOURCE_ORIGIN_TOKENS = {
-    "flatbread",
     "wrap",
-    "naan",
-    "pita",
-    "roti",
-    "khubz",
     "bakery",
     "packaged",
     "restaurant",
@@ -56,7 +58,6 @@ _SOURCE_ORIGIN_TOKENS = {
     "sauce",
     "pizza",
     "burger",
-    "paratha",
     "takeout",
 }
 
@@ -309,6 +310,7 @@ def _normalized_group_result(
     group_state: str,
     gate_reason: str,
     decision_rationale: str,
+    clarification_actions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     top_three = [
         dict(candidate)
@@ -318,6 +320,16 @@ def _normalized_group_result(
     selected_candidate_id = _coerce_str(group.get("selected_candidate_id"), "selected_candidate_id")
     if not selected_candidate_id and top_three:
         selected_candidate_id = str(top_three[0].get("candidate_id") or "")
+    normalized_actions = [dict(action) for action in clarification_actions or []]
+    question_kind = _coerce_str(group.get("question_kind"), "question_kind")
+    question_focus = _coerce_str(group.get("question_focus"), "question_focus")
+    if normalized_actions and not question_kind:
+        question_kind = _coerce_str(
+            normalized_actions[0].get("kind") or normalized_actions[0].get("type"),
+            "question_kind",
+        )
+    if normalized_actions and not question_focus:
+        question_focus = _coerce_str(normalized_actions[0].get("question_focus"), "question_focus")
     return {
         "group_id": _coerce_str(group.get("group_id"), "group_id") or "group-unknown",
         "group_label": _coerce_str(group.get("group_label"), "group_label")
@@ -339,8 +351,11 @@ def _normalized_group_result(
         or _coerce_string_list(top_three[0].get("missing_evidence") if top_three else None),
         "decision_rationale": decision_rationale,
         "gate_reason": gate_reason,
-        "question_kind": _coerce_str(group.get("question_kind"), "question_kind"),
-        "question_focus": _coerce_str(group.get("question_focus"), "question_focus"),
+        "clarification_needed": bool(normalized_actions),
+        "clarification_actions": normalized_actions,
+        "clarification": normalized_actions[0] if normalized_actions else None,
+        "question_kind": question_kind,
+        "question_focus": question_focus,
         "question_examples": _coerce_string_list(group.get("question_examples")),
         "top_3": top_three,
     }
@@ -391,59 +406,46 @@ def _base_question_for_group(group: Mapping[str, Any]) -> dict[str, Any]:
         primary_segment_id=primary_segment_id,
         fallback=primary_segment_id,
     )
-    group_label = _coerce_str(group.get("group_label"), "group_label") or "unlabeled food group"
-    group_action = (_coerce_str(group.get("group_action"), "group_action") or "ASK_CHOICE").upper()
-    question_kind = (_coerce_str(group.get("question_kind"), "question_kind") or "").upper()
-    if question_kind in {"NONE", "NO", "N/A", "NULL"}:
-        question_kind = ""
-    choices = _dedupe_string_choices(
-        [
-            label
-            for candidate in list(group.get("top_3", []))
-            if isinstance(candidate, Mapping)
-            for label in [_coerce_str(candidate.get("label"), "label")]
-            if label
-        ]
-    )
-    if not choices:
-        choices = _dedupe_string_choices(_coerce_string_list(group.get("question_examples")))
-    if question_kind == "SOURCE_ORIGIN":
-        answer_type = "single_choice"
-        question_focus = "Where did this food come from?"
-        choices = list(_SOURCE_ORIGIN_CHOICES)
-        validation_hints: dict[str, int | bool] = {"required": True, "min_choices": 1, "max_choices": 1}
-    elif group_action == "ASK_QUANTITY" or question_kind == "QUANTITY":
-        answer_type = "free_text"
-        question_focus = (
-            _coerce_str(group.get("question_focus"), "question_focus") or "portion estimate"
-        )
-        choices = []
-        validation_hints = {"required": True, "max_length": 220}
-        question_kind = "QUANTITY"
-    else:
-        answer_type = "single_choice"
-        raw_question_focus = _coerce_str(group.get("question_focus"), "question_focus")
-        question_focus = (
-            raw_question_focus
-            if raw_question_focus and raw_question_focus.casefold() not in {"none", "n/a", "null"}
-            else "best match"
-        )
-        validation_hints = {"required": True, "min_choices": 1, "max_choices": 1}
-        if not question_kind:
-            question_kind = "CHOICE"
+    existing_actions = [
+        dict(action)
+        for action in list(group.get("clarification_actions", []))
+        if isinstance(action, Mapping)
+    ]
+    if existing_actions:
+        action = existing_actions[0]
+        return {
+            "question_id": _coerce_str(action.get("question_id"), "question_id")
+            or f"{group_id}:compat",
+            "group_id": group_id,
+            "group_label": _group_prompt_subject(group),
+            "question_kind": _action_question_kind(action),
+            "question_focus": (
+                _coerce_str(action.get("question_focus"), "question_focus")
+                or _coerce_str(group.get("question_focus"), "question_focus")
+                or action.get("user_prompt")
+                or ""
+            ),
+            "answer_type": _coerce_str(action.get("answer_type"), "answer_type") or "single_choice",
+            "required": True,
+            "segment_ids": segment_ids,
+            "primary_segment_id": primary_segment_id,
+            "choices": _choice_labels(action),
+            "validation_hints": dict(action.get("validation_hints") or {"required": True}),
+        }
 
+    question_focus = _coerce_str(group.get("question_focus"), "question_focus") or "best match"
     return {
-        "question_id": f"{group_id}:{question_kind.casefold()}",
+        "question_id": f"{group_id}:compat",
         "group_id": group_id,
-        "group_label": group_label,
-        "question_kind": question_kind or "DETAIL",
+        "group_label": _group_prompt_subject(group),
+        "question_kind": "CHOICE",
         "question_focus": question_focus,
-        "answer_type": answer_type,
+        "answer_type": "single_choice",
         "required": True,
         "segment_ids": segment_ids,
         "primary_segment_id": primary_segment_id,
-        "choices": choices,
-        "validation_hints": validation_hints,
+        "choices": [choice["label"] for choice in _identity_choice_payloads(group) if choice["value"] != "OTHER"],
+        "validation_hints": {"required": True, "min_choices": 1, "max_choices": 1},
     }
 
 
@@ -456,22 +458,19 @@ def _derive_clarification_schema(food_groups: list[dict[str, Any]]) -> list[dict
             _coerce_str(item.get("primary_segment_id"), "primary_segment_id") or "",
         ),
     ):
-        if group.get("group_state") == _READY_TO_WRITE_STATE:
+        if not group.get("clarification_needed") and not group.get("clarification_actions"):
             continue
-        question = _base_question_for_group(group)
-        questions.append(question)
-        if question["question_kind"] != "SOURCE_ORIGIN" and _needs_source_origin_question(group):
-            questions.append(
-                {
-                    **question,
-                    "question_id": f"{question['group_id']}:source_origin",
-                    "question_kind": "SOURCE_ORIGIN",
-                    "question_focus": "Where did this food come from?",
-                    "answer_type": "single_choice",
-                    "choices": list(_SOURCE_ORIGIN_CHOICES),
-                    "validation_hints": {"required": True, "min_choices": 1, "max_choices": 1},
-                }
-            )
+        actions = [
+            dict(action)
+            for action in list(group.get("clarification_actions", []))
+            if isinstance(action, Mapping)
+        ]
+        if not actions:
+            actions = [{}]
+        for action in actions:
+            compatibility_group = dict(group)
+            compatibility_group["clarification_actions"] = [action] if action else []
+            questions.append(_base_question_for_group(compatibility_group))
     return sorted(questions, key=lambda item: item["question_id"])
 
 
@@ -484,14 +483,27 @@ def _clarification_schema_for_groups(
     if not source_schema:
         return derived_schema
 
-    merged: list[dict[str, Any]] = [
-        _dedupe_question_choices(dict(question)) for question in source_schema
-    ]
-    source_group_ids = {
-        _coerce_str(question.get("group_id"), "group_id")
-        for question in source_schema
-        if isinstance(question, Mapping)
+    merged: list[dict[str, Any]] = []
+    source_group_ids: set[str] = set()
+    groups_by_id = {
+        _coerce_str(group.get("group_id"), "group_id"): group
+        for group in food_groups
+        if isinstance(group, Mapping)
     }
+    for question in source_schema:
+        if not isinstance(question, Mapping):
+            continue
+        source_group_id = _coerce_str(question.get("group_id"), "group_id")
+        if source_group_id:
+            source_group_ids.add(source_group_id)
+        source_group = dict(groups_by_id.get(source_group_id, {}))
+        source_group["clarification_actions"] = [dict(question)]
+        if source_group_id:
+            source_group["group_id"] = source_group_id
+        if _coerce_str(question.get("group_label"), "group_label"):
+            source_group["group_label"] = _coerce_str(question.get("group_label"), "group_label")
+        merged.append(_dedupe_question_choices(_base_question_for_group(source_group)))
+
     for question in derived_schema:
         group_id = _coerce_str(question.get("group_id"), "group_id")
         if group_id and group_id in source_group_ids:
@@ -520,6 +532,259 @@ def _dedupe_string_choices(values: list[str]) -> list[str]:
     return deduped
 
 
+def _normalized_choice_payloads(choices: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for choice in choices:
+        value = _coerce_str(choice.get("value"), "value")
+        label = _coerce_str(choice.get("label"), "label")
+        quick_prompt = _coerce_str(choice.get("quick_prompt"), "quick_prompt")
+        if not value or not label:
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            {
+                "value": value,
+                "label": label,
+                "quick_prompt": quick_prompt or label,
+            }
+        )
+    return deduped
+
+
+def _identity_choice_payloads(group: Mapping[str, Any]) -> list[dict[str, str]]:
+    choices: list[dict[str, str]] = []
+    seen_candidate_ids: set[str] = set()
+    for candidate in list(group.get("top_3", [])):
+        if not isinstance(candidate, Mapping):
+            continue
+        candidate_id = _coerce_str(candidate.get("candidate_id"), "candidate_id")
+        label = _coerce_str(candidate.get("label"), "label")
+        if not candidate_id or not label or candidate_id in seen_candidate_ids:
+            continue
+        seen_candidate_ids.add(candidate_id)
+        choices.append(
+            {
+                "value": candidate_id,
+                "label": label,
+                "quick_prompt": label,
+            }
+        )
+    choices.append({"value": "OTHER", "label": "Other", "quick_prompt": "Other"})
+    return _normalized_choice_payloads(choices)
+
+
+def _source_origin_choice_payloads() -> list[dict[str, str]]:
+    return [
+        {
+            "value": value,
+            "label": _SOURCE_ORIGIN_LABELS[value],
+            "quick_prompt": _SOURCE_ORIGIN_LABELS[value],
+        }
+        for value in _SOURCE_ORIGIN_CHOICES
+    ]
+
+
+def _action_validation_hints(*, answer_type: str, allow_other: bool = False) -> dict[str, int | bool]:
+    hints: dict[str, int | bool] = {"required": True}
+    if answer_type in {"single_choice", "confirm"}:
+        hints["min_choices"] = 1
+        hints["max_choices"] = 1
+    if answer_type == "free_text":
+        hints["max_length"] = 220
+    if allow_other:
+        hints["min_choices"] = 1
+        hints["max_choices"] = 1
+    return hints
+
+
+def _existing_group_action(
+    group: Mapping[str, Any],
+    *,
+    action_type: str,
+) -> Mapping[str, Any] | None:
+    for action in list(group.get("clarification_actions", [])):
+        if not isinstance(action, Mapping):
+            continue
+        raw_type = (_coerce_str(action.get("type"), "type") or "").upper()
+        raw_kind = (_coerce_str(action.get("kind"), "kind") or "").upper()
+        if raw_type == action_type or raw_kind == action_type:
+            return action
+    return None
+
+
+def _group_prompt_subject(group: Mapping[str, Any]) -> str:
+    return _coerce_str(group.get("group_label"), "group_label") or "this food"
+
+
+def _build_group_action(
+    *,
+    group: Mapping[str, Any],
+    action_type: str,
+    kind: str,
+    question_id: str,
+    user_prompt: str,
+    answer_type: str,
+    choices: list[dict[str, str]],
+    allow_other: bool,
+    reason: str,
+) -> dict[str, Any]:
+    group_id = _coerce_str(group.get("group_id"), "group_id") or "group-unknown"
+    group_label = _group_prompt_subject(group)
+    existing = _existing_group_action(group, action_type=action_type)
+    question_focus = (
+        _coerce_str(existing.get("question_focus"), "question_focus")
+        if isinstance(existing, Mapping)
+        else None
+    ) or _coerce_str(group.get("question_focus"), "question_focus")
+    return {
+        "type": action_type,
+        "kind": kind,
+        "user_prompt": user_prompt,
+        "answer_type": answer_type,
+        "choices": choices,
+        "allow_other": allow_other,
+        "other_label": "Other" if allow_other else "",
+        "required": True,
+        "reason": reason,
+        "validation_hints": _action_validation_hints(answer_type=answer_type, allow_other=allow_other),
+        "question_id": (
+            _coerce_str(existing.get("question_id"), "question_id")
+            if isinstance(existing, Mapping)
+            else None
+        )
+        or question_id,
+        "group_id": group_id,
+        "group_label": group_label,
+        "question_focus": question_focus or "",
+    }
+
+
+def _build_identity_action(group: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+    group_id = _coerce_str(group.get("group_id"), "group_id") or "group-unknown"
+    return _build_group_action(
+        group=group,
+        action_type="CHOICE",
+        kind="IDENTITY",
+        question_id=f"{group_id}:identity",
+        user_prompt=f"Which option best matches the {_group_prompt_subject(group)}?",
+        answer_type="single_choice",
+        choices=_identity_choice_payloads(group),
+        allow_other=True,
+        reason=reason,
+    )
+
+
+def _build_affirmation_action(group: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+    group_id = _coerce_str(group.get("group_id"), "group_id") or "group-unknown"
+    top_label = None
+    if isinstance(group.get("top_3"), list) and group["top_3"]:
+        first_candidate = group["top_3"][0]
+        if isinstance(first_candidate, Mapping):
+            top_label = _coerce_str(first_candidate.get("label"), "label")
+    prompt_subject = top_label or _group_prompt_subject(group)
+    return _build_group_action(
+        group=group,
+        action_type="AFFIRMATION",
+        kind="AFFIRMATION",
+        question_id=f"{group_id}:affirmation",
+        user_prompt=f"I think this is {prompt_subject}. Is that right?",
+        answer_type="confirm",
+        choices=[
+            {"value": "YES", "label": "Yes", "quick_prompt": "Yes"},
+            {"value": "NO", "label": "No", "quick_prompt": "No"},
+        ],
+        allow_other=False,
+        reason=reason,
+    )
+
+
+def _build_source_origin_action(group: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+    group_id = _coerce_str(group.get("group_id"), "group_id") or "group-unknown"
+    return _build_group_action(
+        group=group,
+        action_type="SOURCE_ORIGIN",
+        kind="SOURCE_ORIGIN",
+        question_id=f"{group_id}:source_origin",
+        user_prompt=(
+            f"How should I treat the {_group_prompt_subject(group)} for nutrition: "
+            "homemade, store bought, packaged, restaurant, or not sure?"
+        ),
+        answer_type="single_choice",
+        choices=_source_origin_choice_payloads(),
+        allow_other=False,
+        reason=reason,
+    )
+
+
+def _build_quantity_action(group: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+    group_id = _coerce_str(group.get("group_id"), "group_id") or "group-unknown"
+    return _build_group_action(
+        group=group,
+        action_type="QUANTITY",
+        kind="QUANTITY",
+        question_id=f"{group_id}:quantity",
+        user_prompt=f"How much {_group_prompt_subject(group)} is there?",
+        answer_type="free_text",
+        choices=[],
+        allow_other=False,
+        reason=reason,
+    )
+
+
+def _build_group_clarification_actions(
+    group: Mapping[str, Any],
+    *,
+    group_action: str,
+    gate_reason: str,
+) -> list[dict[str, Any]]:
+    source_origin_needed = _needs_source_origin_question(group)
+    if group_action == "IDENTITY_CLARIFICATION_REQUIRED":
+        actions = [_build_identity_action(group, reason=gate_reason)]
+        if source_origin_needed:
+            actions.append(_build_source_origin_action(group, reason=gate_reason))
+        return actions
+    if group_action == "AFFIRMATION_REQUIRED":
+        actions = [_build_affirmation_action(group, reason=gate_reason)]
+        if source_origin_needed:
+            actions.append(_build_source_origin_action(group, reason=gate_reason))
+        return actions
+    if group_action == "ASK_QUANTITY":
+        return [_build_quantity_action(group, reason=gate_reason)]
+    if group_action in {"ASK_CHOICE", "INTERVIEW"}:
+        actions = [_build_identity_action(group, reason=gate_reason)]
+        if source_origin_needed:
+            actions.append(_build_source_origin_action(group, reason=gate_reason))
+        return actions
+    return []
+
+
+def _action_question_kind(action: Mapping[str, Any]) -> str:
+    action_type = (_coerce_str(action.get("type"), "type") or "").upper()
+    if action_type == "CHOICE":
+        return "CHOICE"
+    return action_type or "DETAIL"
+
+
+def _choice_labels(action: Mapping[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for choice in list(action.get("choices", [])):
+        if isinstance(choice, Mapping):
+            if (_coerce_str(choice.get("value"), "value") or "").upper() == "OTHER":
+                continue
+            label = _coerce_str(choice.get("label"), "label")
+            if label:
+                labels.append(label)
+        else:
+            label = _coerce_str(choice, "choice")
+            if label:
+                labels.append(label)
+    return _dedupe_string_choices(labels)
+
+
 def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     top_three = [
         dict(candidate)
@@ -545,12 +810,19 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     if group_action in {"ASK_QUANTITY", "ASK_CHOICE", "INTERVIEW"}:
+        normalized_action = "ASK_QUANTITY" if group_action == "ASK_QUANTITY" else "IDENTITY_CLARIFICATION_REQUIRED"
+        normalized_reason = gate_reason or "Interview required"
         return _normalized_group_result(
             group=group,
-            group_action=group_action,
+            group_action=normalized_action,
             group_state=group_state if group_state in _INTERVIEW_STATES else _INTERVIEW_STATE_FROM_OUTPUT,
-            gate_reason=gate_reason or "Interview required",
+            gate_reason=normalized_reason,
             decision_rationale=decision_rationale,
+            clarification_actions=_build_group_clarification_actions(
+                group,
+                group_action=normalized_action,
+                gate_reason=normalized_reason,
+            ),
         )
 
     if group_action == _READY_TO_WRITE_STATE:
@@ -572,8 +844,7 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     ).lower() if isinstance(top_one, Mapping) else ""
     food_item_id = _coerce_str(top_one.get("food_item_id"), "food_item_id") if isinstance(top_one, Mapping) else None
 
-    if candidate_source in {"visual_reasoning", "user_needed"} and not food_item_id:
-        reasons.append("visual-only candidate lacks learned confirmation")
+    visual_only_without_learned = candidate_source in {"visual_reasoning", "user_needed"} and not food_item_id
 
     if top_identity < threshold:
         reasons.append(f"best similarity {top_identity:.3f} is below threshold {threshold:.3f}")
@@ -587,16 +858,39 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
         reasons.append(f"nutrition impact {nutrition_impact:.3f} exceeds policy threshold")
 
     if reasons:
-        followup_action = "ASK_QUANTITY" if _should_ask_quantity(missing_evidence) else "ASK_CHOICE"
+        followup_action = "ASK_QUANTITY" if _should_ask_quantity(missing_evidence) else "IDENTITY_CLARIFICATION_REQUIRED"
+        followup_reason = "; ".join(reasons)
         return _normalized_group_result(
             group=group,
             group_action=followup_action,
             group_state=_INTERVIEW_STATE_FROM_OUTPUT,
-            gate_reason="; ".join(reasons),
+            gate_reason=followup_reason,
             decision_rationale=decision_rationale or "Needs user confirmation",
+            clarification_actions=_build_group_clarification_actions(
+                group,
+                group_action=followup_action,
+                gate_reason=followup_reason,
+            ),
         )
 
-    resolved_action = group_action if group_action in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE"} else "AUTO_CONFIRM"
+    if visual_only_without_learned:
+        affirmation_reason = "visual-only candidate lacks learned confirmation"
+        return _normalized_group_result(
+            group=group,
+            group_action="AFFIRMATION_REQUIRED",
+            group_state=_INTERVIEW_STATE_FROM_OUTPUT,
+            gate_reason=affirmation_reason,
+            decision_rationale=decision_rationale or "Needs explicit user affirmation",
+            clarification_actions=_build_group_clarification_actions(
+                group,
+                group_action="AFFIRMATION_REQUIRED",
+                gate_reason=affirmation_reason,
+            ),
+        )
+
+    resolved_action = "AUTO_CONFIRM_LEARNED" if food_item_id else (
+        group_action if group_action in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE"} else "AUTO_CONFIRM"
+    )
     resolved_rationale = (
         decision_rationale
         if "auto-confirm" in decision_rationale.lower()
@@ -654,6 +948,7 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
             "segment_count": segment_count,
             "food_group_count": 0,
             "food_groups": [],
+            "clarification_schema": [],
             "top_3": [],
         }
 
@@ -919,12 +1214,17 @@ def _reasoning_system_prompt() -> str:
         "food_groups. Every food_group must include group_id, group_label, group_action, "
         "group_state, primary_segment_id, segment_ids, selected_candidate_id, visible "
         "evidence, missing evidence, gate reason, decision rationale, question_kind, "
-        "question_focus, question_examples, and exactly three "
-        "top_3 records with nutrition_impact on every candidate. meal_state must be exactly "
-        "one of READY_TO_WRITE, PENDING_CHOICE, PENDING_INTERVIEW, PARTIAL_RESOLVED_WAITING, "
-        "FAILED_UNCLEAR, or NEEDS_SCHEMA_REVIEW. Use READY_TO_WRITE only when every group is "
-        "AUTO_CONFIRM. Use trace_id=\"\" if no provider trace is supplied. Do not expose "
-        "hidden chain-of-thought.\n"
+        "question_focus, question_examples, clarification_needed, ordered clarification_actions, "
+        "the deprecated clarification alias, and exactly three top_3 records with nutrition_impact "
+        "on every candidate. clarification_actions are the renderer contract: each action must "
+        "already contain type, kind, user_prompt, answer_type, ordered choices, allow_other, "
+        "other_label, required, reason, and validation_hints. Use top_3 candidates in ranked order "
+        "for identity choice surfaces, append a contract-owned Other entry only for identity choice "
+        "actions, and emit SOURCE_ORIGIN only when it materially changes nutrition or grounding. "
+        "meal_state must be exactly one of READY_TO_WRITE, PENDING_CHOICE, PENDING_INTERVIEW, "
+        "PARTIAL_RESOLVED_WAITING, FAILED_UNCLEAR, or NEEDS_SCHEMA_REVIEW. Use READY_TO_WRITE only "
+        "when every group is AUTO_CONFIRM. Use trace_id=\"\" if no provider trace is supplied. "
+        "Do not expose hidden chain-of-thought.\n"
         "</OUTPUT_CONTRACT>"
     )
 
@@ -1321,7 +1621,7 @@ async def persist_reasoning_results(
     meal_reasoning["meal_state"] = reason_state
     ready_for_final_write = (
         reason_state == _READY_TO_WRITE_STATE
-        and normalized.get("action") in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE"}
+        and normalized.get("action") in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE", "AUTO_CONFIRM_LEARNED"}
         and all(group.get("group_state") == _READY_TO_WRITE_STATE for group in food_groups)
     )
     if hasattr(meal, "reasoning_state_json"):

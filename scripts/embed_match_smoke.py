@@ -48,6 +48,7 @@ DEFAULT_UAT_POSTGRES_CONTAINER = "mealttracker-postgres"
 DEFAULT_UAT_POSTGRES_USER = "mealttracker"
 DEFAULT_UAT_POLL_TIMEOUT_SECONDS = 180
 DEFAULT_UAT_POLL_INTERVAL_SECONDS = 5.0
+POSTGRES_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 SENSITIVE_REPORT_KEYS = {
     "authorization",
     "x-ingest-secret",
@@ -246,14 +247,25 @@ def _assert_safe_uat_target_database(
     *,
     checkpoint_database: str,
 ) -> str:
-    normalized = str(target_database or "").strip()
+    normalized = _validate_postgres_database_identifier(
+        target_database,
+        label="target database",
+    )
+    checkpoint = _validate_postgres_database_identifier(
+        checkpoint_database,
+        label="checkpoint database",
+    )
     if not normalized:
         raise RuntimeError("target database is required for the 04.3 UAT harness")
     if normalized == "mealttracker":
         raise RuntimeError(
             "refusing to clone into the default 'mealttracker' database; select an explicit disposable target"
         )
-    if normalized == checkpoint_database:
+    if checkpoint == "mealttracker":
+        raise RuntimeError(
+            "refusing to use the default 'mealttracker' database as the warm checkpoint"
+        )
+    if normalized == checkpoint:
         raise RuntimeError(
             "refusing to clone over the warm checkpoint database; choose a separate disposable target"
         )
@@ -262,6 +274,22 @@ def _assert_safe_uat_target_database(
             "refusing to clone into a database outside the disposable mealttracker_* namespace"
         )
     return normalized
+
+
+def _validate_postgres_database_identifier(value: str, *, label: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise RuntimeError(f"{label} is required")
+    if not POSTGRES_IDENTIFIER_RE.fullmatch(normalized):
+        raise RuntimeError(
+            f"{label} must be a simple PostgreSQL identifier containing only letters, numbers, and underscores"
+        )
+    return normalized
+
+
+def _sql_identifier(value: str, *, label: str = "database identifier") -> str:
+    normalized = _validate_postgres_database_identifier(value, label=label)
+    return '"' + normalized.replace('"', '""') + '"'
 
 
 def _sanitize_report_value(value: object) -> object:
@@ -309,6 +337,15 @@ def _current_prompt_from_interview_payload(interview: Mapping[str, Any] | None) 
             prompt = current_question.get("prompt")
             if isinstance(prompt, str) and prompt.strip():
                 return prompt.strip()
+        questions_by_id = payload.get("questions_by_id")
+        question_order = payload.get("question_order")
+        if isinstance(questions_by_id, Mapping) and isinstance(question_order, Sequence):
+            for question_id in question_order:
+                question = questions_by_id.get(str(question_id))
+                if isinstance(question, Mapping):
+                    prompt = question.get("prompt")
+                    if isinstance(prompt, str) and prompt.strip():
+                        return prompt.strip()
     messages = interview.get("messages")
     if isinstance(messages, Sequence):
         for message in reversed(list(messages)):
@@ -344,8 +381,27 @@ def _classify_uat_harness_outcome(
     if interview_state == "GROUNDING_PENDING" or roadmap_step == "GROUNDING_PENDING":
         return "grounding-pending"
     if meal_status == MealProcessingStatus.INTERVIEWING.value:
-        return "interview"
+        if _interview_has_auditable_prompt(interview):
+            return "interview"
+        return None
     return None
+
+
+def _interview_has_auditable_prompt(interview: Mapping[str, Any] | None) -> bool:
+    if not isinstance(interview, Mapping):
+        return False
+    payload = interview.get("current_prompt_payload")
+    if isinstance(payload, Mapping):
+        questions_by_id = payload.get("questions_by_id")
+        current_question = payload.get("current_question")
+        if isinstance(current_question, Mapping) and current_question:
+            return True
+        if isinstance(questions_by_id, Mapping) and bool(questions_by_id):
+            return True
+        if _current_prompt_from_interview_payload(interview):
+            return True
+    messages = interview.get("messages")
+    return isinstance(messages, Sequence) and len(messages) > 0
 
 
 def _summarize_uat_reasoning(reasoning_state: Mapping[str, Any] | None) -> str:
@@ -361,6 +417,17 @@ def _summarize_uat_reasoning(reasoning_state: Mapping[str, Any] | None) -> str:
     if trace_id:
         return f"trace_id={trace_id}; {rationale}"
     return rationale
+
+
+def _mapping_or_empty(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _first_present_mapping(*values: object) -> Mapping[str, Any] | None:
+    for value in values:
+        if isinstance(value, Mapping):
+            return value
+    return None
 
 
 def _report_filename(*, scenario_name: str, meal_id: str | None, dry_run: bool) -> str:
@@ -407,9 +474,26 @@ def _build_uat_harness_report(
     meal_data = dict(meal or {})
     interview_data = dict(interview or {})
     reasoning_state = dict(meal_data.get("reasoning_state_json") or {})
+    meal_reasoning = _mapping_or_empty(reasoning_state.get("meal_reasoning"))
     prompt_payload = dict(interview_data.get("current_prompt_payload") or {})
+    clarification_schema = (
+        reasoning_state.get("clarification_schema")
+        if reasoning_state.get("clarification_schema") is not None
+        else meal_reasoning.get("clarification_schema")
+    )
+    answers_by_question_id = _first_present_mapping(
+        prompt_payload.get("answers_by_question_id"),
+        reasoning_state.get("answers_by_question_id"),
+        meal_reasoning.get("answers_by_question_id"),
+    )
+    resolver_payload = _first_present_mapping(
+        prompt_payload.get("resolver_payload"),
+        reasoning_state.get("resolver_payload"),
+        meal_reasoning.get("resolver_payload"),
+    )
     trace_ids = _extract_trace_ids(
         reasoning_state,
+        meal_reasoning,
         prompt_payload,
         interview_data.get("messages"),
         diary_entries,
@@ -438,9 +522,9 @@ def _build_uat_harness_report(
         },
         "reasoning": {
             "summary": _summarize_uat_reasoning(reasoning_state),
-            "clarification_schema": _sanitize_report_value(reasoning_state.get("clarification_schema")),
-            "answers_by_question_id": _sanitize_report_value(reasoning_state.get("answers_by_question_id")),
-            "resolver_payload": _sanitize_report_value(reasoning_state.get("resolver_payload")),
+            "clarification_schema": _sanitize_report_value(clarification_schema),
+            "answers_by_question_id": _sanitize_report_value(answers_by_question_id),
+            "resolver_payload": _sanitize_report_value(resolver_payload),
         },
         "interview": {
             "session_id": interview_data.get("session_id") or interview_data.get("id"),
@@ -507,6 +591,14 @@ def _clone_checkpoint_database(
     checkpoint_database: str,
     postgres_container: str,
 ) -> None:
+    safe_target = _assert_safe_uat_target_database(
+        target_database,
+        checkpoint_database=checkpoint_database,
+    )
+    safe_checkpoint = _validate_postgres_database_identifier(
+        checkpoint_database,
+        label="checkpoint database",
+    )
     _run_subprocess(
         [
             "docker",
@@ -520,7 +612,7 @@ def _clone_checkpoint_database(
             "-d",
             "postgres",
             "-c",
-            f"DROP DATABASE IF EXISTS {target_database} WITH (FORCE);",
+            f"DROP DATABASE IF EXISTS {_sql_identifier(safe_target, label='target database')} WITH (FORCE);",
         ]
     )
     _run_subprocess(
@@ -536,7 +628,10 @@ def _clone_checkpoint_database(
             "-d",
             "postgres",
             "-c",
-            f"CREATE DATABASE {target_database} TEMPLATE {checkpoint_database};",
+            (
+                f"CREATE DATABASE {_sql_identifier(safe_target, label='target database')} "
+                f"TEMPLATE {_sql_identifier(safe_checkpoint, label='checkpoint database')};"
+            ),
         ]
     )
 
@@ -674,8 +769,16 @@ async def _run_uat_harness(args: argparse.Namespace) -> dict[str, Any]:
         "compose_override": "docker-compose.uat-043-harness.yml",
         "api_base_url": str(args.api_base_url).rstrip("/"),
         "commands": [
-            f"docker exec {args.postgres_container} psql -U {DEFAULT_UAT_POSTGRES_USER} -d postgres -c \"DROP DATABASE IF EXISTS {target_database} WITH (FORCE);\"",
-            f"docker exec {args.postgres_container} psql -U {DEFAULT_UAT_POSTGRES_USER} -d postgres -c \"CREATE DATABASE {target_database} TEMPLATE {args.checkpoint_database};\"",
+            (
+                f"docker exec {args.postgres_container} psql -U {DEFAULT_UAT_POSTGRES_USER} "
+                f"-d postgres -c \"DROP DATABASE IF EXISTS "
+                f"{_sql_identifier(target_database, label='target database')} WITH (FORCE);\""
+            ),
+            (
+                f"docker exec {args.postgres_container} psql -U {DEFAULT_UAT_POSTGRES_USER} "
+                f"-d postgres -c \"CREATE DATABASE {_sql_identifier(target_database, label='target database')} "
+                f"TEMPLATE {_sql_identifier(str(args.checkpoint_database), label='checkpoint database')};\""
+            ),
         ],
     }
     if args.dry_run:

@@ -102,6 +102,43 @@ class SmokeUatHarnessContractTests(unittest.TestCase):
             checkpoint_database="mealttracker_uat_with_meal_embeddings",
         )
 
+    def test_uat_harness_rejects_sql_injection_database_names(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "simple PostgreSQL identifier"):
+            smoke._assert_safe_uat_target_database(
+                "mealttracker_tmp; DROP DATABASE mealttracker; --",
+                checkpoint_database="mealttracker_uat_with_meal_embeddings",
+            )
+        with self.assertRaisesRegex(RuntimeError, "simple PostgreSQL identifier"):
+            smoke._assert_safe_uat_target_database(
+                "mealttracker_043_harness",
+                checkpoint_database="mealttracker_uat; DROP DATABASE mealttracker; --",
+            )
+        with self.assertRaisesRegex(RuntimeError, "default 'mealttracker'"):
+            smoke._assert_safe_uat_target_database(
+                "mealttracker_043_harness",
+                checkpoint_database="mealttracker",
+            )
+
+    def test_clone_checkpoint_database_quotes_identifiers(self) -> None:
+        commands: list[list[str]] = []
+
+        def capture(command: list[str]) -> str:
+            commands.append(command)
+            return ""
+
+        with patch.object(smoke, "_run_subprocess", side_effect=capture):
+            smoke._clone_checkpoint_database(
+                target_database="mealttracker_043_harness",
+                checkpoint_database="mealttracker_uat_with_meal_embeddings",
+                postgres_container="postgres",
+            )
+
+        self.assertIn('DROP DATABASE IF EXISTS "mealttracker_043_harness"', commands[0][-1])
+        self.assertIn(
+            'CREATE DATABASE "mealttracker_043_harness" TEMPLATE "mealttracker_uat_with_meal_embeddings"',
+            commands[1][-1],
+        )
+
     def test_uat_harness_report_contains_required_audit_sections(self) -> None:
         builder = getattr(smoke, "_build_uat_harness_report", None)
         self.assertIsNotNone(builder, "missing _build_uat_harness_report helper")
@@ -141,6 +178,146 @@ class SmokeUatHarnessContractTests(unittest.TestCase):
         self.assertIn("food_visuals", report)
         self.assertIn("grounding", report)
         self.assertIn("traces", report)
+
+    def test_uat_harness_report_reads_nested_reasoning_and_interview_state(self) -> None:
+        report = smoke._build_uat_harness_report(
+            scenario={"scenario": "partial-match", "sample": "sample_images/IMG_4583.HEIC"},
+            target_database="mealttracker_043_harness",
+            checkpoint_database="mealttracker_uat_with_meal_embeddings",
+            api_base_url="http://127.0.0.1:18043",
+            report_path=Path("uploads/reports/04.3/partial-match.json"),
+            dry_run=False,
+            meal={
+                "meal_id": "meal-123",
+                "processing_status": "INTERVIEWING",
+                "reasoning_state_json": {
+                    "meal_reasoning": {
+                        "trace_id": "trace-reasoning",
+                        "clarification_schema": [{"question_id": "group_1:identity"}],
+                    }
+                },
+            },
+            interview={
+                "session_id": "session-123",
+                "state_key": "QUESTION_BATCH",
+                "current_prompt_payload": {
+                    "question_order": ["group_1:identity"],
+                    "questions_by_id": {
+                        "group_1:identity": {"prompt": "Which curry?"}
+                    },
+                    "answers_by_question_id": {
+                        "group_1:identity": {"name": "Egg curry"}
+                    },
+                    "resolver_payload": {"ready_to_confirm": True},
+                },
+                "messages": [],
+            },
+            diary_entries=[],
+            food_visuals=[],
+        )
+
+        self.assertEqual(
+            report["reasoning"]["clarification_schema"],
+            [{"question_id": "group_1:identity"}],
+        )
+        self.assertEqual(
+            report["reasoning"]["answers_by_question_id"],
+            {"group_1:identity": {"name": "Egg curry"}},
+        )
+        self.assertEqual(report["reasoning"]["resolver_payload"], {"ready_to_confirm": True})
+        self.assertEqual(report["interview"]["current_prompt"], "Which curry?")
+        self.assertEqual(report["traces"]["ids"], ["trace-reasoning"])
+
+    def test_interview_outcome_waits_for_auditable_prompt(self) -> None:
+        meal = {"processing_status": "INTERVIEWING"}
+
+        self.assertIsNone(smoke._classify_uat_harness_outcome(meal, None))
+        self.assertIsNone(
+            smoke._classify_uat_harness_outcome(
+                meal,
+                {"state_key": "QUESTION_BATCH", "current_prompt_payload": {}, "messages": []},
+            )
+        )
+        self.assertEqual(
+            smoke._classify_uat_harness_outcome(
+                meal,
+                {
+                    "state_key": "QUESTION_BATCH",
+                    "current_prompt_payload": {
+                        "questions_by_id": {
+                            "group_1:identity": {"prompt": "Which curry?"}
+                        }
+                    },
+                    "messages": [],
+                },
+            ),
+            "interview",
+        )
+
+
+class SmokeUatHarnessLiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_uat_harness_live_path_clones_ingests_waits_and_reports(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            args = SimpleNamespace(
+                scenario="partial-match",
+                target_database="mealttracker_043_harness",
+                checkpoint_database="mealttracker_uat_with_meal_embeddings",
+                api_base_url="http://127.0.0.1:18043",
+                report_dir=tmpdir,
+                postgres_container="postgres",
+                dry_run=False,
+                poll_timeout_seconds=5,
+                poll_interval_seconds=1,
+            )
+            sample_path = Path(tmpdir) / "IMG_4583.HEIC"
+            sample_path.write_bytes(b"sample")
+            snapshot = {
+                "meal": {
+                    "meal_id": "meal-123",
+                    "processing_status": "INTERVIEWING",
+                    "reasoning_state_json": {
+                        "meal_reasoning": {
+                            "clarification_schema": [{"question_id": "group_1:identity"}]
+                        }
+                    },
+                },
+                "interview": {
+                    "session_id": "session-123",
+                    "state_key": "QUESTION_BATCH",
+                    "current_prompt_payload": {
+                        "questions_by_id": {
+                            "group_1:identity": {"prompt": "Which curry?"}
+                        }
+                    },
+                    "messages": [],
+                },
+                "diary_entries": [],
+                "food_visuals": [],
+                "outcome": "interview",
+            }
+
+            with (
+                patch.dict(smoke.os.environ, {"INGEST_SECRET": "secret"}),
+                patch.object(smoke, "_resolve_image_path", return_value=sample_path),
+                patch.object(smoke, "_clone_checkpoint_database") as clone,
+                patch.object(
+                    smoke,
+                    "_post_uat_sample",
+                    AsyncMock(return_value={"meal_log_id": "meal-123"}),
+                ) as post_sample,
+                patch.object(smoke, "_snapshot_uat_harness_state", return_value=snapshot) as snapshot_state,
+            ):
+                report = await smoke._run_uat_harness(args)
+
+        clone.assert_called_once_with(
+            target_database="mealttracker_043_harness",
+            checkpoint_database="mealttracker_uat_with_meal_embeddings",
+            postgres_container="postgres",
+        )
+        post_sample.assert_awaited_once()
+        snapshot_state.assert_called_once()
+        self.assertEqual(report["status"], "interview")
+        self.assertEqual(report["reasoning"]["clarification_schema"], [{"question_id": "group_1:identity"}])
 
 
 class SmokeCalibrationTests(unittest.IsolatedAsyncioTestCase):

@@ -184,11 +184,12 @@ Eight phases transform a blank repo into a fully operational personal meal track
   6. The final resolver consumes grouped reasoning plus structured answers and emits normalized confirmation items into the existing final write path so FoodItems, DiaryEntries, and FoodVisual rows are created exactly as in Phase 4.2.
   7. Live repeated-meal UAT with the saved UAT embedding checkpoint proves vector candidates inform reasoning, template questions are asked, partial replies recover deterministically, and final save creates/updates the expected diary and visual rows.
 
-**Plans**: 3 plans:
+**Plans**: 4 plans:
 
 - [x] `04.3-01-PLAN.md` - grouped reasoning contract cleanup, strict `clarification_schema`, source-origin rules, and removal of live root `top_3` branching.
 - [x] `04.3-02-PLAN.md` - deterministic Telegram rendering, stable question/choice answer capture, and partial reply recovery.
 - [x] `04.3-03-PLAN.md` - resolver-only finalization handoff, authoritative save-path preservation, and live 04.3 UAT checklist; live evidence deferred to `$gsd-verify-work`.
+- [ ] `04.3-04-PLAN.md` - repeatable warm-state partial-match/no-match UAT harness for `IMG_4583.HEIC` and `IMG_4641.HEIC`, including disposable DB activation, evidence dump, and runbook updates.
 
 **Phase note**: This is an interview architecture cleanup before Phase 5 grounding, not a nutrition-grounding expansion. Keep SearXNG/Firecrawl tool loops out of scope except preserving handoff fields for Phase 5. Preserve the existing LLM finalizer only as a compact resolver if needed; it should not ask user-facing interview questions.
 
@@ -242,6 +243,6 @@ Eight phases transform a blank repo into a fully operational personal meal track
 | 4. Reason, Interview & Learning Loop | 8/8 | Complete    | 2026-05-28 |
 | 4.1. Grouped Reasoning & Human Interview Correction | 2/2 | Complete   | 2026-05-29 |
 | 4.2. LLM-Threaded Interview Orchestration | 3/3 | Complete   | 2026-05-30 |
-| 4.3. Deterministic Clarification Schema & Interview UI | 2/3 | In Progress|  |
+| 4.3. Deterministic Clarification Schema & Interview UI | 3/4 | In Progress|  |
 | 5. Agentic Grounding | 0/TBD | Not started | - |
 | 6. Bot Surface & Daily Summary | 0/TBD | Not started | - |

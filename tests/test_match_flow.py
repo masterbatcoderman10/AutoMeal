@@ -544,6 +544,83 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["finalized"])
 
 
+class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_finalize_confirmed_interview_keeps_resolver_payload_in_authoritative_write(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-finalize",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "clarification_schema": {
+                    "questions": [
+                        {
+                            "question_id": "q-detail-curry",
+                            "group_id": "group-egg",
+                            "required": True,
+                        }
+                    ]
+                },
+                "answers_by_question_id": {
+                    "q-detail-curry": {
+                        "question_id": "q-detail-curry",
+                        "group_id": "group-egg",
+                        "name": "egg curry with bottle gourd",
+                    }
+                },
+            },
+        )
+        segment = SimpleNamespace(
+            id="seg-egg-1",
+            cropped_image_url="/data/uploads/crops/seg-egg-1.jpg",
+            embedding=[0.44] * EMBEDDING_DIMENSION,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        confirmation_items = [
+            {
+                "group_id": "group-egg",
+                "primary_segment_id": "seg-egg-1",
+                "segment_id": "seg-egg-1",
+                "segment_ids": ["seg-egg-1"],
+                "name": "egg curry with bottle gourd",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+            }
+        ]
+
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with patch.object(
+            interview_service,
+            "apply_final_meal_resolution",
+            new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ):
+            await interview_service.finalize_confirmed_interview(
+                session=session,
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=[segment],
+            )
+
+        reasoning_state_json = captured["reasoning_state_json"]
+        self.assertIn("answers_by_question_id", reasoning_state_json)
+        self.assertEqual(
+            reasoning_state_json["answers_by_question_id"]["q-detail-curry"]["name"],
+            "egg curry with bottle gourd",
+        )
+        self.assertIn("resolver_payload", reasoning_state_json)
+        self.assertEqual(
+            reasoning_state_json["resolver_payload"]["confirmation_items"][0]["name"],
+            "egg curry with bottle gourd",
+        )
+
+
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:
         from bot import polling

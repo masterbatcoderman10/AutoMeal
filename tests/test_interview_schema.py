@@ -58,6 +58,19 @@ class InterviewSchemaContractTests(unittest.TestCase):
         self.assertEqual(item_properties["approval_status"]["enum"], ["APPROVED", "CORRECTED"])
         self.assertIn("segment_ids", item_properties)
 
+    def test_response_format_limits_final_resolver_to_ready_to_confirm(self) -> None:
+        schema_module = _load_module_or_fail(self, "app.services.interview_schema")
+        if schema_module is None:
+            return
+
+        response_format = schema_module.interview_turn_response_format()
+        schema = response_format["json_schema"]["schema"]
+
+        self.assertEqual(
+            schema["properties"]["turn_action"]["enum"],
+            ["ready_to_confirm"],
+        )
+
     def test_confirmation_item_tracks_group_segment_membership(self) -> None:
         schema_module = _load_module_or_fail(self, "app.services.interview_schema")
         if schema_module is None:

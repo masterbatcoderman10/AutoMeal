@@ -522,7 +522,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         callback_query.message.reply_text.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
-    async def test_meal_interview_text_rerenders_only_missing_required_questions(self) -> None:
+    async def test_meal_interview_text_uses_resolver_after_last_required_answer(self) -> None:
         from bot.handlers import interview_text
 
         interview = SimpleNamespace(
@@ -570,8 +570,17 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 "interview_messages": [],
             },
         )
+        meal = SimpleNamespace(
+            id="meal-partial",
+            segments=[
+                SimpleNamespace(id="seg-pita-1"),
+                SimpleNamespace(id="seg-egg-1"),
+                SimpleNamespace(id="seg-egg-2"),
+            ],
+        )
         session = AsyncMock()
         session.add = Mock()
+        session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
         engine = SimpleNamespace(dispose=AsyncMock())
 
         class SessionContext:
@@ -593,25 +602,58 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             callback_query=None,
         )
         context = SimpleNamespace(bot_data={})
+        turn = SimpleNamespace(
+            turn_action="ready_to_confirm",
+            clarification_reason=None,
+            conversation_summary="Resolved the last required clarification answer.",
+            confirmation_items=[
+                {
+                    "group_id": "group-pita",
+                    "primary_segment_id": "seg-pita-1",
+                    "segment_id": "seg-pita-1",
+                    "segment_ids": ["seg-pita-1"],
+                    "name": "pita bread",
+                    "source_type": "HOME",
+                    "portion_bucket": "STANDARD",
+                    "approval_status": "APPROVED",
+                },
+                {
+                    "group_id": "group-egg",
+                    "primary_segment_id": "seg-egg-1",
+                    "segment_id": "seg-egg-1",
+                    "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                    "name": "egg curry with bottle gourd",
+                    "source_type": "HOME",
+                    "portion_bucket": "STANDARD",
+                    "approval_status": "CORRECTED",
+                },
+            ],
+        )
 
         with (
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
             patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
-            patch("bot.handlers._run_meal_interview_turn", AsyncMock(), create=True) as run_turn,
+            patch("bot.handlers._run_meal_interview_turn", AsyncMock(return_value=turn), create=True) as run_turn,
             patch("bot.handlers.interview_service.persist_interview_step", AsyncMock()) as persist,
+            patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock()) as finalize,
         ):
             await interview_text(update, context)
 
-        run_turn.assert_not_awaited()
+        run_turn.assert_awaited_once()
+        finalize.assert_not_awaited()
         persist.assert_awaited_once()
         persisted_state = persist.await_args.kwargs["state"]
         self.assertEqual(persist.await_args.kwargs["user_payload"]["question_id"], "q-detail-curry")
         self.assertEqual(
-            persisted_state["answers_by_question_id"]["q-confirm-pita"]["choice_id"],
-            "approve",
+            persisted_state["answers_by_question_id"]["q-detail-curry"]["name"],
+            "egg curry with bottle gourd",
         )
         self.assertEqual(persisted_state["remaining_required_question_ids"], [])
+        self.assertEqual(
+            [item["name"] for item in persisted_state["confirmation_items"]],
+            ["pita bread", "egg curry with bottle gourd"],
+        )
         reply_text.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 

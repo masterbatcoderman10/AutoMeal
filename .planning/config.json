@@ -21,8 +21,8 @@
   },
   "model_overrides": {
     "gsd-executor": {
-      "model": "gpt-5.4",
-      "reasoning_effort": "high"
+      "model": "gpt-5.3-codex-spark",
+      "reasoning_effort": "xhigh"
     },
     "gsd-code-fixer": {
       "model": "gpt-5.4",

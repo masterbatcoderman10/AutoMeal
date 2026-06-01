@@ -4,12 +4,17 @@ import argparse
 import asyncio
 import json
 import mimetypes
+import os
 import re
+import subprocess
 import sys
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Mapping, Sequence
+
+import httpx
 
 from sqlalchemy import select, update
 from sqlalchemy import func
@@ -35,6 +40,33 @@ EMBEDDING_MODEL = "google/gemini-embedding-2-preview"
 EMBEDDING_TASK_MARGIN = 0.001
 SMOKE_ID_MAX_LENGTH = 36
 ALLOWED_CROP_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+DEFAULT_UAT_TARGET_DATABASE = "mealttracker_043_harness"
+DEFAULT_UAT_CHECKPOINT_DATABASE = "mealttracker_uat_with_meal_embeddings"
+DEFAULT_UAT_API_BASE_URL = "http://127.0.0.1:18043"
+DEFAULT_UAT_REPORT_DIR = PROJECT_ROOT / "uploads" / "reports" / "04.3"
+DEFAULT_UAT_POSTGRES_CONTAINER = "mealttracker-postgres"
+DEFAULT_UAT_POSTGRES_USER = "mealttracker"
+DEFAULT_UAT_POLL_TIMEOUT_SECONDS = 180
+DEFAULT_UAT_POLL_INTERVAL_SECONDS = 5.0
+SENSITIVE_REPORT_KEYS = {
+    "authorization",
+    "x-ingest-secret",
+    "ingest_secret",
+    "openrouter_api_key",
+    "langfuse_secret_key",
+    "langfuse_public_key",
+    "telegram_bot_token",
+}
+UAT_HARNESS_SCENARIOS = {
+    "partial-match": {
+        "sample_relative_path": "sample_images/IMG_4583.HEIC",
+        "goal": "partial-match repeated-meal replay from the warm checkpoint",
+    },
+    "no-match": {
+        "sample_relative_path": "sample_images/IMG_4641.HEIC",
+        "goal": "no-match clarification replay from the warm checkpoint",
+    },
+}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -48,13 +80,19 @@ def _parse_args() -> argparse.Namespace:
             "repeat-confirmation",
             "reasoning-probe",
             "grouped-uat",
+            "uat-harness",
         ],
         required=True,
     )
     parser.add_argument(
         "--sample",
-        required=True,
         help="Saved crop artifact for the smoke run (for example uploads/crops/seg-1.jpg)",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=sorted(UAT_HARNESS_SCENARIOS),
+        default=None,
+        help="Named 04.3 UAT harness scenario",
     )
     parser.add_argument(
         "--same-food-peer",
@@ -87,7 +125,55 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional database URL override for seed-demo and unresolved-probe modes",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--target-database",
+        default=DEFAULT_UAT_TARGET_DATABASE,
+        help="Disposable Postgres database the 04.3 harness may reset/clone",
+    )
+    parser.add_argument(
+        "--checkpoint-database",
+        default=DEFAULT_UAT_CHECKPOINT_DATABASE,
+        help="Warm checkpoint database used as the clone source for the 04.3 harness",
+    )
+    parser.add_argument(
+        "--api-base-url",
+        default=DEFAULT_UAT_API_BASE_URL,
+        help="API base URL used by the 04.3 harness ingest replay",
+    )
+    parser.add_argument(
+        "--report-dir",
+        default=str(DEFAULT_UAT_REPORT_DIR),
+        help="Directory where 04.3 harness JSON reports are written",
+    )
+    parser.add_argument(
+        "--postgres-container",
+        default=DEFAULT_UAT_POSTGRES_CONTAINER,
+        help="Postgres container name used for checkpoint clone and evidence queries",
+    )
+    parser.add_argument(
+        "--poll-timeout-seconds",
+        type=int,
+        default=DEFAULT_UAT_POLL_TIMEOUT_SECONDS,
+        help="How long the live 04.3 harness waits for interview/completed state",
+    )
+    parser.add_argument(
+        "--poll-interval-seconds",
+        type=float,
+        default=DEFAULT_UAT_POLL_INTERVAL_SECONDS,
+        help="Polling interval for the live 04.3 harness",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Emit the 04.3 harness report and planned activation steps without touching Docker or the API",
+    )
+    args = parser.parse_args()
+    if args.mode == "uat-harness":
+        if not args.scenario:
+            parser.error("--scenario is required when --mode uat-harness is selected")
+    elif not args.sample:
+        parser.error("--sample is required unless --mode uat-harness is selected")
+    return args
 
 
 def _load_raw_bytes(path: Path) -> bytes:
@@ -142,6 +228,539 @@ def _resolve_image_path(path_value: str | Path, *, flag_name: str) -> Path:
     if not image_path.exists() or not image_path.is_file():
         raise FileNotFoundError(f"{flag_name} image missing: {image_path}")
     return image_path
+
+
+def _resolve_uat_harness_scenario(name: str) -> dict[str, str]:
+    scenario = UAT_HARNESS_SCENARIOS.get(name)
+    if scenario is None:
+        raise RuntimeError(f"unknown 04.3 harness scenario: {name}")
+    return {
+        "scenario": name,
+        "sample": str((PROJECT_ROOT / scenario["sample_relative_path"]).resolve()),
+        "goal": scenario["goal"],
+    }
+
+
+def _assert_safe_uat_target_database(
+    target_database: str,
+    *,
+    checkpoint_database: str,
+) -> str:
+    normalized = str(target_database or "").strip()
+    if not normalized:
+        raise RuntimeError("target database is required for the 04.3 UAT harness")
+    if normalized == "mealttracker":
+        raise RuntimeError(
+            "refusing to clone into the default 'mealttracker' database; select an explicit disposable target"
+        )
+    if normalized == checkpoint_database:
+        raise RuntimeError(
+            "refusing to clone over the warm checkpoint database; choose a separate disposable target"
+        )
+    if not normalized.startswith("mealttracker_"):
+        raise RuntimeError(
+            "refusing to clone into a database outside the disposable mealttracker_* namespace"
+        )
+    return normalized
+
+
+def _sanitize_report_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        sanitized: dict[str, object] = {}
+        for key, nested in value.items():
+            if str(key).lower() in SENSITIVE_REPORT_KEYS:
+                sanitized[str(key)] = "[redacted]"
+                continue
+            sanitized[str(key)] = _sanitize_report_value(nested)
+        return sanitized
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_sanitize_report_value(item) for item in value]
+    return value
+
+
+def _extract_trace_ids(*values: object) -> list[str]:
+    found: set[str] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, Mapping):
+            for key, nested in value.items():
+                if str(key).lower().replace("-", "_") == "trace_id":
+                    text = str(nested or "").strip()
+                    if text:
+                        found.add(text)
+                visit(nested)
+            return
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            for item in value:
+                visit(item)
+
+    for candidate in values:
+        visit(candidate)
+    return sorted(found)
+
+
+def _current_prompt_from_interview_payload(interview: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(interview, Mapping):
+        return None
+    payload = interview.get("current_prompt_payload")
+    if isinstance(payload, Mapping):
+        current_question = payload.get("current_question")
+        if isinstance(current_question, Mapping):
+            prompt = current_question.get("prompt")
+            if isinstance(prompt, str) and prompt.strip():
+                return prompt.strip()
+    messages = interview.get("messages")
+    if isinstance(messages, Sequence):
+        for message in reversed(list(messages)):
+            if not isinstance(message, Mapping):
+                continue
+            payload = message.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            prompt = payload.get("prompt")
+            if isinstance(prompt, str) and prompt.strip():
+                return prompt.strip()
+            if isinstance(prompt, Mapping):
+                text = prompt.get("prompt")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+    return None
+
+
+def _classify_uat_harness_outcome(
+    meal: Mapping[str, Any] | None,
+    interview: Mapping[str, Any] | None,
+) -> str | None:
+    meal_status = str((meal or {}).get("processing_status") or "").strip().upper()
+    interview_payload = dict((interview or {}).get("current_prompt_payload") or {})
+    interview_state = str((interview or {}).get("state_key") or "").strip().upper()
+    roadmap_step = str(interview_payload.get("roadmap_step") or "").strip().upper()
+    grounding_status = str(interview_payload.get("grounding_status") or "").strip().upper()
+
+    if meal_status == MealProcessingStatus.COMPLETED.value:
+        return "completed"
+    if grounding_status == "RETRY_PENDING":
+        return "retry-pending"
+    if interview_state == "GROUNDING_PENDING" or roadmap_step == "GROUNDING_PENDING":
+        return "grounding-pending"
+    if meal_status == MealProcessingStatus.INTERVIEWING.value:
+        return "interview"
+    return None
+
+
+def _summarize_uat_reasoning(reasoning_state: Mapping[str, Any] | None) -> str:
+    if not isinstance(reasoning_state, Mapping):
+        return "No reasoning state recorded."
+    meal_reasoning = reasoning_state.get("meal_reasoning")
+    if isinstance(meal_reasoning, Mapping):
+        source = meal_reasoning
+    else:
+        source = reasoning_state
+    trace_id = str(source.get("trace_id") or "").strip()
+    rationale = str(source.get("decision_rationale") or "").strip() or "No reasoning rationale recorded."
+    if trace_id:
+        return f"trace_id={trace_id}; {rationale}"
+    return rationale
+
+
+def _report_filename(*, scenario_name: str, meal_id: str | None, dry_run: bool) -> str:
+    if dry_run:
+        return f"{scenario_name}-dry-run.json"
+    suffix = meal_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"{scenario_name}-{suffix}.json"
+
+
+def _report_path_for_run(
+    report_dir: str | Path,
+    *,
+    scenario_name: str,
+    meal_id: str | None,
+    dry_run: bool,
+) -> Path:
+    directory = Path(report_dir).expanduser()
+    if not directory.is_absolute():
+        directory = (PROJECT_ROOT / directory).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / _report_filename(scenario_name=scenario_name, meal_id=meal_id, dry_run=dry_run)
+
+
+def _write_report_json(report_path: Path, report: Mapping[str, Any]) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+
+def _build_uat_harness_report(
+    *,
+    scenario: Mapping[str, Any],
+    target_database: str,
+    checkpoint_database: str,
+    api_base_url: str,
+    report_path: Path,
+    dry_run: bool,
+    meal: Mapping[str, Any] | None,
+    interview: Mapping[str, Any] | None,
+    diary_entries: Sequence[Mapping[str, Any]],
+    food_visuals: Sequence[Mapping[str, Any]],
+    activation: Mapping[str, Any] | None = None,
+    ingest: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    meal_data = dict(meal or {})
+    interview_data = dict(interview or {})
+    reasoning_state = dict(meal_data.get("reasoning_state_json") or {})
+    prompt_payload = dict(interview_data.get("current_prompt_payload") or {})
+    trace_ids = _extract_trace_ids(
+        reasoning_state,
+        prompt_payload,
+        interview_data.get("messages"),
+        diary_entries,
+        food_visuals,
+    )
+    return {
+        "mode": "uat-harness",
+        "status": "dry-run" if dry_run else "pass",
+        "scenario": {
+            "name": scenario.get("scenario"),
+            "sample": scenario.get("sample"),
+            "goal": scenario.get("goal"),
+        },
+        "database": {
+            "target": target_database,
+            "checkpoint": checkpoint_database,
+            "protected_default": "mealttracker",
+        },
+        "api": {"base_url": api_base_url.rstrip("/")},
+        "report_path": str(report_path),
+        "meal": {
+            "id": meal_data.get("meal_id") or meal_data.get("id"),
+            "status": meal_data.get("processing_status"),
+            "created_at": meal_data.get("created_at"),
+            "reasoning_state_json": _sanitize_report_value(reasoning_state),
+        },
+        "reasoning": {
+            "summary": _summarize_uat_reasoning(reasoning_state),
+            "clarification_schema": _sanitize_report_value(reasoning_state.get("clarification_schema")),
+            "answers_by_question_id": _sanitize_report_value(reasoning_state.get("answers_by_question_id")),
+            "resolver_payload": _sanitize_report_value(reasoning_state.get("resolver_payload")),
+        },
+        "interview": {
+            "session_id": interview_data.get("session_id") or interview_data.get("id"),
+            "state_key": interview_data.get("state_key"),
+            "current_prompt": _current_prompt_from_interview_payload(interview_data),
+            "current_prompt_payload": _sanitize_report_value(prompt_payload),
+            "messages": _sanitize_report_value(interview_data.get("messages") or []),
+        },
+        "diary_entries": _sanitize_report_value(list(diary_entries)),
+        "food_visuals": _sanitize_report_value(list(food_visuals)),
+        "grounding": {
+            "roadmap_step": prompt_payload.get("roadmap_step") or interview_data.get("state_key"),
+            "status": prompt_payload.get("grounding_status"),
+            "handoff_pending": prompt_payload.get("grounding_handoff_pending"),
+        },
+        "traces": {"ids": trace_ids},
+        "activation": _sanitize_report_value(dict(activation or {})),
+        "ingest": _sanitize_report_value(dict(ingest or {})),
+    }
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _run_subprocess(command: list[str]) -> str:
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"command failed ({' '.join(command)}): {stderr}")
+    return completed.stdout.strip()
+
+
+def _run_psql_json(*, database: str, sql: str, postgres_container: str) -> object:
+    raw = _run_subprocess(
+        [
+            "docker",
+            "exec",
+            postgres_container,
+            "psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            DEFAULT_UAT_POSTGRES_USER,
+            "-d",
+            database,
+            "-Atc",
+            sql,
+        ]
+    )
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+def _clone_checkpoint_database(
+    *,
+    target_database: str,
+    checkpoint_database: str,
+    postgres_container: str,
+) -> None:
+    _run_subprocess(
+        [
+            "docker",
+            "exec",
+            postgres_container,
+            "psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            DEFAULT_UAT_POSTGRES_USER,
+            "-d",
+            "postgres",
+            "-c",
+            f"DROP DATABASE IF EXISTS {target_database} WITH (FORCE);",
+        ]
+    )
+    _run_subprocess(
+        [
+            "docker",
+            "exec",
+            postgres_container,
+            "psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            DEFAULT_UAT_POSTGRES_USER,
+            "-d",
+            "postgres",
+            "-c",
+            f"CREATE DATABASE {target_database} TEMPLATE {checkpoint_database};",
+        ]
+    )
+
+
+def _snapshot_uat_harness_state(
+    *,
+    meal_id: str,
+    database: str,
+    postgres_container: str,
+) -> dict[str, Any]:
+    meal = _run_psql_json(
+        database=database,
+        postgres_container=postgres_container,
+        sql=(
+            "SELECT COALESCE(row_to_json(t), 'null'::json)::text "
+            "FROM ("
+            "SELECT id AS meal_id, processing_status, reasoning_state_json, created_at "
+            f"FROM meal_logs WHERE id = {_sql_literal(meal_id)} "
+            "LIMIT 1"
+            ") t;"
+        ),
+    )
+    if not isinstance(meal, Mapping):
+        return {"meal": None, "interview": None, "diary_entries": [], "food_visuals": [], "outcome": None}
+
+    interview = _run_psql_json(
+        database=database,
+        postgres_container=postgres_container,
+        sql=(
+            "SELECT COALESCE(row_to_json(t), 'null'::json)::text "
+            "FROM ("
+            "SELECT id AS session_id, state_key, is_active, current_prompt_payload, last_bot_message_id, updated_at "
+            f"FROM interview_sessions WHERE meal_log_id = {_sql_literal(meal_id)} "
+            "ORDER BY updated_at DESC LIMIT 1"
+            ") t;"
+        ),
+    )
+    if isinstance(interview, Mapping) and interview.get("session_id"):
+        messages = _run_psql_json(
+            database=database,
+            postgres_container=postgres_container,
+            sql=(
+                "SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json)::text "
+                "FROM ("
+                "SELECT role, payload, message_id, created_at "
+                f"FROM interview_messages WHERE session_id = {_sql_literal(str(interview['session_id']))} "
+                "ORDER BY created_at ASC"
+                ") t;"
+            ),
+        )
+        interview = dict(interview)
+        interview["messages"] = list(messages or [])
+
+    diary_entries = _run_psql_json(
+        database=database,
+        postgres_container=postgres_container,
+        sql=(
+            "SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json)::text "
+            "FROM ("
+            "SELECT id, food_item_id, segment_id, is_verified, quantity_display, created_at "
+            f"FROM diary_entries WHERE meal_log_id = {_sql_literal(meal_id)} "
+            "ORDER BY created_at ASC"
+            ") t;"
+        ),
+    ) or []
+    food_visuals = _run_psql_json(
+        database=database,
+        postgres_container=postgres_container,
+        sql=(
+            "SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json)::text "
+            "FROM ("
+            "SELECT fv.id, fv.food_item_id, fv.cropped_image_url, fv.is_invalidated, fv.created_at "
+            "FROM food_visuals fv "
+            "WHERE fv.food_item_id IN ("
+            f"SELECT DISTINCT food_item_id FROM diary_entries WHERE meal_log_id = {_sql_literal(meal_id)}"
+            ") "
+            "ORDER BY fv.created_at DESC "
+            "LIMIT 20"
+            ") t;"
+        ),
+    ) or []
+
+    return {
+        "meal": dict(meal),
+        "interview": dict(interview) if isinstance(interview, Mapping) else None,
+        "diary_entries": [dict(item) for item in diary_entries if isinstance(item, Mapping)],
+        "food_visuals": [dict(item) for item in food_visuals if isinstance(item, Mapping)],
+        "outcome": _classify_uat_harness_outcome(
+            dict(meal),
+            dict(interview) if isinstance(interview, Mapping) else None,
+        ),
+    }
+
+
+async def _post_uat_sample(
+    *,
+    sample_path: Path,
+    api_base_url: str,
+    ingest_secret: str,
+) -> dict[str, Any]:
+    content_type = mimetypes.guess_type(sample_path.name)[0] or "application/octet-stream"
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        with sample_path.open("rb") as handle:
+            response = await client.post(
+                f"{api_base_url.rstrip('/')}/ingest/photo",
+                headers={"X-Ingest-Secret": ingest_secret},
+                files={"picture": (sample_path.name, handle, content_type)},
+            )
+        response.raise_for_status()
+        payload = response.json()
+    return {
+        "http_status": response.status_code,
+        "meal_log_id": payload.get("meal_log_id"),
+        "deduplicated": payload.get("deduplicated"),
+        "sample": str(sample_path),
+    }
+
+
+async def _run_uat_harness(args: argparse.Namespace) -> dict[str, Any]:
+    scenario = _resolve_uat_harness_scenario(str(args.scenario))
+    target_database = _assert_safe_uat_target_database(
+        args.target_database,
+        checkpoint_database=str(args.checkpoint_database),
+    )
+    report_path = _report_path_for_run(
+        args.report_dir,
+        scenario_name=str(scenario["scenario"]),
+        meal_id=None,
+        dry_run=bool(args.dry_run),
+    )
+    activation = {
+        "clone_source": str(args.checkpoint_database),
+        "target_database": target_database,
+        "postgres_container": str(args.postgres_container),
+        "compose_override": "docker-compose.uat-043-harness.yml",
+        "api_base_url": str(args.api_base_url).rstrip("/"),
+        "commands": [
+            f"docker exec {args.postgres_container} psql -U {DEFAULT_UAT_POSTGRES_USER} -d postgres -c \"DROP DATABASE IF EXISTS {target_database} WITH (FORCE);\"",
+            f"docker exec {args.postgres_container} psql -U {DEFAULT_UAT_POSTGRES_USER} -d postgres -c \"CREATE DATABASE {target_database} TEMPLATE {args.checkpoint_database};\"",
+        ],
+    }
+    if args.dry_run:
+        report = _build_uat_harness_report(
+            scenario=scenario,
+            target_database=target_database,
+            checkpoint_database=str(args.checkpoint_database),
+            api_base_url=str(args.api_base_url),
+            report_path=report_path,
+            dry_run=True,
+            meal={"processing_status": "DRY_RUN", "reasoning_state_json": {}},
+            interview={"state_key": "DRY_RUN", "current_prompt_payload": {}, "messages": []},
+            diary_entries=[],
+            food_visuals=[],
+            activation=activation,
+            ingest={"planned_sample": scenario["sample"]},
+        )
+        _write_report_json(report_path, report)
+        return report
+
+    sample_path = _resolve_image_path(scenario["sample"], flag_name=f"--scenario {args.scenario}")
+    ingest_secret = str(os.environ.get("INGEST_SECRET") or "").strip()
+    if not ingest_secret:
+        raise RuntimeError("INGEST_SECRET is required for live uat-harness runs")
+
+    _clone_checkpoint_database(
+        target_database=target_database,
+        checkpoint_database=str(args.checkpoint_database),
+        postgres_container=str(args.postgres_container),
+    )
+    ingest = await _post_uat_sample(
+        sample_path=sample_path,
+        api_base_url=str(args.api_base_url),
+        ingest_secret=ingest_secret,
+    )
+    meal_id = str(ingest.get("meal_log_id") or "").strip()
+    if not meal_id:
+        raise RuntimeError(f"ingest response missing meal_log_id: {ingest}")
+
+    deadline = asyncio.get_running_loop().time() + max(5, int(args.poll_timeout_seconds))
+    snapshot = {
+        "meal": None,
+        "interview": None,
+        "diary_entries": [],
+        "food_visuals": [],
+        "outcome": None,
+    }
+    while asyncio.get_running_loop().time() < deadline:
+        snapshot = _snapshot_uat_harness_state(
+            meal_id=meal_id,
+            database=target_database,
+            postgres_container=str(args.postgres_container),
+        )
+        if snapshot["outcome"] is not None:
+            break
+        await asyncio.sleep(max(1.0, float(args.poll_interval_seconds)))
+
+    if snapshot["meal"] is None:
+        raise RuntimeError(
+            f"meal {meal_id} never appeared in target database {target_database}; verify api/bot are using docker-compose.uat-043-harness.yml"
+        )
+
+    final_report_path = _report_path_for_run(
+        args.report_dir,
+        scenario_name=str(scenario["scenario"]),
+        meal_id=meal_id,
+        dry_run=False,
+    )
+    report = _build_uat_harness_report(
+        scenario=scenario,
+        target_database=target_database,
+        checkpoint_database=str(args.checkpoint_database),
+        api_base_url=str(args.api_base_url),
+        report_path=final_report_path,
+        dry_run=False,
+        meal=snapshot["meal"],
+        interview=snapshot["interview"],
+        diary_entries=snapshot["diary_entries"],
+        food_visuals=snapshot["food_visuals"],
+        activation=activation,
+        ingest=ingest,
+    )
+    report["status"] = snapshot["outcome"] or "timed-out"
+    _write_report_json(final_report_path, report)
+    return report
 
 
 async def _run_reasoning_probe(args: argparse.Namespace, llm_client) -> dict[str, Any]:
@@ -814,9 +1433,13 @@ async def _run_repeat_confirmation(args: argparse.Namespace, llm_client) -> dict
 
 async def main() -> int:
     args = _parse_args()
-    client = get_llm_client()
+    client = None
 
     try:
+        if args.mode == "uat-harness":
+            report = await _run_uat_harness(args)
+        else:
+            client = get_llm_client()
         if args.mode == "calibrate":
             report = await _run_calibrate(args, client)
         elif args.mode == "seed-demo":
@@ -827,6 +1450,8 @@ async def main() -> int:
             report = await _run_reasoning_probe(args, client)
         elif args.mode == "grouped-uat":
             report = await _run_grouped_uat(args, client)
+        elif args.mode == "uat-harness":
+            report = report
         else:
             report = await _run_unresolved_probe(args, client)
 
@@ -836,7 +1461,8 @@ async def main() -> int:
         print(f"failed: {exc}")
         return 1
     finally:
-        await client.close()
+        if client is not None:
+            await client.close()
 
 
 if __name__ == "__main__":

@@ -74,6 +74,75 @@ class SmokeHelperTests(unittest.TestCase):
         )
 
 
+class SmokeUatHarnessContractTests(unittest.TestCase):
+    def test_uat_harness_named_scenarios_map_to_phase_regression_samples(self) -> None:
+        resolver = getattr(smoke, "_resolve_uat_harness_scenario", None)
+        self.assertIsNotNone(resolver, "missing _resolve_uat_harness_scenario helper")
+
+        partial_match = resolver("partial-match")
+        no_match = resolver("no-match")
+
+        self.assertEqual(partial_match["scenario"], "partial-match")
+        self.assertEqual(Path(partial_match["sample"]).name, "IMG_4583.HEIC")
+        self.assertEqual(no_match["scenario"], "no-match")
+        self.assertEqual(Path(no_match["sample"]).name, "IMG_4641.HEIC")
+
+    def test_uat_harness_rejects_default_database_for_destructive_clone(self) -> None:
+        gate = getattr(smoke, "_assert_safe_uat_target_database", None)
+        self.assertIsNotNone(gate, "missing _assert_safe_uat_target_database helper")
+
+        with self.assertRaisesRegex(RuntimeError, "mealttracker"):
+            gate(
+                "mealttracker",
+                checkpoint_database="mealttracker_uat_with_meal_embeddings",
+            )
+
+        gate(
+            "mealttracker_043_harness",
+            checkpoint_database="mealttracker_uat_with_meal_embeddings",
+        )
+
+    def test_uat_harness_report_contains_required_audit_sections(self) -> None:
+        builder = getattr(smoke, "_build_uat_harness_report", None)
+        self.assertIsNotNone(builder, "missing _build_uat_harness_report helper")
+
+        report = builder(
+            scenario={"scenario": "partial-match", "sample": "sample_images/IMG_4583.HEIC"},
+            target_database="mealttracker_043_harness",
+            checkpoint_database="mealttracker_uat_with_meal_embeddings",
+            api_base_url="http://127.0.0.1:18043",
+            report_path=Path("uploads/reports/04.3/partial-match.json"),
+            dry_run=True,
+            meal={
+                "meal_id": "meal-123",
+                "processing_status": "INTERVIEWING",
+                "reasoning_state_json": {"trace_id": "trace-meal"},
+            },
+            interview={
+                "session_id": "session-123",
+                "state_key": "QUESTION_BATCH",
+                "current_prompt_payload": {
+                    "questions_by_id": {"group_1:identity": {"prompt": "Which curry?"}},
+                    "answers_by_question_id": {},
+                    "grounding_status": "NOT_STARTED",
+                },
+                "messages": [{"role": "bot", "payload": {"prompt": "Which curry?"}}],
+            },
+            diary_entries=[{"id": "entry-1", "food_item_id": "food-1"}],
+            food_visuals=[{"id": "visual-1", "food_item_id": "food-1"}],
+        )
+
+        self.assertEqual(report["scenario"]["name"], "partial-match")
+        self.assertEqual(report["database"]["target"], "mealttracker_043_harness")
+        self.assertEqual(report["meal"]["status"], "INTERVIEWING")
+        self.assertIn("reasoning", report)
+        self.assertIn("interview", report)
+        self.assertIn("diary_entries", report)
+        self.assertIn("food_visuals", report)
+        self.assertIn("grounding", report)
+        self.assertIn("traces", report)
+
+
 class SmokeCalibrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_calibrate_embeds_crop_artifacts(self) -> None:
         with TemporaryDirectory() as tmpdir:

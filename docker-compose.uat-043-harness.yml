@@ -1,0 +1,10 @@
+services:
+  api:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mealttracker:${POSTGRES_PASSWORD}@postgres:5432/mealttracker_043_harness
+    ports:
+      - "127.0.0.1:18043:8000"
+
+  bot:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mealttracker:${POSTGRES_PASSWORD}@postgres:5432/mealttracker_043_harness

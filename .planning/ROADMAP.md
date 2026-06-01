@@ -12,6 +12,7 @@ Eight phases transform a blank repo into a fully operational personal meal track
 - [x] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: segmented foods continue in bounded async parallel; unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes (completed 2026-05-28)
 - [x] **Phase 4.1: Grouped Reasoning & Human Interview Correction** - Correct the Phase 4 UAT gap where whole-meal top-3 candidates and raw segment prompts produce confusing interviews; reasoning must group distinct foods first, produce per-food top-3 candidates, and ask one human question per unresolved food group (completed 2026-05-29)
 - [x] **Phase 4.2: LLM-Threaded Interview Orchestration** - Replace deterministic interview continuation with an LLM interview agent that receives grouped reasoning context, conversation history, pending unclear targets, and clear auto-proposed items for approval; it asks natural follow-ups, decides when enough information is collected, and hands structured confirmed items back to final write-back/grounding. (completed 2026-05-30)
+- [ ] **Phase 4.3: Deterministic Clarification Schema & Interview UI** - Replace freeform LLM interview turns with a reasoning-produced clarification schema, deterministic Telegram MCQ/open-field rendering, structured answer capture, and a compact final resolver that feeds the existing authoritative FoodItem/DiaryEntry/FoodVisual write path.
 - [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
@@ -167,11 +168,37 @@ Eight phases transform a blank repo into a fully operational personal meal track
 
 ---
 
+### Phase 4.3: Deterministic Clarification Schema & Interview UI
+
+**Goal**: Replace the freeform interview-turn LLM with a deterministic clarification UI driven by reasoning output: meal reasoning emits a strict per-food-group clarification schema; Telegram renders MCQ/open-field prompts from templates; replies are stored as structured answers; a compact resolver/finalizer consumes the answers and writes through the existing authoritative FoodItem, DiaryEntry, and FoodVisual path.
+**Mode:** mvp
+**Depends on**: Phase 4.2
+**Requirements**: REASON-01, REASON-02, REASON-03, REASON-04, INTERVIEW-01, INTERVIEW-03, INTERVIEW-04, MATCH-04
+**Success Criteria** (what must be TRUE):
+
+  1. Meal reasoning no longer emits a root-level `top_3` as an active source of truth; candidate ranking lives under `food_groups[*].top_3`, with compatibility handled only where needed during migration.
+  2. Meal reasoning emits a strict `clarification_schema` for unresolved or approval-needed food groups, including stable question IDs, group IDs, segment IDs, question kind, answer type (`single_choice`, `multi_choice`, `free_text`, or `confirm`), candidate options, and validation hints.
+  3. Telegram questions are rendered deterministically from templates, not composed by an interview LLM; replies by button/MCQ or free text are mapped back to the exact question ID and stored in durable interview state.
+  4. Conditional source-origin clarification is asked only when it can materially change nutrition or grounding behavior, such as flatbreads, packaged-looking foods, bakery items, sauces, takeout, desserts, or brand/restaurant-looking items; obvious home-cooked foods are not burdened with source-origin questions.
+  5. A user can answer only part of a clarification batch and the system deterministically re-prompts only the unanswered required questions, without losing prior answers or looping on already-satisfied approvals.
+  6. The final resolver consumes grouped reasoning plus structured answers and emits normalized confirmation items into the existing final write path so FoodItems, DiaryEntries, and FoodVisual rows are created exactly as in Phase 4.2.
+  7. Live repeated-meal UAT with the saved UAT embedding checkpoint proves vector candidates inform reasoning, template questions are asked, partial replies recover deterministically, and final save creates/updates the expected diary and visual rows.
+
+**Plans**: 3 plans:
+
+- [ ] `04.3-01-PLAN.md` - grouped reasoning contract cleanup, strict `clarification_schema`, source-origin rules, and removal of live root `top_3` branching.
+- [ ] `04.3-02-PLAN.md` - deterministic Telegram rendering, stable question/choice answer capture, and partial reply recovery.
+- [ ] `04.3-03-PLAN.md` - resolver-only finalization handoff, authoritative save-path preservation, and live 04.3 UAT.
+
+**Phase note**: This is an interview architecture cleanup before Phase 5 grounding, not a nutrition-grounding expansion. Keep SearXNG/Firecrawl tool loops out of scope except preserving handoff fields for Phase 5. Preserve the existing LLM finalizer only as a compact resolver if needed; it should not ask user-facing interview questions.
+
+---
+
 ### Phase 5: Agentic Grounding
 
 **Goal**: The reasoning stage and post-interview re-grounding stage can invoke SearXNG and Firecrawl as tools when the LLM needs brand or restaurant nutrition data; every tool call is bounded, traced, and the loop cannot run away on cost.
 **Mode:** mvp
-**Depends on**: Phase 4
+**Depends on**: Phase 4.3
 **Requirements**: GROUND-01, GROUND-02, GROUND-03
 **Success Criteria** (what must be TRUE):
 
@@ -214,5 +241,7 @@ Eight phases transform a blank repo into a fully operational personal meal track
 | 3. Embed & Match | 4/4 | In Progress|  |
 | 4. Reason, Interview & Learning Loop | 8/8 | Complete    | 2026-05-28 |
 | 4.1. Grouped Reasoning & Human Interview Correction | 2/2 | Complete   | 2026-05-29 |
+| 4.2. LLM-Threaded Interview Orchestration | 3/3 | Complete   | 2026-05-30 |
+| 4.3. Deterministic Clarification Schema & Interview UI | 0/3 | Not started | - |
 | 5. Agentic Grounding | 0/TBD | Not started | - |
 | 6. Bot Surface & Daily Summary | 0/TBD | Not started | - |

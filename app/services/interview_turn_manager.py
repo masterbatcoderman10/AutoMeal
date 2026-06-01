@@ -80,6 +80,12 @@ async def run_interview_turn(
                 active_group_ids=active_group_ids,
             )
             normalized = _with_authoritative_segment_ids(result, authoritative_state)
+            _validate_ready_to_confirm_evidence(
+                normalized,
+                authoritative_state=authoritative_state,
+                transcript=transcript,
+                latest_user_text=latest_user_text,
+            )
             _end_trace(
                 trace,
                 output={
@@ -107,6 +113,12 @@ async def run_interview_turn(
                     active_group_ids=active_group_ids,
                 )
                 normalized = _with_authoritative_segment_ids(repaired, authoritative_state)
+                _validate_ready_to_confirm_evidence(
+                    normalized,
+                    authoritative_state=authoritative_state,
+                    transcript=transcript,
+                    latest_user_text=latest_user_text,
+                )
                 _end_trace(
                     trace,
                     output={
@@ -180,6 +192,8 @@ async def _run_repair_completion(
             "content": (
                 "Repair this interview turn into strict JSON. "
                 "Choose exactly one turn_action: continue_interview, need_clarification, or ready_to_confirm. "
+                "Use ready_to_confirm only when the user's replies explicitly answer every unresolved group "
+                "and explicitly confirm or correct every approval candidate. If any active group is unanswered, ask a follow-up. "
                 "If you choose ready_to_confirm, include one confirmation item for every active group id in the authoritative state. "
                 "Each confirmation item must include segment_ids copied from that active group. "
                 "Do not invent nutrition facts or mutate state. Return JSON only."
@@ -281,6 +295,164 @@ def _with_authoritative_segment_ids(
     return result.model_copy(update={"confirmation_items": confirmation_items})
 
 
+_COMMON_EVIDENCE_WORDS = {
+    "and",
+    "are",
+    "curry",
+    "food",
+    "for",
+    "item",
+    "meal",
+    "the",
+    "this",
+    "with",
+}
+
+
+def _validate_ready_to_confirm_evidence(
+    result: InterviewTurnResult,
+    *,
+    authoritative_state: Mapping[str, Any],
+    transcript: Sequence[Mapping[str, Any]],
+    latest_user_text: str,
+) -> None:
+    if result.turn_action != "ready_to_confirm":
+        return
+
+    user_evidence_text = _combined_user_evidence_text(
+        authoritative_state=authoritative_state,
+        transcript=transcript,
+        latest_user_text=latest_user_text,
+    )
+    broad_confirmation = _has_broad_confirmation(user_evidence_text)
+    items_by_group = {item.group_id: item for item in result.confirmation_items}
+
+    for target in authoritative_state.get("unresolved_targets") or []:
+        if not isinstance(target, Mapping):
+            continue
+        group_id = str(target.get("group_id") or "").strip()
+        if not group_id:
+            continue
+        item = items_by_group.get(group_id)
+        if item is None:
+            continue
+        if not _item_has_user_evidence(item, target, user_evidence_text):
+            raise InterviewTurnValidationError(
+                f"ready_to_confirm lacks explicit user evidence for unresolved group {group_id}"
+            )
+
+    for candidate in authoritative_state.get("approval_candidates") or []:
+        if not isinstance(candidate, Mapping):
+            continue
+        group_id = str(candidate.get("group_id") or "").strip()
+        if not group_id:
+            continue
+        item = items_by_group.get(group_id)
+        if item is None:
+            continue
+        if item.approval_status == "APPROVED":
+            if broad_confirmation or _mentions_candidate(candidate, user_evidence_text):
+                continue
+            raise InterviewTurnValidationError(
+                f"ready_to_confirm approved group {group_id} without explicit user confirmation"
+            )
+        if item.approval_status == "CORRECTED" and not _item_has_user_evidence(item, candidate, user_evidence_text):
+            raise InterviewTurnValidationError(
+                f"ready_to_confirm corrected group {group_id} without explicit user evidence"
+            )
+
+
+def _combined_user_evidence_text(
+    *,
+    authoritative_state: Mapping[str, Any],
+    transcript: Sequence[Mapping[str, Any]],
+    latest_user_text: str,
+) -> str:
+    pieces: list[str] = []
+    for collection in (authoritative_state.get("interview_messages") or [], transcript):
+        for message in collection:
+            if not isinstance(message, Mapping):
+                continue
+            if str(message.get("role") or "").strip() != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                pieces.append(content.strip())
+    if latest_user_text.strip():
+        pieces.append(latest_user_text.strip())
+    return "\n".join(pieces).casefold()
+
+
+def _has_broad_confirmation(normalized_user_text: str) -> bool:
+    return any(
+        phrase in normalized_user_text
+        for phrase in (
+            "all good",
+            "all correct",
+            "all right",
+            "both are right",
+            "everything is correct",
+            "everything is right",
+            "everything else",
+            "rest is correct",
+            "rest is right",
+            "the rest",
+            "these are correct",
+            "these are right",
+            "they are right",
+            "those are right",
+            "yes to both",
+            "yes for both",
+            "yes these are correct",
+            "yes those are correct",
+        )
+    )
+
+
+def _item_has_user_evidence(
+    item: Any,
+    state_item: Mapping[str, Any],
+    normalized_user_text: str,
+) -> bool:
+    item_tokens = _meaningful_tokens(getattr(item, "name", ""))
+    prior_tokens = set()
+    for key in ("label", "group_label", "proposed_name"):
+        prior_tokens.update(_meaningful_tokens(state_item.get(key)))
+    evidence_tokens = item_tokens - prior_tokens
+    if not evidence_tokens:
+        evidence_tokens = item_tokens
+    return any(token in normalized_user_text for token in evidence_tokens)
+
+
+def _mentions_candidate(candidate: Mapping[str, Any], normalized_user_text: str) -> bool:
+    tokens = set()
+    for key in ("proposed_name", "label", "group_label"):
+        tokens.update(_meaningful_tokens(candidate.get(key)))
+    for choice in candidate.get("candidate_choices") or []:
+        tokens.update(_meaningful_tokens(choice))
+    return any(token in normalized_user_text for token in tokens)
+
+
+def _meaningful_tokens(value: object) -> set[str]:
+    raw = str(value or "").casefold()
+    tokens: set[str] = set()
+    current = []
+    for char in raw:
+        if char.isalnum():
+            current.append(char)
+            continue
+        if current:
+            token = "".join(current)
+            if len(token) >= 3 and token not in _COMMON_EVIDENCE_WORDS:
+                tokens.add(token)
+            current = []
+    if current:
+        token = "".join(current)
+        if len(token) >= 3 and token not in _COMMON_EVIDENCE_WORDS:
+            tokens.add(token)
+    return tokens
+
+
 def _build_turn_messages(
     *,
     authoritative_state: Mapping[str, Any],
@@ -296,6 +468,8 @@ def _build_turn_messages(
                 "Return strict JSON only. Ask concise follow-ups. "
                 "Do not invent nutrition facts. Do not write database state. "
                 "Fail closed instead of guessing when the user's reply is insufficient. "
+                "Use ready_to_confirm only when the user's replies explicitly answer each unresolved group "
+                "and explicitly confirm or correct each approval candidate. Otherwise ask one concise follow-up. "
                 "For ready_to_confirm, copy each active group's segment_ids into its confirmation item."
             ),
         },

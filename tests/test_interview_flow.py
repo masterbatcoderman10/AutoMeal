@@ -854,3 +854,31 @@ class InterviewPersistencePrepTests(unittest.TestCase):
         self.assertEqual(resolution.food.food_item_id, "food-123")
         self.assertEqual(resolution.portion_bucket, "LARGE")
         self.assertEqual(resolution.identification_method, "INTERVIEW")
+
+    def test_numpy_segment_embedding_is_preserved_for_visual_learning(self) -> None:
+        import numpy as np
+
+        from app.services import interview_service
+
+        segment = SimpleNamespace(
+            id="seg-visual",
+            cropped_image_url="/data/uploads/crops/seg-visual.jpg",
+            embedding=np.array([0.1, 0.2, 0.3], dtype=np.float32),
+        )
+
+        resolution = interview_service.final_resolution_from_confirmation(
+            item={
+                "segment_id": "seg-visual",
+                "name": "Egg Curry with Bottle Gourd",
+                "source_type": "HOME",
+                "portion_bucket": "standard",
+            },
+            segment=segment,
+        )
+
+        self.assertEqual(len(resolution.segment_embedding or []), 3)
+        self.assertAlmostEqual((resolution.segment_embedding or [])[0], 0.1)
+        self.assertAlmostEqual((resolution.segment_embedding or [])[1], 0.2)
+        self.assertAlmostEqual((resolution.segment_embedding or [])[2], 0.3)
+        self.assertEqual(resolution.segment_cropped_image_url, "/data/uploads/crops/seg-visual.jpg")
+        self.assertTrue(resolution.create_food_visual)

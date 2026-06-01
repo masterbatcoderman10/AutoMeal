@@ -234,19 +234,195 @@ class InterviewTurnManagerContractTests(unittest.IsolatedAsyncioTestCase):
                     "approval_candidates": [
                         {
                             "group_id": "group-pita",
+                            "proposed_name": "pita bread",
                             "primary_segment_id": "seg-bread-1",
                             "segment_ids": ["seg-bread-1"],
                         }
                     ],
                 },
                 transcript=[{"role": "assistant", "content": "What is the curry?"}],
-                latest_user_text="It's bottle gourd.",
+                latest_user_text="It's bottle gourd and pita is right.",
             )
 
         self.assertEqual(result.turn_action, "ready_to_confirm")
         self.assertEqual(result.confirmation_items[0].segment_ids, ["seg-egg-1", "seg-egg-2"])
         self.assertEqual(result.confirmation_items[1].segment_ids, ["seg-bread-1"])
         self.assertEqual(llm_client.chat_completion.await_count, 2)
+
+    async def test_ready_to_confirm_without_approval_candidate_evidence_repairs_to_followup(self) -> None:
+        manager_module = _load_module_or_fail(self, "app.services.interview_turn_manager")
+        if manager_module is None:
+            return
+
+        run_interview_turn = getattr(manager_module, "run_interview_turn", None)
+        self.assertTrue(callable(run_interview_turn))
+        if not callable(run_interview_turn):
+            return
+
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                side_effect=[
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": (
+                                        '{"turn_action":"ready_to_confirm","assistant_prompt":"Ready to confirm.",'
+                                        '"clarification_reason":null,"conversation_summary":"Resolved.",'
+                                        '"confirmation_items":[{"group_id":"group-egg","primary_segment_id":"seg-egg",'
+                                        '"segment_id":"seg-egg","name":"egg curry with bottle gourd","source_type":"HOME",'
+                                        '"portion_bucket":"STANDARD","approval_status":"CORRECTED"},'
+                                        '{"group_id":"group-pita","primary_segment_id":"seg-pita","segment_id":"seg-pita",'
+                                        '"name":"white khubz bread","source_type":"HOME","portion_bucket":"STANDARD",'
+                                        '"approval_status":"CORRECTED"},'
+                                        '{"group_id":"group-chicken","primary_segment_id":"seg-chicken","segment_id":"seg-chicken",'
+                                        '"name":"chicken drumstick curry","source_type":"HOME","portion_bucket":"STANDARD",'
+                                        '"approval_status":"APPROVED"}]}'
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": (
+                                        '{"turn_action":"continue_interview","assistant_prompt":"Got bottle gourd and white khubz. '
+                                        'Please confirm or correct the chicken drumstick curry too.",'
+                                        '"clarification_reason":"Chicken approval was not explicitly confirmed.",'
+                                        '"conversation_summary":"Need chicken confirmation.","confirmation_items":[]}'
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                ]
+            )
+        )
+
+        with (
+            patch.object(manager_module, "get_llm_client", return_value=llm_client),
+            patch.object(manager_module.tracing_service, "maybe_start_trace"),
+        ):
+            result = await run_interview_turn(
+                authoritative_state={
+                    "meal_id": "meal-1",
+                    "unresolved_targets": [
+                        {
+                            "group_id": "group-egg",
+                            "label": "egg curry",
+                            "primary_segment_id": "seg-egg",
+                            "segment_ids": ["seg-egg"],
+                        }
+                    ],
+                    "approval_candidates": [
+                        {
+                            "group_id": "group-pita",
+                            "label": "pita bread",
+                            "proposed_name": "brown pita bread",
+                            "primary_segment_id": "seg-pita",
+                            "segment_ids": ["seg-pita"],
+                        },
+                        {
+                            "group_id": "group-chicken",
+                            "label": "chicken curry",
+                            "proposed_name": "chicken drumstick curry",
+                            "primary_segment_id": "seg-chicken",
+                            "segment_ids": ["seg-chicken"],
+                        },
+                    ],
+                },
+                transcript=[{"role": "assistant", "content": "What vegetable, and are pita and chicken correct?"}],
+                latest_user_text="It's bottle gourd. It's actually white khubz bread.",
+            )
+
+        self.assertEqual(result.turn_action, "continue_interview")
+        self.assertIn("chicken", result.assistant_prompt.lower())
+        self.assertEqual(llm_client.chat_completion.await_count, 2)
+
+    async def test_ready_to_confirm_accepts_prior_thread_confirmation_for_approval_candidates(self) -> None:
+        manager_module = _load_module_or_fail(self, "app.services.interview_turn_manager")
+        if manager_module is None:
+            return
+
+        run_interview_turn = getattr(manager_module, "run_interview_turn", None)
+        self.assertTrue(callable(run_interview_turn))
+        if not callable(run_interview_turn):
+            return
+
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"turn_action":"ready_to_confirm","assistant_prompt":"Ready to save.",'
+                                    '"clarification_reason":null,"conversation_summary":"Resolved.",'
+                                    '"confirmation_items":[{"group_id":"group-flatbread","primary_segment_id":"seg-bread",'
+                                    '"segment_id":"seg-bread","name":"white khubz","source_type":"HOME",'
+                                    '"portion_bucket":"STANDARD","approval_status":"CORRECTED"},'
+                                    '{"group_id":"group-chicken","primary_segment_id":"seg-chicken","segment_id":"seg-chicken",'
+                                    '"name":"chicken phaal with drumstick","source_type":"HOME","portion_bucket":"STANDARD",'
+                                    '"approval_status":"APPROVED"},'
+                                    '{"group_id":"group-egg","primary_segment_id":"seg-egg","segment_id":"seg-egg",'
+                                    '"name":"egg and bottle gourd curry","source_type":"HOME","portion_bucket":"STANDARD",'
+                                    '"approval_status":"APPROVED"}]}'
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
+        )
+
+        authoritative_state = {
+            "meal_id": "meal-1",
+            "unresolved_targets": [
+                {
+                    "group_id": "group-flatbread",
+                    "label": "flatbread",
+                    "primary_segment_id": "seg-bread",
+                    "segment_ids": ["seg-bread"],
+                }
+            ],
+            "approval_candidates": [
+                {
+                    "group_id": "group-chicken",
+                    "label": "chicken curry",
+                    "proposed_name": "chicken phaal with drumstick",
+                    "primary_segment_id": "seg-chicken",
+                    "segment_ids": ["seg-chicken"],
+                },
+                {
+                    "group_id": "group-egg",
+                    "label": "egg curry",
+                    "proposed_name": "egg and bottle gourd curry",
+                    "primary_segment_id": "seg-egg",
+                    "segment_ids": ["seg-egg"],
+                },
+            ],
+            "interview_messages": [
+                {"role": "assistant", "content": "Pick the flatbread and confirm chicken and egg."},
+                {"role": "user", "content": "Yes these are correct"},
+                {"role": "assistant", "content": "Please pick the flatbread."},
+            ],
+        }
+
+        with (
+            patch.object(manager_module, "get_llm_client", return_value=llm_client),
+            patch.object(manager_module.tracing_service, "maybe_start_trace"),
+        ):
+            result = await run_interview_turn(
+                authoritative_state=authoritative_state,
+                transcript=authoritative_state["interview_messages"],
+                latest_user_text="I confirm the item is white khubz",
+            )
+
+        self.assertEqual(result.turn_action, "ready_to_confirm")
+        self.assertEqual([item.group_id for item in result.confirmation_items], ["group-flatbread", "group-chicken", "group-egg"])
+        self.assertEqual(llm_client.chat_completion.await_count, 1)
 
     async def test_invalid_ready_to_confirm_fails_closed_without_mutating_state(self) -> None:
         manager_module = _load_module_or_fail(self, "app.services.interview_turn_manager")

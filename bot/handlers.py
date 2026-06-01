@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 import uuid
 from datetime import UTC, datetime
 from inspect import isawaitable
@@ -270,6 +271,18 @@ def _update_confirmation_state(state: dict, confirmation_items: list[dict]) -> d
     return updated
 
 
+def _finalized_grounding_required(finalized: dict) -> bool:
+    result = finalized.get("result")
+    return isinstance(result, Mapping) and bool(result.get("grounding_required"))
+
+
+def _finalized_meal_entries(finalized: dict) -> list:
+    result = finalized.get("result")
+    if isinstance(result, Mapping):
+        return list(result.get("meal_entries", []))
+    return list(getattr(result, "meal_entries", []) or [])
+
+
 async def _finalize_interview_confirmation(*, session, interview: InterviewSession) -> dict | None:
     state = dict(interview.current_prompt_payload or {})
     confirmation_items = _confirmation_items_from_state(state)
@@ -396,7 +409,7 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     else:
                         await message.reply_text(correction_service.format_fix_summary(result))
                 return
-            if finalized["result"].get("grounding_required"):
+            if _finalized_grounding_required(finalized):
                 _mark_grounding_pending(interview)
                 session.add(interview)
                 await session.commit()
@@ -413,7 +426,7 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     context.bot_data,
                     _recent_entries_from_confirmation(
                         meal_id=finalized["meal"].id,
-                        meal_entries=list(finalized["result"].get("meal_entries", [])),
+                        meal_entries=_finalized_meal_entries(finalized),
                         confirmation_items=list(finalized["confirmation_items"]),
                     ),
                 )
@@ -488,7 +501,7 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         else:
                             await update.message.reply_text(correction_service.format_fix_summary(result))
                         return
-                    if finalized["result"].get("grounding_required"):
+                    if _finalized_grounding_required(finalized):
                         _mark_grounding_pending(interview)
                         session.add(interview)
                         await session.commit()
@@ -501,7 +514,7 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         context.bot_data,
                         _recent_entries_from_confirmation(
                             meal_id=finalized["meal"].id,
-                            meal_entries=list(finalized["result"].get("meal_entries", [])),
+                            meal_entries=_finalized_meal_entries(finalized),
                             confirmation_items=list(finalized["confirmation_items"]),
                         ),
                     )
@@ -658,7 +671,7 @@ async def _handle_meal_interview_turn(*, session, interview: InterviewSession, s
         if finalized is None:
             await update.message.reply_text("I could not find that meal to confirm.")
             return
-        if finalized["result"].get("grounding_required"):
+        if _finalized_grounding_required(finalized):
             _mark_grounding_pending(interview)
             session.add(interview)
             await session.commit()
@@ -671,7 +684,7 @@ async def _handle_meal_interview_turn(*, session, interview: InterviewSession, s
             context.bot_data,
             _recent_entries_from_confirmation(
                 meal_id=finalized["meal"].id,
-                meal_entries=list(finalized["result"].get("meal_entries", [])),
+                meal_entries=_finalized_meal_entries(finalized),
                 confirmation_items=list(finalized["confirmation_items"]),
             ),
         )

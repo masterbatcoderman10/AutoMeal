@@ -379,6 +379,64 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.add.call_args_list[-1].args[0].message_id, 321)
         session.commit.assert_awaited()
 
+    async def test_start_meal_interview_turn_sends_fallback_when_llm_turn_is_invalid(self) -> None:
+        from bot import polling
+
+        session = AsyncMock()
+        session.add = Mock()
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=654)))
+        interview = SimpleNamespace(
+            id="interview-kickoff-invalid",
+            chat_id="999",
+            state_key="INITIAL_QUESTION",
+            last_bot_message_id=None,
+            current_prompt_payload={
+                "meal_id": "meal-thread-invalid",
+                "session_mode": "MEAL_INTERVIEW",
+                "roadmap_step": "INITIAL_QUESTION",
+                "current_question": {
+                    "prompt": "What vegetable is in the egg curry?",
+                    "invalid_prompt": "What vegetable is in the egg curry?",
+                },
+                "unresolved_targets": [
+                    {
+                        "group_id": "group-egg",
+                        "primary_segment_id": "seg-egg-1",
+                        "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                        "label": "egg curry",
+                    }
+                ],
+                "approval_candidates": [],
+                "interview_messages": [],
+            },
+        )
+
+        with patch(
+            "bot.polling.interview_turn_manager.run_interview_turn",
+            AsyncMock(side_effect=InterviewTurnValidationError("confirmation coverage mismatch")),
+        ) as run_turn:
+            result = await polling._start_meal_interview_turn(
+                bot=bot,
+                session=session,
+                interview=interview,
+                settings=SimpleNamespace(),
+            )
+
+        run_turn.assert_awaited_once()
+        self.assertIsNone(result)
+        bot.send_message.assert_awaited_once_with(
+            chat_id="999",
+            text=(
+                "I couldn't safely generate the first interview prompt. "
+                "Please answer this meal question: What vegetable is in the egg curry?"
+            ),
+        )
+        self.assertEqual(interview.last_bot_message_id, 654)
+        self.assertEqual(interview.current_prompt_payload["last_turn_error"], "confirmation coverage mismatch")
+        self.assertEqual(interview.current_prompt_payload["interview_messages"][-1]["message_id"], 654)
+        self.assertEqual(session.add.call_args_list[-1].args[0].payload["type"], "validation_retry")
+        session.commit.assert_awaited_once()
+
     async def test_meal_interview_text_handles_continue_interview_turns(self) -> None:
         from bot.handlers import interview_text
 
@@ -800,7 +858,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
             patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
             patch("bot.handlers._run_meal_interview_turn", AsyncMock(return_value=turn), create=True) as run_turn,
-            patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value={"grounding_required": False, "meal_entries": []})) as finalize,
+            patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value=SimpleNamespace(meal_entries=[]))) as finalize,
         ):
             await interview_text(update, context)
 

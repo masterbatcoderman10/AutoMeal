@@ -694,7 +694,7 @@ def final_resolution_from_confirmation(
         ),
         segment_id=segment_id,
         segment_cropped_image_url=getattr(segment, "cropped_image_url", None) if segment is not None else None,
-        segment_embedding=embedding if isinstance(embedding, list) else None,
+        segment_embedding=_embedding_payload(embedding),
         portion_bucket=parsed.portion_bucket,
         identification_method="INTERVIEW_BEST_EFFORT" if best_effort else "INTERVIEW",
         quantity_json={"grounding_prep": grounding_prep} if grounding_prep else None,
@@ -702,6 +702,21 @@ def final_resolution_from_confirmation(
         create_food_visual=not best_effort,
         visual_learning_eligible=not best_effort,
     )
+
+
+def _embedding_payload(value: object) -> list[float] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        converted = tolist()
+        if isinstance(converted, list):
+            return converted
+    return None
 
 
 def build_grounding_reasoning_state(

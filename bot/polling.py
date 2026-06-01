@@ -365,14 +365,61 @@ async def poll_and_acknowledge(bot, settings, poll_interval: float | None = None
         await engine.dispose()
 
 
-async def _start_meal_interview_turn(*, bot, session, interview: InterviewSession, settings) -> interview_turn_manager.InterviewTurnResult:
+def _kickoff_validation_fallback_prompt(state: Mapping[str, Any]) -> str:
+    question = dict(state.get("current_question") or {})
+    prompt = str(question.get("prompt") or "").strip()
+    if prompt:
+        return f"I couldn't safely generate the first interview prompt. Please answer this meal question: {prompt}"
+    return "I couldn't safely generate the first interview prompt. Please tell me what this meal should be called."
+
+
+async def _start_meal_interview_turn(*, bot, session, interview: InterviewSession, settings) -> interview_turn_manager.InterviewTurnResult | None:
     state = dict(interview.current_prompt_payload or {})
-    turn = await interview_turn_manager.run_interview_turn(
-        authoritative_state=state,
-        transcript=interview_service.interview_transcript_from_state(state),
-        latest_user_text=MEAL_INTERVIEW_KICKOFF_TEXT,
-        settings=settings,
-    )
+    try:
+        turn = await interview_turn_manager.run_interview_turn(
+            authoritative_state=state,
+            transcript=interview_service.interview_transcript_from_state(state),
+            latest_user_text=MEAL_INTERVIEW_KICKOFF_TEXT,
+            settings=settings,
+        )
+    except interview_turn_manager.InterviewTurnValidationError as exc:
+        fallback_prompt = _kickoff_validation_fallback_prompt(state)
+        sent = await bot.send_message(
+            chat_id=interview.chat_id,
+            text=fallback_prompt,
+        )
+        failure_state = interview_service.append_interview_transcript_entry(
+            state,
+            role="bot",
+            content=fallback_prompt,
+            payload={
+                "type": "validation_retry",
+                "prompt": fallback_prompt,
+                "error": str(exc),
+            },
+            message_id=getattr(sent, "message_id", None),
+        )
+        failure_state["last_turn_error"] = str(exc)
+        failure_state["last_prompted_at"] = datetime.now(UTC)
+        interview.current_prompt_payload = interview_service.json_safe_payload(failure_state)
+        if isinstance(getattr(sent, "message_id", None), int):
+            interview.last_bot_message_id = sent.message_id
+        session.add(interview)
+        session.add(
+            InterviewMessage(
+                id=str(uuid.uuid4()),
+                session_id=interview.id,
+                role="bot",
+                payload={
+                    "type": "validation_retry",
+                    "prompt": fallback_prompt,
+                    "error": str(exc),
+                },
+                message_id=getattr(sent, "message_id", None) if isinstance(getattr(sent, "message_id", None), int) else None,
+            )
+        )
+        await session.commit()
+        return None
     sent = await bot.send_message(
         chat_id=interview.chat_id,
         text=turn.assistant_prompt,

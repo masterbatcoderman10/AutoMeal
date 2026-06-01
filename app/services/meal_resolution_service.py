@@ -313,6 +313,8 @@ async def resolve_or_create_food_item(
     if food.food_item_id is not None:
         direct = await session.get(FoodItem, food.food_item_id)
         if direct is not None:
+            if _normalize_identity(food.source_type) == "vector_match":
+                return direct
             return _apply_food_payload(direct, food)
 
     name_condition = func.lower(FoodItem.name) == canonical_name.lower()
@@ -459,6 +461,7 @@ async def apply_final_meal_resolution(
 
             before_json = _serialize_entry(existing)
             existing.food_item_id = resolved_food.id
+            existing.food_item = resolved_food
             existing.segment_id = _normalize_text(resolution.segment_id)
             existing.portion_bucket = str(_coerce_portion_bucket(resolution.portion_bucket).value)
             existing.identification_method = _normalize_text(resolution.identification_method) or existing.identification_method
@@ -497,6 +500,7 @@ async def apply_final_meal_resolution(
                 quantity_json=copy.deepcopy(resolution.quantity_json),
                 quantity_display=_normalize_text(resolution.quantity_display),
             )
+            entry.food_item = resolved_food
             session.add(entry)
             resolved_entries.append(entry)
 

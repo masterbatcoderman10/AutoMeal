@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 status: verifying
 stopped_at: Phase 4 context gathered
-last_updated: "2026-06-01T07:00:03Z"
-last_activity: 2026-06-01 -- Phase 04.3 implementation complete; live UAT deferred to verify-work
+last_updated: "2026-06-01T10:05:00Z"
+last_activity: 2026-06-01 -- Partial-match UAT exposed remaining 04.3 gaps: optional approval correction path, grounding failure handling, and repeatable UAT harness
 progress:
   total_phases: 9
   completed_phases: 5
@@ -110,6 +110,7 @@ None yet.
 | 2026-05-30 | 260530-kkq-tighten-grouped-reasoning-prompt-context | Tightened reasoning/segmentation context, explicit no-vector-candidates context, and worker DB-lock handling; live meal reached INTERVIEWING, but empty-DB UAT still needs reset. |
 | 2026-05-30 | 260530-l8t-capture-phase-4-2-gap-llm-threaded-inter | Promoted deterministic interview continuation failure to Phase 04.2: LLM-threaded interview orchestration with reasoning context, conversation history, and structured final write-back. |
 | 2026-05-29 | 260529-epp-fix-phase-04-security-audit-open-threats | Closed Phase 04 security audit gaps; Phase 04 SECURITY.md now verifies 38/38 threats closed. |
+| 2026-06-01 | 260601-gf9-add-telegram-other-option-for-determinis | Added Telegram `Other` buttons for deterministic identity choices, free-text follow-up handling, redeployed bot, and live UAT advanced to confirmation after recording `White khubz`. |
 
 ### Blockers/Concerns
 
@@ -117,6 +118,9 @@ None yet.
 - Phase 2: Verify Gemini 3 Flash structured output + vision works in a single OpenRouter call. If not, split into two calls.
 - Phase 3: Gemini Embedding 2 cross-modal alignment on food must be verified with calibration script before building match logic.
 - Phase 4: Confidence calibration prompt patterns for multi-signal gating on Gemini 3 Flash are sparsely documented — plan a mini-research pass before implementing the gate.
+- Phase 04.3 GAP-04.3-P1 — Deterministic optional approval `No` must become a same-group free-text correction prompt before final resolution.
+- Phase 04.3 GAP-04.3-P2 — Post-interview packaged/restaurant grounding must not strand confirmed meals when OpenRouter/tooling fails; expose concrete blocker or write degraded pending-grounding entries.
+- Phase 04.3 GAP-04.3-P3 — Partial-match/no-match UAT needs a repeatable harness using `IMG_4583.HEIC` and `IMG_4641.HEIC`.
 - Phase 5: Firecrawl resource envelope on Mac mini needs verification before shipping (5 sequential fetches under Docker mem limits).
 - Phase 6: Mac mini sleep prevention (`pmset -a sleep 0`) must be confirmed before declaring Phase 6 complete.
 

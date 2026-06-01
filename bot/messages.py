@@ -32,8 +32,8 @@ def format_interview_reminder_message(meal_id: str) -> str:
 
 def format_grounding_pending_message(meal_id: str) -> str:
     return (
-        f"Thanks. Meal {meal_id[:8]} still needs brand or restaurant grounding, "
-        "so I've queued the next step and won't log it yet."
+        f"Thanks. Meal {meal_id[:8]} still needs packaged or restaurant grounding, "
+        "so I've queued the next step and won't write final entries until it completes."
     )
 
 

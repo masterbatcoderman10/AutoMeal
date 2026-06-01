@@ -22,6 +22,12 @@ from app.services.vision_service import (
     segment_debug_label,
 )
 from app.services import reasoning_service
+from bot.callback_data import (
+    OTHER_CHOICE_ID,
+    OTHER_CHOICE_LABEL,
+    allows_other_choice,
+    build_interview_callback_data,
+)
 from bot.messages import (
     CompletionItem,
     format_ack_message,
@@ -30,7 +36,6 @@ from bot.messages import (
     format_match_completion_message,
     format_recent_fix_targets,
     format_soft_failure_message,
-    format_unresolved_match_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -394,7 +399,24 @@ def _kickoff_reply_markup(prompt: Mapping[str, Any], *, meal_id: str | None) -> 
             [
                 InlineKeyboardButton(
                     label,
-                    callback_data=f"interview:{meal_id}:{question_id}:{choice_id}",
+                    callback_data=build_interview_callback_data(
+                        meal_id=meal_id,
+                        question_id=question_id,
+                        choice_id=choice_id,
+                    ),
+                )
+            ]
+        )
+    if allows_other_choice(prompt):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    OTHER_CHOICE_LABEL,
+                    callback_data=build_interview_callback_data(
+                        meal_id=meal_id,
+                        question_id=question_id,
+                        choice_id=OTHER_CHOICE_ID,
+                    ),
                 )
             ]
         )
@@ -1158,10 +1180,10 @@ def _completion_items_from_meal_resolution(
 
     completion_items: list[CompletionItem] = []
     for segment, result in match_results:
-        food_item = result.food_visual.food_item if getattr(result, "food_visual", None) is not None else None
         entry = entries_by_segment.get(getattr(segment, "id", None))
         if meal_entries and entry is None:
             continue
+        food_item = _food_item_from_entry_or_match(entry=entry, result=result)
         portion_bucket = (
             getattr(entry, "portion_bucket", None)
             if entry is not None
@@ -1185,9 +1207,15 @@ def _completion_items_from_meal_resolution(
                         else "STANDARD"
                     )
                 ),
-                identification_method="AUTO_CONFIRM",
+                identification_method=(
+                    str(getattr(entry, "identification_method", None) or "AUTO_CONFIRM")
+                    if entry is not None
+                    else "AUTO_CONFIRM"
+                ),
                 is_verified=(
-                    bool(food_item.is_verified)
+                    bool(getattr(entry, "is_verified", None))
+                    if entry is not None and hasattr(entry, "is_verified")
+                    else bool(food_item.is_verified)
                     if food_item is not None and hasattr(food_item, "is_verified")
                     else False
                 ),
@@ -1202,6 +1230,14 @@ def _completion_items_from_meal_resolution(
         )
 
     return completion_items
+
+
+def _food_item_from_entry_or_match(*, entry: object | None, result: object) -> object | None:
+    food_item = getattr(entry, "food_item", None) if entry is not None else None
+    if food_item is not None:
+        return food_item
+    food_visual = getattr(result, "food_visual", None)
+    return getattr(food_visual, "food_item", None) if food_visual is not None else None
 
 
 def _recent_entries_from_meal_resolution(
@@ -1222,7 +1258,7 @@ def _recent_entries_from_meal_resolution(
             continue
         if entry is None or getattr(entry, "id", None) is None:
             continue
-        food_item = result.food_visual.food_item if getattr(result, "food_visual", None) is not None else None
+        food_item = _food_item_from_entry_or_match(entry=entry, result=result)
         recent_entries.append(
             correction_service.build_recent_entry_record(
                 entry_id=entry.id,

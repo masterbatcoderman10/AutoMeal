@@ -543,8 +543,188 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_segments[0].food.canonical_name, "green chicken curry")
         self.assertTrue(result["finalized"])
 
+    async def test_post_interview_grounding_keeps_authoritative_confirmed_candidate_names(self) -> None:
+        from app.services import reasoning_service
+
+        segment = SimpleNamespace(
+            id="segment-bread-1",
+            label="khubz bread",
+            cropped_image_url="/data/uploads/crops/bread-1.jpg",
+            embedding=[0.31] * EMBEDDING_DIMENSION,
+        )
+        meal = SimpleNamespace(
+            id="meal-grounded-confirmed-name",
+            processing_status=MealProcessingStatus.REASONING,
+            reasoning_state_json=None,
+            last_stage_started_at=None,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        confirmed_candidate = {
+            "candidate_id": "segment-bread-1",
+            "label": "White Khubz / Pita",
+            "identity_confidence": 1.0,
+            "quantity_confidence": 1.0,
+            "match_consistency_confidence": 1.0,
+            "missing_evidence": [],
+            "nutrition_impact": 0.0,
+            "portion_bucket": "STANDARD",
+            "source": "PACKAGED",
+        }
+        reasoning_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-grounded-confirmed-name",
+            "decision_rationale": "confirmed from interview candidates",
+            "gate_reason": "",
+            "segment_count": 1,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group_bread",
+                    "group_label": "Khubz / Pita Bread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-bread-1",
+                    "segment_ids": ["segment-bread-1"],
+                    "selected_candidate_id": "segment-bread-1",
+                    "top_3": [confirmed_candidate, confirmed_candidate, confirmed_candidate],
+                }
+            ],
+        }
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with patch.object(
+            reasoning_service,
+            "apply_final_meal_resolution",
+            new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ):
+            result = await reasoning_service.finalize_meal_from_reasoning(
+                session=session,
+                meal=meal,
+                segments=[segment],
+                match_results=[],
+                reasoning_payload=reasoning_payload,
+            )
+
+        final_segments = captured["final_segments"]
+        self.assertEqual(final_segments[0].food.canonical_name, "White Khubz / Pita")
+        self.assertTrue(result["finalized"])
+
+    async def test_grouped_auto_confirm_preserves_specific_vector_candidate_over_generic_group_label(self) -> None:
+        from app.services import reasoning_service
+
+        segment = SimpleNamespace(
+            id="segment-egg-1",
+            label="egg and vegetable curry",
+            cropped_image_url="/data/uploads/crops/egg-1.jpg",
+            embedding=[0.36] * EMBEDDING_DIMENSION,
+        )
+        meal = SimpleNamespace(
+            id="meal-specific-vector-name",
+            processing_status=MealProcessingStatus.REASONING,
+            reasoning_state_json=None,
+            last_stage_started_at=None,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        candidate = {
+            "candidate_id": "visual-egg-lauki",
+            "label": "Boiled Egg Curry with Bottle Gourd (Lauki)",
+            "identity_confidence": 0.99,
+            "quantity_confidence": 0.99,
+            "match_consistency_confidence": 0.99,
+            "missing_evidence": [],
+            "nutrition_impact": 0.0,
+            "portion_bucket": "STANDARD",
+            "source": "vector_match",
+        }
+        reasoning_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-specific-vector-name",
+            "decision_rationale": "vector match has exact confirmed identity",
+            "gate_reason": "",
+            "segment_count": 1,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-egg",
+                    "group_label": "egg and vegetable curry",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-egg-1",
+                    "segment_ids": ["segment-egg-1"],
+                    "selected_candidate_id": "visual-egg-lauki",
+                    "top_3": [candidate, candidate, candidate],
+                }
+            ],
+        }
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with patch.object(
+            reasoning_service,
+            "apply_final_meal_resolution",
+            new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ):
+            result = await reasoning_service.finalize_meal_from_reasoning(
+                session=session,
+                meal=meal,
+                segments=[segment],
+                match_results=[],
+                reasoning_payload=reasoning_payload,
+            )
+
+        final_segments = captured["final_segments"]
+        self.assertEqual(
+            final_segments[0].food.canonical_name,
+            "Boiled Egg Curry with Bottle Gourd (Lauki)",
+        )
+        self.assertTrue(result["finalized"])
+
 
 class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vector_match_reuse_does_not_mutate_learned_food_item_identity(self) -> None:
+        from app.services import meal_resolution_service
+
+        existing_item = SimpleNamespace(
+            id="food-egg-lauki",
+            name="Boiled Egg Curry with Bottle Gourd (Lauki)",
+            aliases=["Boiled Egg Curry with Bottle Gourd (Lauki)"],
+            source_type="HOME",
+            brand_name=None,
+            restaurant_name=None,
+            times_confirmed=1,
+            is_verified=False,
+            llm_reasoning=None,
+        )
+        session = AsyncMock()
+        session.get.return_value = existing_item
+
+        resolved = await meal_resolution_service.resolve_or_create_food_item(
+            session=session,
+            food=meal_resolution_service.ResolvedFoodInput(
+                canonical_name="egg and vegetable curry",
+                food_item_id="food-egg-lauki",
+                aliases=["egg and vegetable curry"],
+                source_type="vector_match",
+                times_confirmed=2,
+                is_verified=True,
+            ),
+        )
+
+        self.assertIs(resolved, existing_item)
+        self.assertEqual(existing_item.name, "Boiled Egg Curry with Bottle Gourd (Lauki)")
+        self.assertEqual(existing_item.source_type, "HOME")
+
     async def test_finalize_confirmed_interview_keeps_resolver_payload_in_authoritative_write(self) -> None:
         from app.services import interview_service
 
@@ -900,7 +1080,6 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_poll_and_match_reuses_new_retrieval_document_embedding_for_each_confirmation(self) -> None:
         from bot import polling
-        from app.services import matching_service
 
         segment_one = SimpleNamespace(
             id="segment-1",

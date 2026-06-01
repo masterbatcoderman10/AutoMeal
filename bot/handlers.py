@@ -14,8 +14,15 @@ from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog
 from app.services import interview_service, interview_turn_manager
 from app.services import correction_service
 
+from bot.callback_data import (
+    OTHER_CHOICE_ID,
+    OTHER_CHOICE_LABEL,
+    allows_other_choice,
+    build_interview_callback_data,
+    callback_token,
+    resolve_callback_token,
+)
 from bot.messages import (
-    format_fix_confirmation_message,
     format_grounding_pending_message,
     format_interview_confirmation_message,
     format_recent_fix_targets,
@@ -140,7 +147,11 @@ async def _load_active_interview(session, *, chat_id: str, meal_id: str | None =
         .limit(1)
     )
     if meal_id is not None:
-        statement = statement.where(InterviewSession.meal_log_id == meal_id)
+        meal_id = str(meal_id).strip()
+        if len(meal_id) >= 36:
+            statement = statement.where(InterviewSession.meal_log_id == meal_id)
+        else:
+            statement = statement.where(InterviewSession.meal_log_id.startswith(meal_id))
     result = await session.execute(statement)
     return result.scalar_one_or_none()
 
@@ -402,7 +413,24 @@ def _callback_markup_for_prompt(prompt: Mapping[str, object], *, meal_id: str | 
             [
                 InlineKeyboardButton(
                     label,
-                    callback_data=f"interview:{meal_id}:{question_id}:{choice_id}",
+                    callback_data=build_interview_callback_data(
+                        meal_id=meal_id,
+                        question_id=question_id,
+                        choice_id=choice_id,
+                    ),
+                )
+            ]
+        )
+    if allows_other_choice(prompt):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    OTHER_CHOICE_LABEL,
+                    callback_data=build_interview_callback_data(
+                        meal_id=meal_id,
+                        question_id=question_id,
+                        choice_id=OTHER_CHOICE_ID,
+                    ),
                 )
             ]
         )
@@ -412,6 +440,10 @@ def _callback_markup_for_prompt(prompt: Mapping[str, object], *, meal_id: str | 
 def _prompt_reply_kwargs(prompt: Mapping[str, object], *, meal_id: str | None) -> dict[str, object]:
     reply_markup = _callback_markup_for_prompt(prompt, meal_id=meal_id)
     return {"reply_markup": reply_markup} if reply_markup is not None else {}
+
+
+def _has_pending_deterministic_questions(state: Mapping[str, object]) -> bool:
+    return any(str(question_id).strip() for question_id in state.get("pending_question_ids") or [])
 
 
 async def _persist_and_reply_with_prompt(
@@ -443,6 +475,21 @@ async def _persist_and_reply_with_prompt(
     )
 
 
+def _other_free_text_prompt(prompt: Mapping[str, object]) -> dict[str, object]:
+    label = str(prompt.get("label") or "this item").strip() or "this item"
+    free_prompt = dict(prompt)
+    free_prompt["answer_type"] = "free_text"
+    free_prompt["choices"] = []
+    free_prompt["prompt"] = f"Type your answer for {label}."
+    free_prompt["invalid_prompt"] = free_prompt["prompt"]
+    free_prompt["other_for_question_id"] = prompt.get("question_id")
+    return free_prompt
+
+
+def _is_other_choice_token(choice_id: str) -> bool:
+    return choice_id == OTHER_CHOICE_ID or choice_id == callback_token(OTHER_CHOICE_ID)
+
+
 async def _handle_deterministic_meal_text(
     *,
     session,
@@ -452,13 +499,26 @@ async def _handle_deterministic_meal_text(
     update: Update,
     settings,
 ) -> None:
-    prompt = interview_service.current_target_question(state)
+    awaiting_other_question_id = str(state.get("awaiting_other_question_id") or "").strip()
+    if awaiting_other_question_id:
+        question_lookup = {
+            str(key): dict(value)
+            for key, value in dict(state.get("questions_by_id") or {}).items()
+            if isinstance(value, Mapping)
+        }
+        prompt = dict(question_lookup.get(awaiting_other_question_id) or interview_service.current_target_question(state))
+        prompt["answer_type"] = "free_text"
+        prompt["choices"] = []
+        state = dict(state)
+        state.pop("awaiting_other_question_id", None)
+    else:
+        prompt = interview_service.current_target_question(state)
     answer = interview_service.parse_interview_text(text=text, context=prompt)
     if answer.get("invalid"):
         await update.message.reply_text(str(prompt.get("invalid_prompt") or prompt.get("prompt") or "Please try again."))
         return
     updated_state = interview_service.complete_target_question(state, answer)
-    if not list(updated_state.get("remaining_required_question_ids") or []):
+    if not _has_pending_deterministic_questions(updated_state):
         await _resolve_deterministic_confirmation(
             session=session,
             interview=interview,
@@ -506,6 +566,7 @@ async def _handle_deterministic_meal_callback(
         for key, value in dict(state.get("questions_by_id") or {}).items()
         if isinstance(value, Mapping)
     }
+    question_id = resolve_callback_token(question_lookup.keys(), question_id) or ""
     prompt = question_lookup.get(question_id)
     if prompt is None:
         await callback_query.answer("That question is no longer active.", show_alert=True)
@@ -525,6 +586,35 @@ async def _handle_deterministic_meal_callback(
         for choice in prompt.get("choices") or []
         if isinstance(choice, Mapping) and str(choice.get("choice_id") or "")
     }
+    if allows_other_choice(prompt) and _is_other_choice_token(choice_id):
+        await callback_query.answer()
+        next_prompt = _other_free_text_prompt(prompt)
+        updated_state = dict(state)
+        updated_state["awaiting_other_question_id"] = question_id
+        updated_state["current_question"] = dict(next_prompt)
+        updated_state["current_question_id"] = question_id
+        updated_state["last_prompted_at"] = datetime.now(UTC)
+        sent = await callback_query.message.reply_text(str(next_prompt["prompt"]))
+        await interview_service.persist_interview_step(
+            session=session,
+            interview=interview,
+            state=updated_state,
+            user_payload={
+                "question_id": question_id,
+                "group_id": prompt.get("group_id"),
+                "primary_segment_id": prompt.get("primary_segment_id"),
+                "segment_ids": list(prompt.get("segment_ids") or []),
+                "question_kind": prompt.get("question_kind"),
+                "answer_type": prompt.get("answer_type"),
+                "required": bool(prompt.get("required")),
+                "choice_id": OTHER_CHOICE_ID,
+                "value": OTHER_CHOICE_LABEL,
+            },
+            next_prompt=next_prompt,
+            next_prompt_message_id=getattr(sent, "message_id", None) if sent is not None else None,
+        )
+        return
+    choice_id = resolve_callback_token(choice_lookup.keys(), choice_id) or ""
     matched_choice = choice_lookup.get(choice_id)
     if matched_choice is None:
         await callback_query.answer("That option is not valid for this prompt.", show_alert=True)
@@ -553,7 +643,7 @@ async def _handle_deterministic_meal_callback(
         answer["approval_status"] = "CORRECTED"
 
     updated_state = interview_service.complete_target_question(state, answer)
-    if not list(updated_state.get("remaining_required_question_ids") or []):
+    if not _has_pending_deterministic_questions(updated_state):
         await _resolve_deterministic_confirmation(
             session=session,
             interview=interview,
@@ -583,7 +673,10 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     data = update.callback_query.data or ""
     if data.startswith("interview:"):
-        _prefix, meal_id, question_id, choice_id = (data.split(":", 3) + ["", "", "", ""])[:4]
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _prefix, meal_id, question_id, choice_id = parts
         chat_id = _chat_id_from_update(update)
         if chat_id is None or not meal_id or not question_id or not choice_id:
             return
@@ -699,7 +792,7 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(format_grounding_pending_message(interview.meal_log_id))
                 return
             mode = str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL)
-            if _is_deterministic_meal_interview(state):
+            if state.get("roadmap_step") != "CONFIRMATION" and _is_deterministic_meal_interview(state):
                 await _handle_deterministic_meal_text(
                     session=session,
                     interview=interview,

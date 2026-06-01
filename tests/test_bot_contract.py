@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import tempfile
 import unittest
@@ -8,6 +9,10 @@ from pathlib import Path
 
 from app.models.meal_log import MealProcessingStatus
 from app.services.interview_schema import InterviewTurnResult, InterviewTurnValidationError
+
+
+def _test_callback_token(value: str) -> str:
+    return hashlib.blake2s(value.encode("utf-8"), digest_size=4).hexdigest()
 
 
 class _ActiveInterviewQueryResult:
@@ -147,6 +152,7 @@ class MessageTemplateTests(unittest.TestCase):
         message = format_grounding_pending_message("12345678-abcd")
 
         self.assertIn("12345678", message)
+        self.assertIn("packaged or restaurant", message)
         self.assertIn("queued the next step", message)
 
 
@@ -217,6 +223,93 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         meal = SimpleNamespace(id="meal-1", segments=[SimpleNamespace(id="seg-1")])
+        session = AsyncMock()
+        session.add = Mock()
+        session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            message=SimpleNamespace(chat=SimpleNamespace(id="999"), text="confirm", reply_text=reply_text),
+            callback_query=None,
+        )
+        context = SimpleNamespace(bot_data={})
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
+            patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value={"grounding_required": False})) as finalize,
+        ):
+            await interview_text(update, context)
+
+        finalize.assert_awaited_once()
+        self.assertFalse(interview.is_active)
+        reply_text.assert_awaited_once_with("Meal confirmation saved.")
+        session.commit.assert_awaited_once()
+        engine.dispose.assert_awaited_once()
+
+    async def test_interview_text_confirm_finalizes_deterministic_confirmation_state(self) -> None:
+        from bot.handlers import interview_text
+
+        interview = SimpleNamespace(
+            id="interview-deterministic-confirm",
+            meal_log_id="meal-deterministic-confirm",
+            is_active=True,
+            state_key="CONFIRMATION",
+            current_prompt_payload={
+                "meal_id": "meal-deterministic-confirm",
+                "session_mode": "MEAL_INTERVIEW",
+                "roadmap_step": "CONFIRMATION",
+                "question_order": ["group_1:identity"],
+                "questions_by_id": {
+                    "group_1:identity": {
+                        "question_id": "group_1:identity",
+                        "group_id": "group_1",
+                        "primary_segment_id": "seg-1",
+                        "segment_ids": ["seg-1"],
+                        "question_kind": "IDENTITY",
+                        "answer_type": "single_choice",
+                        "required": True,
+                        "label": "Vegetable and Egg Curry",
+                        "choices": [{"choice_id": "bottle_gourd_lauki", "label": "bottle gourd (lauki)"}],
+                    }
+                },
+                "answers_by_question_id": {
+                    "group_1:identity": {
+                        "question_id": "group_1:identity",
+                        "group_id": "group_1",
+                        "primary_segment_id": "seg-1",
+                        "segment_ids": ["seg-1"],
+                        "question_kind": "IDENTITY",
+                        "answer_type": "single_choice",
+                        "required": True,
+                        "name": "Egg curry with bottle gourd",
+                    }
+                },
+                "pending_question_ids": [],
+                "remaining_required_question_ids": [],
+                "confirmation_items": [
+                    {
+                        "group_id": "group_1",
+                        "segment_id": "seg-1",
+                        "primary_segment_id": "seg-1",
+                        "segment_ids": ["seg-1"],
+                        "name": "Egg curry with bottle gourd",
+                        "source_type": "HOME",
+                        "portion_bucket": "STANDARD",
+                    }
+                ],
+            },
+        )
+        meal = SimpleNamespace(id="meal-deterministic-confirm", segments=[SimpleNamespace(id="seg-1")])
         session = AsyncMock()
         session.add = Mock()
         session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
@@ -382,6 +475,120 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.add.call_args_list[-1].args[0].message_id, 321)
         session.commit.assert_awaited()
 
+    async def test_start_meal_interview_turn_uses_telegram_safe_compact_callbacks(self) -> None:
+        from bot import polling
+
+        session = AsyncMock()
+        session.add = Mock()
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=322)))
+        meal_id = "64051be1-ea01-4919-b885-e2f60e418b49"
+        question_id = "fg_bread:identity"
+        choice_id = "whole_wheat_khubz"
+        interview = SimpleNamespace(
+            id="interview-kickoff-compact",
+            chat_id="999",
+            state_key="QUESTION_BATCH",
+            last_bot_message_id=None,
+            meal_log_id=meal_id,
+            current_prompt_payload={
+                "meal_id": meal_id,
+                "session_mode": "MEAL_INTERVIEW",
+                "question_order": [question_id],
+                "questions_by_id": {
+                    question_id: {
+                        "question_id": question_id,
+                        "group_id": "fg_bread",
+                        "primary_segment_id": "seg-bread-1",
+                        "segment_ids": ["seg-bread-1"],
+                        "question_kind": "IDENTITY",
+                        "answer_type": "single_choice",
+                        "required": True,
+                        "label": "Khubz / Flatbread",
+                        "prompt": "Which bread_type best matches the Khubz / Flatbread?",
+                        "choices": [
+                            {"choice_id": choice_id, "label": "Whole-wheat Khubz"},
+                        ],
+                    },
+                },
+                "answers_by_question_id": {},
+                "pending_question_ids": [question_id],
+                "remaining_required_question_ids": [question_id],
+                "interview_messages": [],
+            },
+        )
+
+        await polling._start_meal_interview_turn(
+            bot=bot,
+            session=session,
+            interview=interview,
+            settings=SimpleNamespace(),
+        )
+
+        reply_markup = bot.send_message.await_args.kwargs["reply_markup"]
+        callback_data = reply_markup.inline_keyboard[0][0].callback_data
+        self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
+        self.assertEqual(
+            callback_data,
+            f"interview:64051be1:{_test_callback_token(question_id)}:{_test_callback_token(choice_id)}",
+        )
+
+    async def test_start_meal_interview_turn_adds_other_button_for_single_choice_identity(self) -> None:
+        from bot import polling
+
+        session = AsyncMock()
+        session.add = Mock()
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=323)))
+        meal_id = "923cd810-c507-432a-be37-cc856760914d"
+        question_id = "group_1:identity"
+        interview = SimpleNamespace(
+            id="interview-kickoff-other",
+            chat_id="999",
+            state_key="QUESTION_BATCH",
+            last_bot_message_id=None,
+            meal_log_id=meal_id,
+            current_prompt_payload={
+                "meal_id": meal_id,
+                "session_mode": "MEAL_INTERVIEW",
+                "question_order": [question_id],
+                "questions_by_id": {
+                    question_id: {
+                        "question_id": question_id,
+                        "group_id": "group_1",
+                        "primary_segment_id": "seg-curry-1",
+                        "segment_ids": ["seg-curry-1"],
+                        "question_kind": "IDENTITY",
+                        "answer_type": "single_choice",
+                        "required": True,
+                        "label": "Vegetable and Egg Curry",
+                        "prompt": "Which vegetable inside curry best matches the Vegetable and Egg Curry?",
+                        "choices": [
+                            {"choice_id": "ridge_gourd", "label": "ridge gourd"},
+                            {"choice_id": "bottle_gourd_lauki", "label": "bottle gourd (lauki)"},
+                        ],
+                    },
+                },
+                "answers_by_question_id": {},
+                "pending_question_ids": [question_id],
+                "remaining_required_question_ids": [question_id],
+                "interview_messages": [],
+            },
+        )
+
+        await polling._start_meal_interview_turn(
+            bot=bot,
+            session=session,
+            interview=interview,
+            settings=SimpleNamespace(),
+        )
+
+        reply_markup = bot.send_message.await_args.kwargs["reply_markup"]
+        other_button = reply_markup.inline_keyboard[-1][0]
+        self.assertEqual(other_button.text, "Other")
+        self.assertEqual(
+            other_button.callback_data,
+            f"interview:923cd810:{_test_callback_token(question_id)}:{_test_callback_token('__other__')}",
+        )
+
     async def test_start_meal_interview_turn_sends_fallback_when_llm_turn_is_invalid(self) -> None:
         from bot import polling
 
@@ -521,6 +728,318 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted_state["remaining_required_question_ids"], ["q-detail-curry"])
         callback_query.message.reply_text.assert_awaited_once()
         engine.dispose.assert_awaited_once()
+
+    async def test_interview_callback_rerenders_pending_optional_confirm_after_required_choice(self) -> None:
+        from bot.handlers import interview_callback
+
+        interview = SimpleNamespace(
+            id="interview-required-then-confirm",
+            meal_log_id="meal-choice",
+            is_active=True,
+            state_key="QUESTION_BATCH",
+            current_prompt_payload={
+                "meal_id": "meal-choice",
+                "session_mode": "MEAL_INTERVIEW",
+                "question_order": ["q-detail-veg", "q-confirm-chicken"],
+                "questions_by_id": {
+                    "q-detail-veg": {
+                        "question_id": "q-detail-veg",
+                        "group_id": "group-veg",
+                        "primary_segment_id": "seg-veg-1",
+                        "segment_ids": ["seg-veg-1"],
+                        "question_kind": "CHOICE",
+                        "answer_type": "single_choice",
+                        "required": True,
+                        "label": "mixed vegetables",
+                        "choices": [
+                            {"choice_id": "steamed_veg", "label": "Steamed vegetables"},
+                        ],
+                    },
+                    "q-confirm-chicken": {
+                        "question_id": "q-confirm-chicken",
+                        "group_id": "group-chicken",
+                        "primary_segment_id": "seg-chicken-1",
+                        "segment_ids": ["seg-chicken-1"],
+                        "question_kind": "APPROVAL",
+                        "answer_type": "confirm",
+                        "required": False,
+                        "label": "Chicken Curry with Drumstick",
+                        "choices": [
+                            {"choice_id": "approve", "label": "Yes"},
+                            {"choice_id": "correct", "label": "No"},
+                        ],
+                    },
+                },
+                "answers_by_question_id": {},
+                "pending_question_ids": ["q-detail-veg", "q-confirm-chicken"],
+                "remaining_required_question_ids": ["q-detail-veg"],
+                "interview_messages": [],
+            },
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        callback_query = SimpleNamespace(
+            data="interview:meal-choice:q-detail-veg:steamed_veg",
+            answer=AsyncMock(),
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id="999"),
+                reply_text=AsyncMock(return_value=SimpleNamespace(message_id=456)),
+            ),
+        )
+        update = SimpleNamespace(callback_query=callback_query, message=None)
+        context = SimpleNamespace(bot_data={})
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_deterministic_confirmation", AsyncMock()) as resolve,
+            patch("bot.handlers.interview_service.persist_interview_step", AsyncMock()) as persist,
+        ):
+            await interview_callback(update, context)
+
+        resolve.assert_not_awaited()
+        persist.assert_awaited_once()
+        persisted_state = persist.await_args.kwargs["state"]
+        self.assertEqual(persisted_state["pending_question_ids"], ["q-confirm-chicken"])
+        self.assertEqual(persisted_state["remaining_required_question_ids"], [])
+        callback_query.message.reply_text.assert_awaited_once()
+        self.assertIn("Chicken Curry with Drumstick", callback_query.message.reply_text.await_args.args[0])
+        reply_markup = callback_query.message.reply_text.await_args.kwargs["reply_markup"]
+        self.assertEqual(reply_markup.inline_keyboard[0][0].text, "Yes")
+        self.assertEqual(reply_markup.inline_keyboard[1][0].text, "No")
+        engine.dispose.assert_awaited_once()
+
+    async def test_interview_callback_resolves_compact_tokens_for_colon_question_ids(self) -> None:
+        from bot.handlers import interview_callback
+
+        meal_id = "64051be1-ea01-4919-b885-e2f60e418b49"
+        question_id = "fg_bread:identity"
+        choice_id = "whole_wheat_khubz"
+        interview = SimpleNamespace(
+            id="interview-choice-compact",
+            meal_log_id=meal_id,
+            is_active=True,
+            state_key="QUESTION_BATCH",
+            current_prompt_payload={
+                "meal_id": meal_id,
+                "session_mode": "MEAL_INTERVIEW",
+                "question_order": [question_id],
+                "questions_by_id": {
+                    question_id: {
+                        "question_id": question_id,
+                        "group_id": "fg_bread",
+                        "primary_segment_id": "seg-bread-1",
+                        "segment_ids": ["seg-bread-1"],
+                        "question_kind": "IDENTITY",
+                        "answer_type": "single_choice",
+                        "required": True,
+                        "label": "Khubz / Flatbread",
+                        "choices": [
+                            {"choice_id": choice_id, "label": "Whole-wheat Khubz"},
+                        ],
+                    },
+                },
+                "answers_by_question_id": {},
+                "pending_question_ids": [question_id],
+                "remaining_required_question_ids": [question_id],
+                "interview_messages": [],
+            },
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        callback_query = SimpleNamespace(
+            data=f"interview:64051be1:{_test_callback_token(question_id)}:{_test_callback_token(choice_id)}",
+            answer=AsyncMock(),
+            message=SimpleNamespace(chat=SimpleNamespace(id="999"), reply_text=AsyncMock()),
+        )
+        update = SimpleNamespace(callback_query=callback_query, message=None)
+        context = SimpleNamespace(bot_data={})
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)) as load_interview,
+            patch("bot.handlers._resolve_deterministic_confirmation", AsyncMock()) as resolve,
+            patch("bot.handlers.interview_service.persist_interview_step", AsyncMock()) as persist,
+        ):
+            await interview_callback(update, context)
+
+        load_interview.assert_awaited_once()
+        self.assertEqual(load_interview.await_args.kwargs["meal_id"], "64051be1")
+        resolve.assert_awaited_once()
+        self.assertEqual(resolve.await_args.kwargs["user_payload"]["question_id"], question_id)
+        self.assertEqual(resolve.await_args.kwargs["user_payload"]["choice_id"], choice_id)
+        persist.assert_not_awaited()
+        engine.dispose.assert_awaited_once()
+
+    async def test_interview_callback_other_prompts_for_free_text_on_same_question(self) -> None:
+        from bot.handlers import interview_callback
+
+        meal_id = "923cd810-c507-432a-be37-cc856760914d"
+        question_id = "group_1:identity"
+        interview = SimpleNamespace(
+            id="interview-other",
+            meal_log_id=meal_id,
+            is_active=True,
+            state_key="QUESTION_BATCH",
+            current_prompt_payload={
+                "meal_id": meal_id,
+                "session_mode": "MEAL_INTERVIEW",
+                "question_order": [question_id],
+                "questions_by_id": {
+                    question_id: {
+                        "question_id": question_id,
+                        "group_id": "group_1",
+                        "primary_segment_id": "seg-curry-1",
+                        "segment_ids": ["seg-curry-1"],
+                        "question_kind": "IDENTITY",
+                        "answer_type": "single_choice",
+                        "required": True,
+                        "label": "Vegetable and Egg Curry",
+                        "question_focus": "vegetable inside curry",
+                        "choices": [
+                            {"choice_id": "ridge_gourd", "label": "ridge gourd"},
+                        ],
+                    },
+                },
+                "answers_by_question_id": {},
+                "pending_question_ids": [question_id],
+                "remaining_required_question_ids": [question_id],
+                "interview_messages": [],
+            },
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        callback_query = SimpleNamespace(
+            data=f"interview:923cd810:{_test_callback_token(question_id)}:{_test_callback_token('__other__')}",
+            answer=AsyncMock(),
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id="999"),
+                reply_text=AsyncMock(return_value=SimpleNamespace(message_id=456)),
+            ),
+        )
+        update = SimpleNamespace(callback_query=callback_query, message=None)
+        context = SimpleNamespace(bot_data={})
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._resolve_deterministic_confirmation", AsyncMock()) as resolve,
+            patch("bot.handlers.interview_service.persist_interview_step", AsyncMock()) as persist,
+        ):
+            await interview_callback(update, context)
+
+        resolve.assert_not_awaited()
+        callback_query.answer.assert_awaited_once()
+        callback_query.message.reply_text.assert_awaited_once()
+        self.assertIn("type your answer", callback_query.message.reply_text.await_args.args[0].lower())
+        persisted_state = persist.await_args.kwargs["state"]
+        self.assertEqual(persisted_state["awaiting_other_question_id"], question_id)
+        self.assertEqual(persisted_state["current_question"]["question_id"], question_id)
+        self.assertEqual(persisted_state["current_question"]["answer_type"], "free_text")
+        self.assertEqual(persist.await_args.kwargs["user_payload"]["choice_id"], "__other__")
+        engine.dispose.assert_awaited_once()
+
+    async def test_meal_interview_text_after_other_records_custom_answer_for_original_question(self) -> None:
+        from bot import handlers
+
+        question_id = "group_1:identity"
+        interview = SimpleNamespace(
+            id="interview-other-text",
+            meal_log_id="meal-other-text",
+            is_active=True,
+            state_key="QUESTION_BATCH",
+            current_prompt_payload={},
+        )
+        state = {
+            "meal_id": "meal-other-text",
+            "session_mode": "MEAL_INTERVIEW",
+            "question_order": [question_id],
+            "questions_by_id": {
+                question_id: {
+                    "question_id": question_id,
+                    "group_id": "group_1",
+                    "primary_segment_id": "seg-curry-1",
+                    "segment_ids": ["seg-curry-1"],
+                    "question_kind": "IDENTITY",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "label": "Vegetable and Egg Curry",
+                    "choices": [{"choice_id": "ridge_gourd", "label": "ridge gourd"}],
+                }
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": [question_id],
+            "remaining_required_question_ids": [question_id],
+            "awaiting_other_question_id": question_id,
+            "current_question": {
+                "question_id": question_id,
+                "prompt": "Please type your answer for Vegetable and Egg Curry.",
+                "answer_type": "free_text",
+            },
+            "interview_messages": [],
+        }
+        session = AsyncMock()
+        session.add = Mock()
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id="999"),
+                text="egg curry with bottle gourd",
+                message_id=457,
+                reply_text=reply_text,
+            )
+        )
+
+        with patch("bot.handlers._resolve_deterministic_confirmation", AsyncMock()) as resolve:
+            await handlers._handle_deterministic_meal_text(
+                session=session,
+                interview=interview,
+                state=state,
+                text="egg curry with bottle gourd",
+                update=update,
+                settings=SimpleNamespace(),
+            )
+
+        resolve.assert_awaited_once()
+        resolved_state = resolve.await_args.kwargs["state"]
+        user_payload = resolve.await_args.kwargs["user_payload"]
+        self.assertNotIn("awaiting_other_question_id", resolved_state)
+        self.assertEqual(user_payload["question_id"], question_id)
+        self.assertEqual(user_payload["name"], "egg curry with bottle gourd")
+        self.assertEqual(
+            resolved_state["answers_by_question_id"][question_id]["name"],
+            "egg curry with bottle gourd",
+        )
 
     async def test_meal_interview_text_uses_resolver_after_last_required_answer(self) -> None:
         from bot.handlers import interview_text
@@ -2444,6 +2963,62 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         sent_text = bot.send_message.await_args.kwargs["text"]
         self.assertIn("Fix targets:", sent_text)
         self.assertIn("/fix 1", sent_text)
+
+    def test_completion_items_use_written_diary_entry_food_item_when_match_result_has_no_visual(self) -> None:
+        from bot import polling
+
+        segment = SimpleNamespace(id="segment-pita")
+        entry_food = SimpleNamespace(
+            name="Whole Wheat Pita Bread",
+            calories=None,
+            protein_g=None,
+            carbs_g=None,
+            fat_g=None,
+            is_verified=False,
+        )
+        meal_resolution = SimpleNamespace(
+            meal_entries=[
+                SimpleNamespace(
+                    segment_id="segment-pita",
+                    portion_bucket="STANDARD",
+                    quantity_display="Standard",
+                    food_item=entry_food,
+                    identification_method="AUTO_CONFIRM",
+                    is_verified=False,
+                )
+            ]
+        )
+
+        items = polling._completion_items_from_meal_resolution(
+            match_results=[(segment, SimpleNamespace(food_visual=None))],
+            meal_resolution=meal_resolution,
+        )
+
+        self.assertEqual(items[0].food_name, "Whole Wheat Pita Bread")
+        self.assertEqual(items[0].quantity_label, "Standard")
+
+    def test_recent_entries_use_written_diary_entry_food_item_when_match_result_has_no_visual(self) -> None:
+        from bot import polling
+
+        segment = SimpleNamespace(id="segment-pita")
+        meal_resolution = SimpleNamespace(
+            meal_entries=[
+                SimpleNamespace(
+                    id="entry-pita",
+                    segment_id="segment-pita",
+                    quantity_display="Standard",
+                    food_item=SimpleNamespace(name="Whole Wheat Pita Bread"),
+                )
+            ]
+        )
+
+        entries = polling._recent_entries_from_meal_resolution(
+            meal_id="meal-1",
+            match_results=[(segment, SimpleNamespace(food_visual=None))],
+            meal_resolution=meal_resolution,
+        )
+
+        self.assertEqual(entries[0]["food_name"], "Whole Wheat Pita Bread")
 
 class MainWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_post_init_starts_background_polling_task(self) -> None:

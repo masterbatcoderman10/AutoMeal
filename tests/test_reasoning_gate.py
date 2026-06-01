@@ -14,6 +14,7 @@ def _candidate_payload(
     label: str = "plate of rice and curry",
     missing: list[str] | None = None,
     nutrition_impact: float = 0.1,
+    source: str = "vector_match",
 ) -> dict[str, Any]:
     return {
         "candidate_id": candidate_id,
@@ -25,7 +26,7 @@ def _candidate_payload(
         "missing_evidence": missing or [],
         "specificity": "high",
         "nutrition_relevance": "medium",
-        "source": "vector_match",
+        "source": source,
         "decision_rationale": "high-level visual alignment",
         "nutrition_impact": nutrition_impact,
     }
@@ -105,9 +106,9 @@ class ReasoningGateTests(unittest.TestCase):
                     "meal_state": "READY_TO_WRITE",
                     "trace_id": "trace-low-margin",
                     "top_3": [
-                        _candidate_payload(candidate_id="best", similarity=0.92),
-                        _candidate_payload(candidate_id="fallback_1", similarity=0.91),
-                        _candidate_payload(candidate_id="fallback_2", similarity=0.9),
+                        _candidate_payload(candidate_id="best", similarity=0.92, label="chicken curry"),
+                        _candidate_payload(candidate_id="fallback_1", similarity=0.91, label="beef curry"),
+                        _candidate_payload(candidate_id="fallback_2", similarity=0.9, label="mutton curry"),
                     ],
                     "decision_rationale": "close runners",
                     "gate_reason": "",
@@ -168,6 +169,111 @@ class ReasoningGateTests(unittest.TestCase):
                         INTERVIEW_STATES,
                         msg=f"{row['label']} should route to interview",
                     )
+
+    def test_gate_ignores_duplicate_identity_candidates_for_margin(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-duplicate-identities",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "same learned item has multiple visual rows",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-egg",
+                    "group_label": "Boiled egg and bottle gourd curry",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-egg",
+                    "segment_ids": ["segment-egg"],
+                    "selected_candidate_id": "visual-egg-1",
+                    "visual_evidence": ["eggs and bottle gourd"],
+                    "missing_evidence": [],
+                    "decision_rationale": "top two rows are duplicate visuals for the same food",
+                    "gate_reason": "",
+                    "question_kind": "none",
+                    "question_focus": "none",
+                    "question_examples": [],
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="visual-egg-1",
+                            similarity=1.0,
+                            label="Boiled Egg Curry with Bottle Gourd (Lauki)",
+                        ),
+                        _candidate_payload(
+                            candidate_id="visual-egg-2",
+                            similarity=0.99,
+                            label="Boiled Egg Curry with Bottle Gourd (Lauki)",
+                        ),
+                        _candidate_payload(
+                            candidate_id="visual-chicken",
+                            similarity=0.3,
+                            label="chicken drumstick in a curry called phaal",
+                        ),
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        self.assertEqual(result["meal_state"], "READY_TO_WRITE")
+        self.assertEqual(result["food_groups"][0]["group_state"], "READY_TO_WRITE")
+        self.assertNotIn("candidate margin", result["food_groups"][0]["gate_reason"])
+
+    def test_clarification_choices_are_deduped(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-deduped-choices",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "requires choice",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "Flatbread",
+                    "group_action": "ASK_CHOICE",
+                    "group_state": "PENDING_INTERVIEW",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "visual-khubz-1",
+                    "visual_evidence": ["flatbread"],
+                    "missing_evidence": [],
+                    "decision_rationale": "needs choice",
+                    "gate_reason": "requires confirmation",
+                    "question_kind": "CHOICE",
+                    "question_focus": "best match",
+                    "question_examples": [],
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="visual-khubz-1",
+                            similarity=0.98,
+                            label="White Bread (Khubz)",
+                        ),
+                        _candidate_payload(
+                            candidate_id="visual-khubz-2",
+                            similarity=0.97,
+                            label="White Bread (Khubz)",
+                        ),
+                        _candidate_payload(
+                            candidate_id="visual-egg",
+                            similarity=0.2,
+                            label="Boiled Egg Curry with Bottle Gourd (Lauki)",
+                        ),
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        self.assertEqual(
+            result["clarification_schema"][0]["choices"],
+            ["White Bread (Khubz)", "Boiled Egg Curry with Bottle Gourd (Lauki)"],
+        )
 
     def test_gate_emits_deterministic_clarification_batch_for_interview_groups(self) -> None:
         payload = {
@@ -238,6 +344,225 @@ class ReasoningGateTests(unittest.TestCase):
         first_pass = _run_gate(payload)
         first_pass_ids = [question["question_id"] for question in first_pass["clarification_schema"]]
         self.assertEqual(question_ids, first_pass_ids)
+
+    def test_gate_preserves_model_clarification_choices_over_question_examples(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM_OR_INTERVIEW",
+            "meal_state": "PENDING_INTERVIEW",
+            "trace_id": "trace-model-choices",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "vegetable type needs confirmation",
+            "gate_reason": "vegetable changes nutrition",
+            "food_groups": [
+                {
+                    "group_id": "egg_gourd_curry_group",
+                    "group_label": "Egg and Vegetable Curry",
+                    "group_action": "INTERVIEW",
+                    "group_state": "PENDING_INTERVIEW",
+                    "primary_segment_id": "segment-curry",
+                    "segment_ids": ["segment-curry"],
+                    "selected_candidate_id": "candidate-curry",
+                    "visual_evidence": ["eggs and sliced green vegetable"],
+                    "missing_evidence": ["exact vegetable"],
+                    "decision_rationale": "needs specific vegetable",
+                    "gate_reason": "specific vegetable matters",
+                    "question_kind": "single_choice",
+                    "question_focus": "vegetable_type",
+                    "question_examples": [
+                        "What vegetable is cooked with the eggs? (e.g., pointed gourd, bottle gourd, cucumber, zucchini, or potato?)"
+                    ],
+                    "top_3": [
+                        _candidate_payload(candidate_id="candidate-curry", similarity=0.9, label="Egg and Pointed Gourd Curry"),
+                        _candidate_payload(candidate_id="candidate-potato", similarity=0.7, label="Egg Curry with Potatoes"),
+                        _candidate_payload(candidate_id="candidate-generic", similarity=0.5, label="Egg Curry with Mixed Vegetables"),
+                    ],
+                },
+            ],
+            "clarification_schema": [
+                {
+                    "question_id": "egg_curry_vegetable_clarification",
+                    "group_id": "egg_gourd_curry_group",
+                    "group_label": "Egg and Vegetable Curry",
+                    "question_kind": "single_choice",
+                    "question_focus": "vegetable_type",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "segment_ids": ["segment-curry"],
+                    "primary_segment_id": "segment-curry",
+                    "choices": [
+                        "Pointed gourd (Parwal / Patol)",
+                        "Bottle gourd (Lauki / Kaddu)",
+                        "Potato (Aloo)",
+                    ],
+                    "validation_hints": {"required": True},
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        self.assertEqual(
+            result["clarification_schema"][0]["choices"],
+            [
+                "Pointed gourd (Parwal / Patol)",
+                "Bottle gourd (Lauki / Kaddu)",
+                "Potato (Aloo)",
+            ],
+        )
+
+    def test_gate_does_not_auto_confirm_visual_only_candidates_without_learned_match(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-visual-only",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "visual reasoning thinks this is pita",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-pita",
+                    "group_label": "Pita Bread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-pita",
+                    "segment_ids": ["segment-pita"],
+                    "selected_candidate_id": "candidate-pita",
+                    "visual_evidence": ["flatbread"],
+                    "missing_evidence": [],
+                    "decision_rationale": "looks like pita",
+                    "gate_reason": "visual only",
+                    "question_kind": "none",
+                    "question_focus": "none",
+                    "question_examples": [],
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="candidate-pita",
+                            similarity=0.98,
+                            label="Whole Wheat Pita Bread",
+                            nutrition_impact=1.0,
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-khubz",
+                            similarity=0.7,
+                            label="Khubz Bread",
+                            nutrition_impact=0.8,
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-flatbread",
+                            similarity=0.5,
+                            label="Flatbread",
+                            nutrition_impact=0.5,
+                            source="visual_reasoning",
+                        ),
+                    ],
+                },
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        self.assertIn(result["meal_state"], INTERVIEW_STATES)
+        self.assertEqual(result["food_groups"][0]["group_action"], "ASK_CHOICE")
+        self.assertIn("visual-only", result["food_groups"][0]["gate_reason"])
+
+    def test_gate_adds_derived_question_when_source_schema_omits_gated_group(self) -> None:
+        payload = {
+            "action": "INTERVIEW",
+            "meal_state": "PARTIAL_RESOLVED_WAITING",
+            "trace_id": "trace-missing-question",
+            "food_group_count": 2,
+            "segment_count": 2,
+            "decision_rationale": "model asked about bread but omitted chicken",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group_bread",
+                    "group_label": "Flatbread",
+                    "group_action": "INTERVIEW",
+                    "group_state": "PENDING_INTERVIEW",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "candidate-bread",
+                    "visual_evidence": ["flatbread"],
+                    "missing_evidence": ["bread type"],
+                    "decision_rationale": "needs bread type",
+                    "gate_reason": "bread type needed",
+                    "question_kind": "identity",
+                    "question_focus": "bread type",
+                    "question_examples": ["khubz"],
+                    "top_3": [
+                        _candidate_payload(candidate_id="candidate-bread", similarity=0.8, label="Khubz"),
+                        _candidate_payload(candidate_id="candidate-pita", similarity=0.7, label="Pita"),
+                        _candidate_payload(candidate_id="candidate-flatbread", similarity=0.5, label="Flatbread"),
+                    ],
+                },
+                {
+                    "group_id": "group_chicken",
+                    "group_label": "Chicken Leg Curry",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-chicken",
+                    "segment_ids": ["segment-chicken"],
+                    "selected_candidate_id": "candidate-chicken",
+                    "visual_evidence": ["chicken drumstick"],
+                    "missing_evidence": [],
+                    "decision_rationale": "looks clear",
+                    "gate_reason": "",
+                    "question_kind": "none",
+                    "question_focus": "none",
+                    "question_examples": [],
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="candidate-chicken",
+                            similarity=0.96,
+                            label="Chicken Drumstick Curry",
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-bone-in",
+                            similarity=0.7,
+                            label="Bone-in Chicken Curry",
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-green",
+                            similarity=0.6,
+                            label="Chicken Green Masala",
+                            source="visual_reasoning",
+                        ),
+                    ],
+                },
+            ],
+            "clarification_schema": [
+                {
+                    "question_id": "q_bread",
+                    "group_id": "group_bread",
+                    "group_label": "Flatbread",
+                    "question_kind": "identity",
+                    "question_focus": "bread type",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "segment_ids": ["segment-bread"],
+                    "primary_segment_id": "segment-bread",
+                    "choices": ["Khubz", "Pita"],
+                    "validation_hints": {"required": True},
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+        questions = result["clarification_schema"]
+        question_group_ids = {question["group_id"] for question in questions}
+
+        self.assertIn("group_bread", question_group_ids)
+        self.assertIn("group_chicken", question_group_ids)
+        chicken_question = next(question for question in questions if question["group_id"] == "group_chicken")
+        self.assertEqual(chicken_question["question_kind"], "CHOICE")
+        self.assertIn("Chicken Drumstick Curry", chicken_question["choices"])
 
     def test_source_origin_question_only_for_ambiguous_material_foods(self) -> None:
         payload = {
@@ -328,10 +653,11 @@ class ReasoningGateTests(unittest.TestCase):
                 _candidate_payload(
                     candidate_id="best",
                     similarity=0.98,
+                    label="chicken curry",
                     nutrition_impact=0.55,
                 ),
-                _candidate_payload(candidate_id="fallback_1", similarity=0.95),
-                _candidate_payload(candidate_id="fallback_2", similarity=0.8),
+                _candidate_payload(candidate_id="fallback_1", similarity=0.95, label="beef curry"),
+                _candidate_payload(candidate_id="fallback_2", similarity=0.8, label="mutton curry"),
             ],
             "decision_rationale": "best candidate is strong but close to fallback",
             "gate_reason": "",

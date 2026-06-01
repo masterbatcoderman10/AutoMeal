@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 import base64
+import json
 import mimetypes
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -393,15 +394,19 @@ def _base_question_for_group(group: Mapping[str, Any]) -> dict[str, Any]:
     group_label = _coerce_str(group.get("group_label"), "group_label") or "unlabeled food group"
     group_action = (_coerce_str(group.get("group_action"), "group_action") or "ASK_CHOICE").upper()
     question_kind = (_coerce_str(group.get("question_kind"), "question_kind") or "").upper()
-    choices = _coerce_string_list(group.get("question_examples"))
-    if not choices:
-        choices = [
+    if question_kind in {"NONE", "NO", "N/A", "NULL"}:
+        question_kind = ""
+    choices = _dedupe_string_choices(
+        [
             label
             for candidate in list(group.get("top_3", []))
             if isinstance(candidate, Mapping)
             for label in [_coerce_str(candidate.get("label"), "label")]
             if label
         ]
+    )
+    if not choices:
+        choices = _dedupe_string_choices(_coerce_string_list(group.get("question_examples")))
     if question_kind == "SOURCE_ORIGIN":
         answer_type = "single_choice"
         question_focus = "Where did this food come from?"
@@ -417,8 +422,11 @@ def _base_question_for_group(group: Mapping[str, Any]) -> dict[str, Any]:
         question_kind = "QUANTITY"
     else:
         answer_type = "single_choice"
+        raw_question_focus = _coerce_str(group.get("question_focus"), "question_focus")
         question_focus = (
-            _coerce_str(group.get("question_focus"), "question_focus") or "choose the best match"
+            raw_question_focus
+            if raw_question_focus and raw_question_focus.casefold() not in {"none", "n/a", "null"}
+            else "best match"
         )
         validation_hints = {"required": True, "min_choices": 1, "max_choices": 1}
         if not question_kind:
@@ -467,6 +475,51 @@ def _derive_clarification_schema(food_groups: list[dict[str, Any]]) -> list[dict
     return sorted(questions, key=lambda item: item["question_id"])
 
 
+def _clarification_schema_for_groups(
+    *,
+    food_groups: list[dict[str, Any]],
+    source_schema: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    derived_schema = _derive_clarification_schema(food_groups)
+    if not source_schema:
+        return derived_schema
+
+    merged: list[dict[str, Any]] = [
+        _dedupe_question_choices(dict(question)) for question in source_schema
+    ]
+    source_group_ids = {
+        _coerce_str(question.get("group_id"), "group_id")
+        for question in source_schema
+        if isinstance(question, Mapping)
+    }
+    for question in derived_schema:
+        group_id = _coerce_str(question.get("group_id"), "group_id")
+        if group_id and group_id in source_group_ids:
+            continue
+        merged.append(question)
+    return sorted(merged, key=lambda item: item["question_id"])
+
+
+def _dedupe_question_choices(question: dict[str, Any]) -> dict[str, Any]:
+    question["choices"] = _dedupe_string_choices(_coerce_string_list(question.get("choices")))
+    return question
+
+
+def _dedupe_string_choices(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = value.strip()
+        if not normalized:
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
+
+
 def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     top_three = [
         dict(candidate)
@@ -474,7 +527,8 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(candidate, Mapping)
     ][:3]
     top_one = top_three[0] if top_three else {}
-    top_two = top_three[1] if len(top_three) > 1 else {}
+    distinct_candidates = _distinct_identity_candidates(top_three)
+    top_two = distinct_candidates[1] if len(distinct_candidates) > 1 else {}
     group_action = _coerce_str(group.get("group_action"), "group_action") or "NEEDS_SCHEMA_REVIEW"
     group_state = _coerce_str(group.get("group_state"), "group_state") or "NEEDS_SCHEMA_REVIEW"
     decision_rationale = _coerce_str(group.get("decision_rationale"), "decision_rationale") or "No group rationale provided"
@@ -511,6 +565,15 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     if not missing_evidence:
         missing_evidence = _coerce_string_list(group.get("missing_evidence"))
     nutrition_impact = _coerce_float(top_one.get("nutrition_impact"), default=0.0) if isinstance(top_one, Mapping) else 0.0
+    candidate_source = (
+        _coerce_str(top_one.get("source_type"), "source_type")
+        or _coerce_str(top_one.get("source"), "source")
+        or ""
+    ).lower() if isinstance(top_one, Mapping) else ""
+    food_item_id = _coerce_str(top_one.get("food_item_id"), "food_item_id") if isinstance(top_one, Mapping) else None
+
+    if candidate_source in {"visual_reasoning", "user_needed"} and not food_item_id:
+        reasons.append("visual-only candidate lacks learned confirmation")
 
     if top_identity < threshold:
         reasons.append(f"best similarity {top_identity:.3f} is below threshold {threshold:.3f}")
@@ -548,6 +611,29 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+def _distinct_identity_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    distinct: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = _candidate_identity_key(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        distinct.append(candidate)
+    return distinct
+
+
+def _candidate_identity_key(candidate: Mapping[str, Any]) -> str:
+    food_item_id = _coerce_str(candidate.get("food_item_id"), "food_item_id")
+    if food_item_id:
+        return f"food:{food_item_id}"
+    label = _coerce_str(candidate.get("label"), "label")
+    if label:
+        return f"label:{label.casefold()}"
+    candidate_id = _coerce_str(candidate.get("candidate_id"), "candidate_id")
+    return f"candidate:{candidate_id}" if candidate_id else ""
+
+
 def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, Any]) -> dict[str, Any]:
     normalized = coerce_reasoning_response(reasoning_payload)
     food_groups = [
@@ -571,7 +657,15 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
             "top_3": [],
         }
 
-    clarification_schema = _derive_clarification_schema(food_groups)
+    source_clarification_schema = [
+        dict(question)
+        for question in list(normalized.get("clarification_schema", []))
+        if isinstance(question, Mapping)
+    ]
+    clarification_schema = _clarification_schema_for_groups(
+        food_groups=food_groups,
+        source_schema=source_clarification_schema,
+    )
 
     if any(group["group_state"] == _REVIEW_STATE for group in food_groups):
         meal_action = _REVIEW_STATE
@@ -1351,11 +1445,40 @@ def _prefer_reasoning_group_labels(food_groups: list[dict[str, Any]]) -> list[di
             for candidate in list(normalized_group.get("top_3", []))
             if isinstance(candidate, Mapping)
         ]
-        if group_label and top_three:
+        if group_label and top_three and _should_prefer_group_label(group_label, top_three[0]):
             top_three[0]["label"] = group_label
             normalized_group["top_3"] = top_three
         normalized_groups.append(normalized_group)
     return normalized_groups
+
+
+def _should_prefer_group_label(group_label: str, candidate: Mapping[str, Any]) -> bool:
+    candidate_label = _coerce_str(candidate.get("label"), "label")
+    if not candidate_label:
+        return True
+    if _candidate_label_is_authoritative(candidate):
+        return False
+    if _word_count(candidate_label) > _word_count(group_label):
+        return False
+    return True
+
+
+def _candidate_label_is_authoritative(candidate: Mapping[str, Any]) -> bool:
+    source_type = (
+        _coerce_str(candidate.get("source_type"), "source_type")
+        or _coerce_str(candidate.get("source"), "source")
+        or ""
+    ).upper()
+    if source_type not in {"HOME", "PACKAGED", "RESTAURANT"}:
+        return False
+    return (
+        _coerce_float(candidate.get("identity_confidence")) >= 0.99
+        and _coerce_float(candidate.get("match_consistency_confidence")) >= 0.99
+    )
+
+
+def _word_count(value: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9]+", value))
 
 
 async def finalize_meal_from_reasoning(

@@ -1254,6 +1254,18 @@ def has_deterministic_question_state(state: Mapping[str, Any]) -> bool:
     return isinstance(state.get("questions_by_id"), Mapping) and isinstance(state.get("question_order"), list)
 
 
+def _food_groups_from_reasoning_state(reasoning_state: object) -> list[dict[str, Any]]:
+    if not isinstance(reasoning_state, Mapping):
+        return []
+    groups = reasoning_state.get("food_groups")
+    if not isinstance(groups, list):
+        meal_reasoning = reasoning_state.get("meal_reasoning")
+        groups = meal_reasoning.get("food_groups") if isinstance(meal_reasoning, Mapping) else None
+    if not isinstance(groups, list):
+        return []
+    return [dict(group) for group in groups if isinstance(group, Mapping)]
+
+
 def _clarification_schema_from_reasoning_state(reasoning_state: object) -> list[dict[str, Any]]:
     if not isinstance(reasoning_state, Mapping):
         return []
@@ -1270,21 +1282,61 @@ def _clarification_schema_from_reasoning_state(reasoning_state: object) -> list[
     return [dict(question) for question in clarification if isinstance(question, Mapping)]
 
 
+def _clarification_questions_from_food_groups(reasoning_state: object) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    for group in _food_groups_from_reasoning_state(reasoning_state):
+        actions = group.get("clarification_actions")
+        if not isinstance(actions, list):
+            clarification_alias = group.get("clarification")
+            actions = [clarification_alias] if isinstance(clarification_alias, Mapping) else []
+        if not isinstance(actions, list) or not actions:
+            continue
+        group_id = _optional_text(group.get("group_id")) or f"group-{len(questions) + 1}"
+        group_label = _optional_text(group.get("group_label") or group.get("label")) or "this item"
+        segment_ids = [
+            str(segment_id).strip()
+            for segment_id in group.get("segment_ids") or []
+            if str(segment_id).strip()
+        ]
+        primary_segment_id = _optional_text(group.get("primary_segment_id")) or _first_segment_id(segment_ids)
+        for idx, action in enumerate(actions):
+            if not isinstance(action, Mapping):
+                continue
+            action_payload = dict(action)
+            action_type = _question_kind(
+                action.get("type") or action.get("kind") or action.get("question_kind")
+            )
+            action_payload.setdefault(
+                "question_id",
+                f"{group_id}:{action_type.lower()}_{idx + 1}",
+            )
+            action_payload.setdefault("group_id", group_id)
+            action_payload.setdefault("group_label", group_label)
+            action_payload.setdefault("label", group_label)
+            action_payload.setdefault("primary_segment_id", primary_segment_id)
+            action_payload.setdefault("segment_ids", segment_ids)
+            action_payload.setdefault(
+                "question_kind",
+                action.get("kind") or action.get("question_kind") or action.get("type"),
+            )
+            questions.append(_normalize_clarification_question(action_payload))
+    return questions
+
+
 def _build_clarification_question_state(
     *,
     reasoning_state: object,
     approval_candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    clarification_questions = _clarification_schema_from_reasoning_state(reasoning_state)
+    clarification_questions = _clarification_questions_from_food_groups(reasoning_state)
+    if not clarification_questions:
+        clarification_questions = [
+            _normalize_clarification_question(question)
+            for question in _clarification_schema_from_reasoning_state(reasoning_state)
+        ]
     if not clarification_questions:
         return {}
-
-    questions: list[dict[str, Any]] = [
-        _approval_question_from_candidate(candidate)
-        for candidate in approval_candidates
-        if _optional_text(candidate.get("group_id"))
-    ]
-    questions.extend(_normalize_clarification_question(question) for question in clarification_questions)
+    questions = list(clarification_questions)
     question_order = [question["question_id"] for question in questions if _optional_text(question.get("question_id"))]
     questions_by_id = {
         question["question_id"]: question
@@ -1311,19 +1363,37 @@ def _normalize_clarification_question(question: Mapping[str, Any]) -> dict[str, 
         for segment_id in question.get("segment_ids") or []
         if str(segment_id).strip()
     ]
+    question_kind = _question_kind(
+        question.get("question_kind") or question.get("kind") or question.get("type")
+    )
+    choices = _normalize_question_choices(question.get("choices"))
+    allow_other = bool(question.get("allow_other"))
+    if any(choice["choice_id"] == "__other__" for choice in choices):
+        allow_other = True
+        choices = [choice for choice in choices if choice["choice_id"] != "__other__"]
+    required = bool(question.get("required"))
+    if question_kind in {"APPROVAL", "AFFIRMATION"}:
+        required = False
+
     normalized = {
         "question_id": _optional_text(question.get("question_id")) or f"question-{len(segment_ids)}",
         "group_id": _optional_text(question.get("group_id")) or "group-unknown",
         "primary_segment_id": _optional_text(question.get("primary_segment_id")) or _first_segment_id(segment_ids),
         "segment_ids": segment_ids,
-        "question_kind": _question_kind(question.get("question_kind")),
+        "question_kind": question_kind,
+        "type": _optional_text(question.get("type")) or question_kind,
         "question_focus": _optional_text(question.get("question_focus")),
         "answer_type": _normalize_answer_type(question.get("answer_type")),
-        "required": bool(question.get("required")),
+        "required": required,
         "label": _optional_text(question.get("group_label") or question.get("label")) or "this item",
-        "choices": _normalize_question_choices(question.get("choices")),
+        "user_prompt": _optional_text(question.get("user_prompt") or question.get("prompt")),
+        "choices": choices,
+        "allow_other": allow_other,
+        "other_label": _optional_text(question.get("other_label")) or "Other",
+        "reason": _optional_text(question.get("reason")),
         "validation_hints": dict(question.get("validation_hints") or {}) if isinstance(question.get("validation_hints"), Mapping) else {},
-        "question_examples": _coerce_examples(question.get("choices") if _question_kind(question.get("question_kind")) == "CHOICE" else question.get("question_examples")),
+        "question_examples": _coerce_examples(question.get("question_examples")),
+        "correction_for_question_id": _optional_text(question.get("correction_for_question_id")),
     }
     return normalized
 
@@ -1340,11 +1410,13 @@ def _approval_question_from_candidate(candidate: Mapping[str, Any]) -> dict[str,
             for segment_id in candidate.get("segment_ids") or [candidate.get("segment_id")]
             if str(segment_id or "").strip()
         ],
-        "question_kind": "APPROVAL",
+        "question_kind": "AFFIRMATION",
+        "type": "AFFIRMATION",
         "question_focus": "confirm the detected food",
         "answer_type": "confirm",
         "required": False,
         "label": label,
+        "user_prompt": f"I think this is {label}. Is that right?",
         "choices": [
             {"choice_id": "approve", "label": "Yes"},
             {"choice_id": "correct", "label": "No"},
@@ -1369,15 +1441,30 @@ def _normalize_question_choices(value: object) -> list[dict[str, str]]:
         return choices
     for raw_choice in value:
         if isinstance(raw_choice, Mapping):
-            label = _optional_text(raw_choice.get("label")) or _optional_text(raw_choice.get("value")) or _optional_text(raw_choice.get("choice_id"))
-            if not label:
+            resolved_value = _optional_text(raw_choice.get("label")) or _optional_text(raw_choice.get("value"))
+            display_label = (
+                _optional_text(raw_choice.get("quick_prompt"))
+                or _optional_text(raw_choice.get("label"))
+                or _optional_text(raw_choice.get("value"))
+                or _optional_text(raw_choice.get("choice_id"))
+            )
+            if not display_label:
                 continue
-            choice_id = _optional_text(raw_choice.get("choice_id")) or _slugify_choice_id(label)
-            choices.append({"choice_id": choice_id, "label": label})
+            raw_choice_id = _optional_text(raw_choice.get("choice_id")) or _optional_text(raw_choice.get("value"))
+            choice_id = raw_choice_id or _slugify_choice_id(display_label)
+            if choice_id.upper() == "OTHER":
+                choice_id = "__other__"
+            choices.append(
+                {
+                    "choice_id": choice_id,
+                    "label": display_label,
+                    "value": resolved_value or display_label,
+                }
+            )
             continue
         label = _optional_text(raw_choice)
         if label:
-            choices.append({"choice_id": _slugify_choice_id(label), "label": label})
+            choices.append({"choice_id": _slugify_choice_id(label), "label": label, "value": label})
     return choices
 
 
@@ -1446,8 +1533,14 @@ def _render_clarification_question(question: Mapping[str, Any]) -> tuple[str, st
     label = _optional_text(question.get("label")) or "this item"
     answer_type = _normalize_answer_type(question.get("answer_type"))
     question_kind = _question_kind(question.get("question_kind"))
+    action_type = _question_kind(question.get("type") or question.get("question_kind"))
+    user_prompt = _optional_text(question.get("user_prompt") or question.get("prompt"))
     choice_labels = [choice["label"] for choice in _normalize_question_choices(question.get("choices"))]
-    if answer_type == "confirm" or question_kind == "APPROVAL":
+    if user_prompt:
+        if answer_type == "confirm" or action_type == "AFFIRMATION" or question_kind == "AFFIRMATION":
+            return user_prompt, "Tap Yes if that's right, or No if it needs correction."
+        return user_prompt, user_prompt
+    if answer_type == "confirm" or question_kind in {"APPROVAL", "AFFIRMATION"}:
         prompt = f"I likely have {label}. Is that right?"
         return prompt, "Tap Yes if that's right, or No if it needs correction."
     if question_kind == "SOURCE_ORIGIN":
@@ -1482,13 +1575,13 @@ def _parse_clarification_text(*, text: str, context: Mapping[str, Any]) -> dict[
             payload["invalid"] = True
             return payload
         payload["choice_id"] = matched_choice["choice_id"]
-        payload["value"] = matched_choice["label"]
+        payload["value"] = matched_choice.get("value") or matched_choice["label"]
         if payload["question_kind"] == "SOURCE_ORIGIN":
             payload["source_type"] = _source_type_from_choice(matched_choice["choice_id"], matched_choice["label"])
         elif answer_type == "confirm":
-            payload["approval_status"] = "APPROVED" if matched_choice["choice_id"] == "approve" else "CORRECTED"
+            payload["approval_status"] = _approval_status_from_choice_id(matched_choice["choice_id"])
         else:
-            payload["name"] = matched_choice["label"]
+            payload["name"] = matched_choice.get("value") or matched_choice["label"]
             payload["approval_status"] = "CORRECTED"
         return payload
     if answer_type == "multi_choice":
@@ -1505,19 +1598,37 @@ def _parse_clarification_text(*, text: str, context: Mapping[str, Any]) -> dict[
 
 def _match_question_choice(*, cleaned: str, context: Mapping[str, Any]) -> dict[str, str] | None:
     choices = _normalize_question_choices(context.get("choices"))
-    if _question_kind(context.get("question_kind")) == "APPROVAL":
+    for choice in choices:
+        choice_tokens = {
+            str(choice.get("choice_id") or "").casefold(),
+            str(choice.get("label") or "").casefold(),
+            str(choice.get("value") or "").casefold(),
+        }
+        if cleaned.casefold() in choice_tokens:
+            return choice
+    if (
+        _normalize_answer_type(context.get("answer_type")) == "confirm"
+        or _question_kind(context.get("question_kind")) in {"APPROVAL", "AFFIRMATION"}
+    ):
         lowered = cleaned.casefold()
         if lowered in {"yes", "y", "correct", "right", "approve"}:
-            return {"choice_id": "approve", "label": "Yes"}
+            return {"choice_id": "approve", "label": "Yes", "value": "Yes"}
         if lowered in {"no", "n", "wrong", "incorrect", "change", "correct it"}:
-            return {"choice_id": "correct", "label": "No"}
-    for choice in choices:
-        if cleaned.casefold() in {choice["choice_id"].casefold(), choice["label"].casefold()}:
-            return choice
+            return {"choice_id": "correct", "label": "No", "value": "No"}
     return None
 
 
+def _approval_status_from_choice_id(choice_id: str | None) -> str:
+    normalized = str(choice_id or "").strip().upper()
+    return "APPROVED" if normalized in {"APPROVE", "APPROVED", "YES", "Y"} else "CORRECTED"
+
+
 def _source_type_from_choice(choice_id: str, label: str) -> str:
+    normalized_choice = str(choice_id or "").strip().upper()
+    if normalized_choice == "PACKAGED_BRANDED":
+        return "PACKAGED"
+    if normalized_choice == "RESTAURANT":
+        return "RESTAURANT"
     lowered = f"{choice_id} {label}".casefold()
     if "pack" in lowered or "brand" in lowered:
         return "PACKAGED"
@@ -1546,6 +1657,18 @@ def _apply_clarification_answer(state: Mapping[str, Any], answer: Mapping[str, A
     answer_record = _answer_record_for_question(question=question, answer=answer)
     answers_by_question_id[question_id] = answer_record
     question_order = [str(item) for item in updated.get("question_order") or [] if str(item)]
+    correction_question = _build_affirmation_correction_question(
+        question=question,
+        answer_record=answer_record,
+    )
+    if correction_question is not None:
+        correction_question_id = correction_question["question_id"]
+        questions_by_id[correction_question_id] = correction_question
+        if correction_question_id not in question_order:
+            insertion_index = question_order.index(question_id) + 1 if question_id in question_order else len(question_order)
+            question_order.insert(insertion_index, correction_question_id)
+    updated["questions_by_id"] = questions_by_id
+    updated["question_order"] = question_order
     pending_question_ids = [question_id for question_id in question_order if question_id not in answers_by_question_id]
     remaining_required = _remaining_required_question_ids(
         question_order=question_order,
@@ -1580,6 +1703,7 @@ def _answer_record_for_question(*, question: Mapping[str, Any], answer: Mapping[
         "answer_type": _normalize_answer_type(answer.get("answer_type") or question.get("answer_type")),
         "required": bool(answer.get("required") if "required" in answer else question.get("required")),
         "label": _optional_text(question.get("label")),
+        "type": _optional_text(question.get("type")),
         "choice_id": _optional_text(answer.get("choice_id")),
         "value": answer.get("value"),
         "name": _optional_text(answer.get("name")),
@@ -1592,12 +1716,40 @@ def _answer_record_for_question(*, question: Mapping[str, Any], answer: Mapping[
     return {key: value for key, value in record.items() if value is not None}
 
 
+def _build_affirmation_correction_question(
+    *,
+    question: Mapping[str, Any],
+    answer_record: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if _approval_status_from_choice_id(_optional_text(answer_record.get("choice_id"))) != "CORRECTED":
+        return None
+    if _question_kind(question.get("question_kind")) not in {"APPROVAL", "AFFIRMATION"}:
+        return None
+    group_id = _optional_text(question.get("group_id")) or _optional_text(question.get("question_id")) or "group"
+    label = _optional_text(question.get("label")) or "this item"
+    correction_question_id = f"{group_id}:correction"
+    return {
+        "question_id": correction_question_id,
+        "group_id": group_id,
+        "primary_segment_id": _optional_text(question.get("primary_segment_id")),
+        "segment_ids": list(question.get("segment_ids") or []),
+        "question_kind": "FREE_TEXT",
+        "type": "FREE_TEXT",
+        "answer_type": "free_text",
+        "required": True,
+        "label": label,
+        "user_prompt": f"What should I call {label} instead?",
+        "validation_hints": {"required": True, "max_length": 220},
+        "correction_for_question_id": _optional_text(question.get("question_id")),
+    }
+
+
 def _answers_by_segment_from_clarification_answers(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         {
             key: value
             for key, value in item.items()
-            if key not in {"approval_status", "question_id", "answer_type", "required", "choice_id", "value", "raw_text"}
+            if key not in {"approval_status", "question_id", "answer_type", "required", "choice_id", "value", "raw_text", "type"}
         }
         for item in _confirmation_items_from_clarification_answers(state)
     ]
@@ -1630,7 +1782,7 @@ def _confirmation_items_from_clarification_answers(state: Mapping[str, Any]) -> 
                 "portion_bucket": "STANDARD",
             },
         )
-        if _question_kind(question.get("question_kind")) == "APPROVAL" and item.get("approval_status") is None:
+        if _question_kind(question.get("question_kind")) in {"APPROVAL", "AFFIRMATION"} and item.get("approval_status") is None:
             item["approval_status"] = "APPROVED"
 
     for answer in answers_by_question_id.values():

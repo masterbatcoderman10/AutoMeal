@@ -894,7 +894,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next_prompt["answer_type"], "free_text")
         self.assertEqual(persisted_state["current_question"]["group_id"], "group-chicken")
         self.assertEqual(persisted_state["current_question"]["answer_type"], "free_text")
-        self.assertIn("type", callback_query.message.reply_text.await_args.args[0].lower())
+        self.assertIn("what should i call", callback_query.message.reply_text.await_args.args[0].lower())
         engine.dispose.assert_awaited_once()
 
     async def test_interview_callback_resolves_compact_tokens_for_colon_question_ids(self) -> None:
@@ -2256,112 +2256,6 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interview.current_prompt_payload["grounding_status"], "COMPLETED")
         self.assertEqual(interview.current_prompt_payload["grounding_consumer"], "poll_post_interview_grounding")
         self.assertGreaterEqual(session.commit.await_count, 1)
-        engine.dispose.assert_awaited_once()
-
-    async def test_post_interview_grounding_quota_failure_surfaces_blocker_and_degraded_save(self) -> None:
-        import httpx
-
-        from bot import polling
-
-        interview = SimpleNamespace(
-            chat_id="999",
-            meal_log_id="meal-grounding-quota",
-            is_active=True,
-            state_key="GROUNDING_PENDING",
-            current_prompt_payload={
-                "roadmap_step": "GROUNDING_PENDING",
-                "grounding_handoff_pending": False,
-                "grounding_status": "HANDOFF_ACKNOWLEDGED",
-            },
-            updated_at=object(),
-        )
-        meal = SimpleNamespace(
-            id="meal-grounding-quota",
-            processing_status=MealProcessingStatus.INTERVIEWING,
-            reasoning_state_json={
-                "grounding_required": True,
-                "grounding_status": "HANDOFF_ACKNOWLEDGED",
-                "confirmation_items": [
-                    {
-                        "segment_id": "seg-1",
-                        "segment_ids": ["seg-1"],
-                        "name": "Protein Bar",
-                        "source_type": "PACKAGED",
-                        "brand_name": "Acme",
-                        "quantity_display": "1 bar",
-                    }
-                ],
-            },
-            recovery_attempt_count=0,
-            last_stage_started_at=None,
-        )
-        segment = SimpleNamespace(
-            id="seg-1",
-            meal_log_id="meal-grounding-quota",
-            label="bar",
-            cropped_image_url="/data/uploads/crops/seg-1.jpg",
-            embedding=[0.1] * 1536,
-            match_candidates_json={
-                "top_3": [
-                    {
-                        "candidate_id": "candidate-1",
-                        "label": "Protein Bar",
-                        "identity_confidence": 0.97,
-                    }
-                ],
-                "match_threshold": 0.9,
-            },
-        )
-        session = AsyncMock()
-        session.add = Mock()
-        session.execute.side_effect = [
-            Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[interview])))),
-            Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[segment])))),
-        ]
-        session.get = AsyncMock(return_value=meal)
-        engine = SimpleNamespace(dispose=AsyncMock())
-
-        class SessionContext:
-            async def __aenter__(self):
-                return session
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-        session_factory = Mock(return_value=SessionContext())
-        settings = SimpleNamespace(
-            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
-            TELEGRAM_CHAT_ID="999",
-            BOT_POLL_INTERVAL=3.0,
-        )
-        quota_error = httpx.HTTPStatusError(
-            "Error code: 403 - Key limit exceeded (total limit)",
-            request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
-            response=httpx.Response(403),
-        )
-        bot = SimpleNamespace(send_message=AsyncMock())
-
-        with (
-            patch.object(polling, "create_async_engine", return_value=engine),
-            patch.object(polling, "async_sessionmaker", return_value=session_factory),
-            patch.object(polling, "get_llm_client", return_value=object()),
-            patch.object(polling.reasoning_service, "run_reasoning_request", AsyncMock(side_effect=quota_error)),
-            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
-        ):
-            with self.assertRaises(asyncio.CancelledError):
-                await polling.poll_post_interview_grounding(
-                    bot,
-                    settings,
-                    poll_interval=0.01,
-                    bot_data={},
-                )
-
-        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        self.assertEqual(meal.reasoning_state_json["grounding_status"], "DEGRADED_SAVED")
-        self.assertEqual(meal.reasoning_state_json["grounding_failure"]["category"], "provider_quota")
-        self.assertFalse(interview.is_active)
-        self.assertEqual(interview.current_prompt_payload["grounding_status"], "DEGRADED_SAVED")
-        self.assertIn("quota", bot.send_message.await_args.kwargs["text"].lower())
         engine.dispose.assert_awaited_once()
 
     async def test_interview_reminder_worker_skips_grounding_pending_sessions(self) -> None:

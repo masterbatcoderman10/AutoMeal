@@ -10,10 +10,10 @@ EXPECTED_FAILURES = {
     ],
     "tests.test_bot_contract": [
         "tests.test_bot_contract.HandlerTests.test_interview_callback_no_affirmation_prompts_same_group_free_text_correction",
-        "tests.test_bot_contract.PollingTests.test_post_interview_grounding_quota_failure_surfaces_blocker_and_degraded_save",
     ],
     "tests.test_match_flow": [
         "tests.test_match_flow.InterviewFinalizationWriteTests.test_best_effort_grounding_resolution_preserves_visual_learning_inputs",
+        "tests.test_match_flow.MatchWorkerTests.test_post_interview_grounding_quota_failure_surfaces_blocker_and_degraded_save",
     ],
 }
 

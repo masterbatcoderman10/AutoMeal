@@ -32,6 +32,32 @@ _INTERVIEW_STATES = {
 _INTERVIEW_STATE_FROM_OUTPUT = "PENDING_INTERVIEW"
 _CONFIDENCE_MARGIN = 0.05
 _NUTRITION_IMPACT_THRESHOLD = 0.40
+_SOURCE_ORIGIN_CHOICES = (
+    "HOME_COOKED",
+    "STORE_BOUGHT_PREPARED",
+    "PACKAGED_BRANDED",
+    "RESTAURANT",
+    "UNKNOWN",
+)
+_SOURCE_ORIGIN_TOKENS = {
+    "flatbread",
+    "wrap",
+    "naan",
+    "pita",
+    "roti",
+    "khubz",
+    "bakery",
+    "packaged",
+    "restaurant",
+    "branded",
+    "label",
+    "dessert",
+    "sauce",
+    "pizza",
+    "burger",
+    "paratha",
+    "takeout",
+}
 
 
 def _coerce_float(value: object, *, default: float = 0.0) -> float:
@@ -69,6 +95,22 @@ def _coerce_string_list(value: object) -> list[str]:
         if text:
             normalized.append(text)
     return normalized
+
+
+def _coerce_segment_ids(value: object, *, primary_segment_id: str, fallback: str) -> list[str]:
+    segment_ids = _coerce_string_list(value)
+    if primary_segment_id and primary_segment_id not in segment_ids:
+        segment_ids.insert(0, primary_segment_id)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for segment_id in segment_ids:
+        if segment_id in seen:
+            continue
+        seen.add(segment_id)
+        deduped.append(segment_id)
+    if deduped:
+        return deduped
+    return [primary_segment_id or fallback]
 
 
 def _coerce_quantity_payload(payload: object) -> dict[str, Any]:
@@ -303,6 +345,128 @@ def _normalized_group_result(
     }
 
 
+def _contains_source_origin_token(*values: object) -> bool:
+    haystack = " ".join(
+        str(value).strip().casefold()
+        for value in values
+        if isinstance(value, str) and value.strip()
+    )
+    return any(token in haystack for token in _SOURCE_ORIGIN_TOKENS)
+
+
+def _needs_source_origin_question(group: Mapping[str, Any]) -> bool:
+    if (_coerce_str(group.get("question_kind"), "question_kind") or "").upper() == "SOURCE_ORIGIN":
+        return True
+    if _contains_source_origin_token(
+        group.get("group_label"),
+        group.get("question_focus"),
+        group.get("gate_reason"),
+        group.get("decision_rationale"),
+        *(_coerce_string_list(group.get("visual_evidence"))),
+        *(_coerce_string_list(group.get("missing_evidence"))),
+        *(_coerce_string_list(group.get("question_examples"))),
+    ):
+        return True
+    for candidate in list(group.get("top_3", [])):
+        if not isinstance(candidate, Mapping):
+            continue
+        if _contains_source_origin_token(
+            candidate.get("label"),
+            candidate.get("source"),
+            *(_coerce_string_list(candidate.get("visual_evidence"))),
+            *(_coerce_string_list(candidate.get("missing_evidence"))),
+        ):
+            return True
+    return False
+
+
+def _base_question_for_group(group: Mapping[str, Any]) -> dict[str, Any]:
+    group_id = _coerce_str(group.get("group_id"), "group_id") or "group-unknown"
+    primary_segment_id = (
+        _coerce_str(group.get("primary_segment_id"), "primary_segment_id") or "segment-unknown"
+    )
+    segment_ids = _coerce_segment_ids(
+        group.get("segment_ids"),
+        primary_segment_id=primary_segment_id,
+        fallback=primary_segment_id,
+    )
+    group_label = _coerce_str(group.get("group_label"), "group_label") or "unlabeled food group"
+    group_action = (_coerce_str(group.get("group_action"), "group_action") or "ASK_CHOICE").upper()
+    question_kind = (_coerce_str(group.get("question_kind"), "question_kind") or "").upper()
+    choices = _coerce_string_list(group.get("question_examples"))
+    if not choices:
+        choices = [
+            label
+            for candidate in list(group.get("top_3", []))
+            if isinstance(candidate, Mapping)
+            for label in [_coerce_str(candidate.get("label"), "label")]
+            if label
+        ]
+    if question_kind == "SOURCE_ORIGIN":
+        answer_type = "single_choice"
+        question_focus = "Where did this food come from?"
+        choices = list(_SOURCE_ORIGIN_CHOICES)
+        validation_hints: dict[str, int | bool] = {"required": True, "min_choices": 1, "max_choices": 1}
+    elif group_action == "ASK_QUANTITY" or question_kind == "QUANTITY":
+        answer_type = "free_text"
+        question_focus = (
+            _coerce_str(group.get("question_focus"), "question_focus") or "portion estimate"
+        )
+        choices = []
+        validation_hints = {"required": True, "max_length": 220}
+        question_kind = "QUANTITY"
+    else:
+        answer_type = "single_choice"
+        question_focus = (
+            _coerce_str(group.get("question_focus"), "question_focus") or "choose the best match"
+        )
+        validation_hints = {"required": True, "min_choices": 1, "max_choices": 1}
+        if not question_kind:
+            question_kind = "CHOICE"
+
+    return {
+        "question_id": f"{group_id}:{question_kind.casefold()}",
+        "group_id": group_id,
+        "group_label": group_label,
+        "question_kind": question_kind or "DETAIL",
+        "question_focus": question_focus,
+        "answer_type": answer_type,
+        "required": True,
+        "segment_ids": segment_ids,
+        "primary_segment_id": primary_segment_id,
+        "choices": choices,
+        "validation_hints": validation_hints,
+    }
+
+
+def _derive_clarification_schema(food_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    for group in sorted(
+        food_groups,
+        key=lambda item: (
+            _coerce_str(item.get("group_id"), "group_id") or "",
+            _coerce_str(item.get("primary_segment_id"), "primary_segment_id") or "",
+        ),
+    ):
+        if group.get("group_state") == _READY_TO_WRITE_STATE:
+            continue
+        question = _base_question_for_group(group)
+        questions.append(question)
+        if question["question_kind"] != "SOURCE_ORIGIN" and _needs_source_origin_question(group):
+            questions.append(
+                {
+                    **question,
+                    "question_id": f"{question['group_id']}:source_origin",
+                    "question_kind": "SOURCE_ORIGIN",
+                    "question_focus": "Where did this food come from?",
+                    "answer_type": "single_choice",
+                    "choices": list(_SOURCE_ORIGIN_CHOICES),
+                    "validation_hints": {"required": True, "min_choices": 1, "max_choices": 1},
+                }
+            )
+    return sorted(questions, key=lambda item: item["question_id"])
+
+
 def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     top_three = [
         dict(candidate)
@@ -407,6 +571,8 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
             "top_3": [],
         }
 
+    clarification_schema = _derive_clarification_schema(food_groups)
+
     if any(group["group_state"] == _REVIEW_STATE for group in food_groups):
         meal_action = _REVIEW_STATE
         meal_state = _REVIEW_STATE
@@ -415,7 +581,7 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
         if not unresolved_groups:
             meal_action = "AUTO_CONFIRM"
             meal_state = _READY_TO_WRITE_STATE
-        elif len(unresolved_groups) == len(food_groups):
+        elif len(food_groups) == 1:
             meal_action = unresolved_groups[0]["group_action"]
             meal_state = _INTERVIEW_STATE_FROM_OUTPUT
         else:
@@ -446,6 +612,7 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
         "segment_count": segment_count,
         "food_group_count": len(food_groups),
         "food_groups": food_groups,
+        "clarification_schema": clarification_schema,
         "top_3": list(food_groups[0].get("top_3", [])),
     }
 
@@ -1003,7 +1170,8 @@ async def persist_reasoning_results(
         for group in list(normalized.get("food_groups", []))
         if isinstance(group, Mapping)
     ]
-    top_three = normalized.get("top_3", [])
+    top_three = list(food_groups[0].get("top_3", [])) if food_groups else []
+    clarification_schema = list(normalized.get("clarification_schema", []))
 
     meal_state = str(normalized.get("meal_state") or "")
     reason_state = (
@@ -1085,6 +1253,7 @@ async def persist_reasoning_results(
         "segment_reasoning": segment_reasoning,
         "ready_for_final_write": ready_for_final_write,
         "food_groups": food_groups,
+        "clarification_schema": clarification_schema,
         "top_3": top_three,
     }
 

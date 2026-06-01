@@ -188,7 +188,7 @@ Eight phases transform a blank repo into a fully operational personal meal track
 
 - [x] `04.3-01-PLAN.md` - grouped reasoning contract cleanup, strict `clarification_schema`, source-origin rules, and removal of live root `top_3` branching.
 - [x] `04.3-02-PLAN.md` - deterministic Telegram rendering, stable question/choice answer capture, and partial reply recovery.
-- [ ] `04.3-03-PLAN.md` - resolver-only finalization handoff, authoritative save-path preservation, and live 04.3 UAT.
+- [x] `04.3-03-PLAN.md` - resolver-only finalization handoff, authoritative save-path preservation, and live 04.3 UAT checklist; live evidence deferred to `$gsd-verify-work`.
 
 **Phase note**: This is an interview architecture cleanup before Phase 5 grounding, not a nutrition-grounding expansion. Keep SearXNG/Firecrawl tool loops out of scope except preserving handoff fields for Phase 5. Preserve the existing LLM finalizer only as a compact resolver if needed; it should not ask user-facing interview questions.
 

@@ -231,6 +231,48 @@ class InterviewProgressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("egg curry", prompt_text)
         self.assertNotIn("pita bread", prompt_text)
 
+    def test_current_target_question_uses_contract_owned_user_prompt_for_affirmation_action(self) -> None:
+        from bot import handlers
+
+        state = {
+            "meal_id": "meal-contract-owned-prompt",
+            "session_mode": "MEAL_INTERVIEW",
+            "question_order": ["q-affirm-chicken"],
+            "questions_by_id": {
+                "q-affirm-chicken": {
+                    "question_id": "q-affirm-chicken",
+                    "group_id": "group-chicken",
+                    "primary_segment_id": "seg-chicken-1",
+                    "segment_ids": ["seg-chicken-1"],
+                    "question_kind": "AFFIRMATION",
+                    "answer_type": "confirm",
+                    "required": True,
+                    "label": "Chicken Curry with Drumstick",
+                    "type": "AFFIRMATION",
+                    "user_prompt": "Does Chicken Curry with Drumstick look right for this part of the meal?",
+                    "choices": [
+                        {"choice_id": "approve", "label": "Yes"},
+                        {"choice_id": "correct", "label": "No"},
+                    ],
+                }
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["q-affirm-chicken"],
+            "remaining_required_question_ids": ["q-affirm-chicken"],
+            "interview_messages": [],
+        }
+
+        prompt = handlers.current_target_question(state)
+
+        self.assertEqual(
+            prompt["prompt"],
+            "Does Chicken Curry with Drumstick look right for this part of the meal?",
+        )
+        self.assertEqual(prompt["question_id"], "q-affirm-chicken")
+        self.assertEqual(prompt["group_id"], "group-chicken")
+        self.assertEqual(prompt["answer_type"], "confirm")
+        self.assertEqual(prompt["question_kind"], "AFFIRMATION")
+
     def test_interview_moves_to_next_target_only_after_portion_context(self) -> None:
         from bot import handlers
 

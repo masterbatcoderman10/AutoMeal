@@ -800,6 +800,39 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             "egg curry with bottle gourd",
         )
 
+    def test_best_effort_grounding_resolution_preserves_visual_learning_inputs(self) -> None:
+        from app.services import interview_service
+
+        segment = SimpleNamespace(
+            id="seg-grounding-fallback",
+            cropped_image_url="/data/uploads/crops/seg-grounding-fallback.jpg",
+            embedding=[0.61] * EMBEDDING_DIMENSION,
+        )
+
+        resolution = interview_service.final_resolution_from_confirmation(
+            item={
+                "segment_id": "seg-grounding-fallback",
+                "name": "Protein Bar",
+                "source_type": "PACKAGED",
+                "brand_name": "Acme",
+                "quantity_display": "1 bar",
+            },
+            segment=segment,
+            best_effort=True,
+        )
+
+        self.assertTrue(resolution.food.needs_grounding)
+        self.assertFalse(resolution.food.is_verified)
+        self.assertTrue(
+            resolution.create_food_visual,
+            "Degraded saves should still preserve FoodVisual creation when segment crops and embeddings exist.",
+        )
+        self.assertEqual(
+            resolution.segment_cropped_image_url,
+            "/data/uploads/crops/seg-grounding-fallback.jpg",
+        )
+        self.assertEqual(len(resolution.segment_embedding or []), EMBEDDING_DIMENSION)
+
 
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:

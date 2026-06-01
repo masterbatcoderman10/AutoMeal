@@ -302,13 +302,13 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
-    async def test_start_meal_interview_turn_runs_llm_prompt_and_tracks_message_id(self) -> None:
+    async def test_start_meal_interview_turn_renders_persisted_clarification_without_llm(self) -> None:
         from bot import polling
 
         start_turn = getattr(polling, "_start_meal_interview_turn", None)
         self.assertTrue(
             callable(start_turn),
-            "bot.polling must expose a kickoff helper that runs the first meal interview turn.",
+            "bot.polling must expose a kickoff helper that renders the first deterministic clarification question.",
         )
         if not callable(start_turn):
             return
@@ -319,50 +319,50 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         interview = SimpleNamespace(
             id="interview-kickoff",
             chat_id="999",
-            state_key="INITIAL_QUESTION",
+            state_key="QUESTION_BATCH",
             last_bot_message_id=None,
             current_prompt_payload={
-                "meal_id": "meal-thread-1",
+                "meal_id": "meal-ui-1",
                 "session_mode": "MEAL_INTERVIEW",
-                "unresolved_targets": [
-                    {
+                "question_order": ["q-confirm-pita", "q-detail-curry"],
+                "questions_by_id": {
+                    "q-confirm-pita": {
+                        "question_id": "q-confirm-pita",
+                        "group_id": "group-pita",
+                        "primary_segment_id": "seg-pita-1",
+                        "segment_ids": ["seg-pita-1"],
+                        "question_kind": "APPROVAL",
+                        "answer_type": "confirm",
+                        "required": False,
+                        "label": "pita bread",
+                        "choices": [
+                            {"choice_id": "approve", "label": "Yes"},
+                            {"choice_id": "correct", "label": "No"},
+                        ],
+                    },
+                    "q-detail-curry": {
+                        "question_id": "q-detail-curry",
                         "group_id": "group-egg",
                         "primary_segment_id": "seg-egg-1",
                         "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                        "question_kind": "DETAIL",
+                        "answer_type": "free_text",
+                        "required": True,
                         "label": "egg curry",
-                    }
-                ],
-                "approval_candidates": [
-                    {
-                        "group_id": "group-pita",
-                        "primary_segment_id": "seg-pita-1",
-                        "segment_id": "seg-pita-1",
-                        "proposed_name": "pita bread",
+                        "question_focus": "vegetable inside egg curry",
+                        "question_examples": [
+                            "egg curry with bottle gourd",
+                            "egg curry with zucchini",
+                        ],
                     },
-                    {
-                        "group_id": "group-chicken",
-                        "primary_segment_id": "seg-chicken-1",
-                        "segment_id": "seg-chicken-1",
-                        "proposed_name": "chicken curry",
-                    },
-                ],
+                },
+                "answers_by_question_id": {},
+                "pending_question_ids": ["q-confirm-pita", "q-detail-curry"],
+                "remaining_required_question_ids": ["q-detail-curry"],
                 "interview_messages": [],
             },
         )
-        turn = InterviewTurnResult.model_validate(
-            {
-                "turn_action": "continue_interview",
-                "assistant_prompt": (
-                    "I can see egg curry, and I likely have pita bread and chicken curry. "
-                    "What vegetable is in the egg curry?"
-                ),
-                "clarification_reason": None,
-                "conversation_summary": "Kickoff asked for the curry vegetable while carrying the approval candidates.",
-                "confirmation_items": [],
-            }
-        )
-
-        with patch("bot.polling.interview_turn_manager.run_interview_turn", AsyncMock(return_value=turn)) as run_turn:
+        with patch("bot.polling.interview_turn_manager.run_interview_turn", AsyncMock()) as run_turn:
             await start_turn(
                 bot=bot,
                 session=session,
@@ -370,12 +370,15 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 settings=SimpleNamespace(),
             )
 
-        run_turn.assert_awaited_once()
-        bot.send_message.assert_awaited_once_with(chat_id="999", text=turn.assistant_prompt)
+        run_turn.assert_not_awaited()
+        bot.send_message.assert_awaited_once()
+        sent_text = bot.send_message.await_args.kwargs["text"]
+        self.assertIn("egg curry", sent_text.lower())
+        self.assertNotIn("chicken curry", sent_text.lower())
         self.assertEqual(interview.last_bot_message_id, 321)
-        self.assertEqual(interview.current_prompt_payload["interview_messages"][-1]["content"], turn.assistant_prompt)
+        self.assertEqual(interview.current_prompt_payload["interview_messages"][-1]["content"], sent_text)
         self.assertEqual(interview.current_prompt_payload["interview_messages"][-1]["message_id"], 321)
-        self.assertEqual(interview.current_prompt_payload["current_question"]["prompt"], turn.assistant_prompt)
+        self.assertEqual(interview.current_prompt_payload["current_question"]["question_id"], "q-detail-curry")
         self.assertEqual(session.add.call_args_list[-1].args[0].message_id, 321)
         session.commit.assert_awaited()
 
@@ -436,6 +439,181 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interview.current_prompt_payload["interview_messages"][-1]["message_id"], 654)
         self.assertEqual(session.add.call_args_list[-1].args[0].payload["type"], "validation_retry")
         session.commit.assert_awaited_once()
+
+    async def test_interview_callback_maps_choice_to_stable_question_id_and_rerenders_remaining_required_question(self) -> None:
+        from bot.handlers import interview_callback
+
+        interview = SimpleNamespace(
+            id="interview-choice",
+            meal_log_id="meal-choice",
+            is_active=True,
+            state_key="QUESTION_BATCH",
+            current_prompt_payload={
+                "meal_id": "meal-choice",
+                "session_mode": "MEAL_INTERVIEW",
+                "question_order": ["q-confirm-pita", "q-detail-curry"],
+                "questions_by_id": {
+                    "q-confirm-pita": {
+                        "question_id": "q-confirm-pita",
+                        "group_id": "group-pita",
+                        "primary_segment_id": "seg-pita-1",
+                        "segment_ids": ["seg-pita-1"],
+                        "question_kind": "APPROVAL",
+                        "answer_type": "confirm",
+                        "required": False,
+                        "label": "pita bread",
+                        "choices": [
+                            {"choice_id": "approve", "label": "Yes"},
+                            {"choice_id": "correct", "label": "No"},
+                        ],
+                    },
+                    "q-detail-curry": {
+                        "question_id": "q-detail-curry",
+                        "group_id": "group-egg",
+                        "primary_segment_id": "seg-egg-1",
+                        "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                        "question_kind": "DETAIL",
+                        "answer_type": "free_text",
+                        "required": True,
+                        "label": "egg curry",
+                        "question_focus": "vegetable inside egg curry",
+                        "question_examples": ["egg curry with bottle gourd"],
+                    },
+                },
+                "answers_by_question_id": {},
+                "pending_question_ids": ["q-confirm-pita", "q-detail-curry"],
+                "remaining_required_question_ids": ["q-detail-curry"],
+                "interview_messages": [],
+            },
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        callback_query = SimpleNamespace(
+            data="interview:meal-choice:q-confirm-pita:approve",
+            answer=AsyncMock(),
+            message=SimpleNamespace(chat=SimpleNamespace(id="999"), reply_text=AsyncMock()),
+        )
+        update = SimpleNamespace(callback_query=callback_query, message=None)
+        context = SimpleNamespace(bot_data={})
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers.interview_service.persist_interview_step", AsyncMock()) as persist,
+        ):
+            await interview_callback(update, context)
+
+        persist.assert_awaited_once()
+        persisted_state = persist.await_args.kwargs["state"]
+        self.assertEqual(persist.await_args.kwargs["user_payload"]["question_id"], "q-confirm-pita")
+        self.assertEqual(persist.await_args.kwargs["user_payload"]["choice_id"], "approve")
+        self.assertEqual(persisted_state["answers_by_question_id"]["q-confirm-pita"]["choice_id"], "approve")
+        self.assertEqual(persisted_state["remaining_required_question_ids"], ["q-detail-curry"])
+        callback_query.message.reply_text.assert_awaited_once()
+        engine.dispose.assert_awaited_once()
+
+    async def test_meal_interview_text_rerenders_only_missing_required_questions(self) -> None:
+        from bot.handlers import interview_text
+
+        interview = SimpleNamespace(
+            id="interview-partial",
+            meal_log_id="meal-partial",
+            is_active=True,
+            state_key="QUESTION_BATCH",
+            current_prompt_payload={
+                "meal_id": "meal-partial",
+                "session_mode": "MEAL_INTERVIEW",
+                "question_order": ["q-confirm-pita", "q-detail-curry"],
+                "questions_by_id": {
+                    "q-confirm-pita": {
+                        "question_id": "q-confirm-pita",
+                        "group_id": "group-pita",
+                        "primary_segment_id": "seg-pita-1",
+                        "segment_ids": ["seg-pita-1"],
+                        "question_kind": "APPROVAL",
+                        "answer_type": "confirm",
+                        "required": False,
+                        "label": "pita bread",
+                    },
+                    "q-detail-curry": {
+                        "question_id": "q-detail-curry",
+                        "group_id": "group-egg",
+                        "primary_segment_id": "seg-egg-1",
+                        "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                        "question_kind": "DETAIL",
+                        "answer_type": "free_text",
+                        "required": True,
+                        "label": "egg curry",
+                        "question_focus": "vegetable inside egg curry",
+                        "question_examples": ["egg curry with bottle gourd"],
+                    },
+                },
+                "answers_by_question_id": {
+                    "q-confirm-pita": {
+                        "question_id": "q-confirm-pita",
+                        "choice_id": "approve",
+                        "value": True,
+                    }
+                },
+                "pending_question_ids": ["q-confirm-pita", "q-detail-curry"],
+                "remaining_required_question_ids": ["q-detail-curry"],
+                "interview_messages": [],
+            },
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id="999"),
+                text="egg curry with bottle gourd",
+                message_id=444,
+                reply_to_message=SimpleNamespace(message_id=321),
+                reply_text=reply_text,
+            ),
+            callback_query=None,
+        )
+        context = SimpleNamespace(bot_data={})
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
+            patch("bot.handlers._run_meal_interview_turn", AsyncMock(), create=True) as run_turn,
+            patch("bot.handlers.interview_service.persist_interview_step", AsyncMock()) as persist,
+        ):
+            await interview_text(update, context)
+
+        run_turn.assert_not_awaited()
+        persist.assert_awaited_once()
+        persisted_state = persist.await_args.kwargs["state"]
+        self.assertEqual(persist.await_args.kwargs["user_payload"]["question_id"], "q-detail-curry")
+        self.assertEqual(
+            persisted_state["answers_by_question_id"]["q-confirm-pita"]["choice_id"],
+            "approve",
+        )
+        self.assertEqual(persisted_state["remaining_required_question_ids"], [])
+        reply_text.assert_awaited_once()
+        engine.dispose.assert_awaited_once()
 
     async def test_meal_interview_text_handles_continue_interview_turns(self) -> None:
         from bot.handlers import interview_text

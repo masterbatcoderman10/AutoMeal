@@ -155,6 +155,82 @@ class InterviewProgressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("confidence", lowered)
         self.assertNotIn("nutrition-relevant detail", lowered)
 
+    def test_current_target_question_prefers_first_remaining_required_clarification(self) -> None:
+        from bot import handlers
+
+        state = {
+            "meal_id": "meal-question-state",
+            "session_mode": "MEAL_INTERVIEW",
+            "question_order": ["q-confirm-pita", "q-detail-curry", "q-source"],
+            "questions_by_id": {
+                "q-confirm-pita": {
+                    "question_id": "q-confirm-pita",
+                    "group_id": "group-pita",
+                    "primary_segment_id": "seg-pita-1",
+                    "segment_ids": ["seg-pita-1"],
+                    "question_kind": "APPROVAL",
+                    "answer_type": "confirm",
+                    "required": False,
+                    "prompt_summary": "Confirm the pita bread match.",
+                    "choices": [
+                        {"choice_id": "approve", "label": "Yes"},
+                        {"choice_id": "correct", "label": "No"},
+                    ],
+                },
+                "q-detail-curry": {
+                    "question_id": "q-detail-curry",
+                    "group_id": "group-egg",
+                    "primary_segment_id": "seg-egg-1",
+                    "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                    "question_kind": "DETAIL",
+                    "answer_type": "free_text",
+                    "required": True,
+                    "label": "egg curry",
+                    "question_focus": "vegetable inside egg curry",
+                    "question_examples": [
+                        "egg curry with bottle gourd",
+                        "egg curry with zucchini",
+                    ],
+                },
+                "q-source": {
+                    "question_id": "q-source",
+                    "group_id": "group-egg",
+                    "primary_segment_id": "seg-egg-1",
+                    "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                    "question_kind": "SOURCE_ORIGIN",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "label": "egg curry",
+                    "choices": [
+                        {"choice_id": "home", "label": "Homemade"},
+                        {"choice_id": "restaurant", "label": "Restaurant"},
+                    ],
+                },
+            },
+            "answers_by_question_id": {
+                "q-confirm-pita": {
+                    "question_id": "q-confirm-pita",
+                    "question_kind": "APPROVAL",
+                    "choice_id": "approve",
+                    "value": True,
+                }
+            },
+            "pending_question_ids": ["q-confirm-pita", "q-detail-curry", "q-source"],
+            "remaining_required_question_ids": ["q-detail-curry", "q-source"],
+            "interview_messages": [],
+        }
+
+        prompt = handlers.current_target_question(state)
+
+        self.assertIn("question_id", prompt)
+        self.assertEqual(prompt.get("question_id"), "q-detail-curry")
+        self.assertEqual(prompt.get("group_id"), "group-egg")
+        self.assertEqual(prompt.get("answer_type"), "free_text")
+        self.assertEqual(prompt.get("segment_ids"), ["seg-egg-1", "seg-egg-2"])
+        prompt_text = str(prompt.get("prompt") or "").lower()
+        self.assertIn("egg curry", prompt_text)
+        self.assertNotIn("pita bread", prompt_text)
+
     def test_interview_moves_to_next_target_only_after_portion_context(self) -> None:
         from bot import handlers
 
@@ -716,6 +792,80 @@ class InterviewPersistencePrepTests(unittest.TestCase):
         self.assertEqual(target["group_id"], "group-egg-curry")
         self.assertEqual(target["label"], "egg curry")
         self.assertEqual(target["question_focus"], "vegetable inside egg curry")
+
+    def test_prepare_interview_session_seeds_question_indexed_state_from_clarification_schema(self) -> None:
+        import asyncio
+
+        from app.services import interview_service
+
+        class EmptyResult:
+            def scalar_one_or_none(self):
+                return None
+
+        class FakeSession:
+            async def execute(self, _statement):
+                return EmptyResult()
+
+            def add(self, _item) -> None:
+                return None
+
+        meal = SimpleNamespace(
+            id="meal-schema-state",
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "clarification_schema": {
+                        "questions": [
+                            {
+                                "question_id": "q-confirm-pita",
+                                "group_id": "group-pita",
+                                "primary_segment_id": "seg-pita-1",
+                                "segment_ids": ["seg-pita-1"],
+                                "question_kind": "APPROVAL",
+                                "answer_type": "confirm",
+                                "required": False,
+                                "label": "pita bread",
+                                "choices": [
+                                    {"choice_id": "approve", "label": "Yes"},
+                                    {"choice_id": "correct", "label": "No"},
+                                ],
+                            },
+                            {
+                                "question_id": "q-detail-curry",
+                                "group_id": "group-egg",
+                                "primary_segment_id": "seg-egg-1",
+                                "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                                "question_kind": "DETAIL",
+                                "answer_type": "free_text",
+                                "required": True,
+                                "label": "egg curry",
+                                "question_focus": "vegetable inside egg curry",
+                                "question_examples": ["egg curry with bottle gourd"],
+                            },
+                        ]
+                    }
+                }
+            },
+        )
+
+        interview = asyncio.run(
+            interview_service.prepare_interview_session(
+                session=FakeSession(),
+                meal=meal,
+                segments=[SimpleNamespace(id="seg-egg-1", label="egg curry")],
+                chat_id="chat-schema",
+            )
+        )
+
+        payload = interview.current_prompt_payload
+
+        self.assertIn("question_order", payload)
+        self.assertEqual(payload.get("question_order"), ["q-confirm-pita", "q-detail-curry"])
+        self.assertEqual(payload.get("pending_question_ids"), ["q-confirm-pita", "q-detail-curry"])
+        self.assertEqual(payload.get("remaining_required_question_ids"), ["q-detail-curry"])
+        self.assertEqual(payload.get("answers_by_question_id"), {})
+        questions_by_id = payload.get("questions_by_id") or {}
+        self.assertIn("q-detail-curry", questions_by_id)
+        self.assertEqual(questions_by_id.get("q-detail-curry", {}).get("answer_type"), "free_text")
 
     def test_confirmation_items_are_built_from_structured_answers(self) -> None:
         from app.services import interview_service

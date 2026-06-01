@@ -12,7 +12,7 @@ Eight phases transform a blank repo into a fully operational personal meal track
 - [x] **Phase 4: Reason, Interview & Learning Loop** - Full pipeline end-to-end: segmented foods continue in bounded async parallel; unknown foods flow through LLM reasoning and structured Telegram interview; corrections cascade to FoodVisual invalidation; pipeline is resilient to crashes (completed 2026-05-28)
 - [x] **Phase 4.1: Grouped Reasoning & Human Interview Correction** - Correct the Phase 4 UAT gap where whole-meal top-3 candidates and raw segment prompts produce confusing interviews; reasoning must group distinct foods first, produce per-food top-3 candidates, and ask one human question per unresolved food group (completed 2026-05-29)
 - [x] **Phase 4.2: LLM-Threaded Interview Orchestration** - Replace deterministic interview continuation with an LLM interview agent that receives grouped reasoning context, conversation history, pending unclear targets, and clear auto-proposed items for approval; it asks natural follow-ups, decides when enough information is collected, and hands structured confirmed items back to final write-back/grounding. (completed 2026-05-30)
-- [ ] **Phase 4.3: Deterministic Clarification Schema & Interview UI** - Replace freeform LLM interview turns with a reasoning-produced clarification schema, deterministic Telegram MCQ/open-field rendering, structured answer capture, and a compact final resolver that feeds the existing authoritative FoodItem/DiaryEntry/FoodVisual write path.
+- [x] **Phase 4.3: Deterministic Clarification Schema & Interview UI** - Replace freeform LLM interview turns with a reasoning-produced clarification schema, deterministic Telegram MCQ/open-field rendering, structured answer capture, and a compact final resolver that feeds the existing authoritative FoodItem/DiaryEntry/FoodVisual write path. (completed 2026-06-01)
 - [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
@@ -243,6 +243,6 @@ Eight phases transform a blank repo into a fully operational personal meal track
 | 4. Reason, Interview & Learning Loop | 8/8 | Complete    | 2026-05-28 |
 | 4.1. Grouped Reasoning & Human Interview Correction | 2/2 | Complete   | 2026-05-29 |
 | 4.2. LLM-Threaded Interview Orchestration | 3/3 | Complete   | 2026-05-30 |
-| 4.3. Deterministic Clarification Schema & Interview UI | 3/4 | In Progress|  |
+| 4.3. Deterministic Clarification Schema & Interview UI | 4/4 | Complete   | 2026-06-01 |
 | 5. Agentic Grounding | 0/TBD | Not started | - |
 | 6. Bot Surface & Daily Summary | 0/TBD | Not started | - |

@@ -119,6 +119,7 @@ None yet.
 - Phase 3: Gemini Embedding 2 cross-modal alignment on food must be verified with calibration script before building match logic.
 - Phase 4: Confidence calibration prompt patterns for multi-signal gating on Gemini 3 Flash are sparsely documented — plan a mini-research pass before implementing the gate.
 - Phase 04.3 live UAT — Run the new warm-state harness for `IMG_4583.HEIC` and `IMG_4641.HEIC`, then copy report evidence into `04.3-UAT-RESULTS.md`.
+- Phase 04.3 schema gaps — Fold clarification into each `food_group` with model-owned ordered `clarification_actions`; Telegram renders each action by `type`, uses top-3 `quick_prompt` choices plus `Other` for identity, and stops inferring semantic flow from strings.
 - Phase 5: Firecrawl resource envelope on Mac mini needs verification before shipping (5 sequential fetches under Docker mem limits).
 - Phase 6: Mac mini sleep prevention (`pmset -a sleep 0`) must be confirmed before declaring Phase 6 complete.
 

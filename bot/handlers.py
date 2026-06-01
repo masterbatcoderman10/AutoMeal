@@ -6,7 +6,7 @@ from inspect import isawaitable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from app.config import get_settings
@@ -36,6 +36,7 @@ parse_confirmation_bulk_text = interview_service.parse_confirmation_bulk_text
 build_confirmation_message = interview_service.build_confirmation_message
 build_all_wrong_prompt = interview_service.build_all_wrong_prompt
 prepare_fix_interview_session = interview_service.prepare_fix_interview_session
+has_deterministic_question_state = interview_service.has_deterministic_question_state
 resolve_fix_target = correction_service.resolve_fix_target
 parse_fix_patch = correction_service.parse_fix_patch
 
@@ -373,15 +374,244 @@ def _mark_grounding_pending(interview: InterviewSession) -> None:
     interview.is_active = True
 
 
+def _is_deterministic_meal_interview(state: Mapping[str, object]) -> bool:
+    return (
+        str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL) == interview_service.SESSION_MODE_MEAL
+        and has_deterministic_question_state(state)
+    )
+
+
+def _callback_markup_for_prompt(prompt: Mapping[str, object], *, meal_id: str | None) -> InlineKeyboardMarkup | None:
+    answer_type = str(prompt.get("answer_type") or "").strip().lower()
+    question_id = str(prompt.get("question_id") or "").strip()
+    if answer_type not in {"confirm", "single_choice"} or not question_id or not meal_id:
+        return None
+    choices = prompt.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    rows = []
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            continue
+        label = str(choice.get("label") or "").strip()
+        choice_id = str(choice.get("choice_id") or "").strip()
+        if not label or not choice_id:
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"interview:{meal_id}:{question_id}:{choice_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _prompt_reply_kwargs(prompt: Mapping[str, object], *, meal_id: str | None) -> dict[str, object]:
+    reply_markup = _callback_markup_for_prompt(prompt, meal_id=meal_id)
+    return {"reply_markup": reply_markup} if reply_markup is not None else {}
+
+
+async def _persist_and_reply_with_prompt(
+    *,
+    session,
+    interview: InterviewSession,
+    state: dict,
+    user_payload: Mapping[str, object],
+    prompt: Mapping[str, object],
+    reply_callable,
+    meal_id: str | None,
+    user_message_id: int | None = None,
+) -> None:
+    sent = await reply_callable(
+        prompt["prompt"],
+        **_prompt_reply_kwargs(prompt, meal_id=meal_id),
+    )
+    state["current_question"] = dict(prompt)
+    state["current_question_id"] = prompt.get("question_id")
+    state["last_prompted_at"] = datetime.now(UTC)
+    await interview_service.persist_interview_step(
+        session=session,
+        interview=interview,
+        state=state,
+        user_payload=user_payload,
+        next_prompt=prompt,
+        user_message_id=user_message_id,
+        next_prompt_message_id=getattr(sent, "message_id", None) if sent is not None else None,
+    )
+
+
+async def _handle_deterministic_meal_text(
+    *,
+    session,
+    interview: InterviewSession,
+    state: dict,
+    text: str,
+    update: Update,
+) -> None:
+    prompt = interview_service.current_target_question(state)
+    answer = interview_service.parse_interview_text(text=text, context=prompt)
+    if answer.get("invalid"):
+        await update.message.reply_text(str(prompt.get("invalid_prompt") or prompt.get("prompt") or "Please try again."))
+        return
+    updated_state = interview_service.complete_target_question(state, answer)
+    if updated_state.get("roadmap_step") == "CONFIRMATION":
+        updated_state["last_prompted_at"] = datetime.now(UTC)
+        await interview_service.persist_interview_step(
+            session=session,
+            interview=interview,
+            state=updated_state,
+            user_payload=answer,
+            user_message_id=getattr(update.message, "message_id", None),
+        )
+        await update.message.reply_text(
+            format_interview_confirmation_message(_confirmation_items_from_state(updated_state), action="log it")
+        )
+        return
+    next_prompt = interview_service.current_target_question(updated_state)
+    await _persist_and_reply_with_prompt(
+        session=session,
+        interview=interview,
+        state=updated_state,
+        user_payload=answer,
+        prompt=next_prompt,
+        reply_callable=update.message.reply_text,
+        meal_id=str(state.get("meal_id") or interview.meal_log_id or ""),
+        user_message_id=getattr(update.message, "message_id", None),
+    )
+
+
+async def _handle_deterministic_meal_callback(
+    *,
+    session,
+    interview: InterviewSession,
+    state: dict,
+    callback_query,
+    meal_id: str,
+    question_id: str,
+    choice_id: str,
+) -> None:
+    if callback_query.message is None:
+        return
+    if isinstance(getattr(interview, "last_bot_message_id", None), int):
+        message_id = getattr(callback_query.message, "message_id", None)
+        if isinstance(message_id, int) and message_id != interview.last_bot_message_id:
+            await callback_query.answer("That prompt is stale. Use the latest question.", show_alert=True)
+            return
+    question_lookup = {
+        str(key): dict(value)
+        for key, value in dict(state.get("questions_by_id") or {}).items()
+        if isinstance(value, Mapping)
+    }
+    prompt = question_lookup.get(question_id)
+    if prompt is None:
+        await callback_query.answer("That question is no longer active.", show_alert=True)
+        return
+    unanswered_question_ids = {
+        str(item)
+        for item in state.get("pending_question_ids") or []
+        if str(item)
+    }
+    if question_id not in unanswered_question_ids and question_id in {
+        str(item) for item in dict(state.get("answers_by_question_id") or {}).keys()
+    }:
+        await callback_query.answer("That question is already answered.", show_alert=True)
+        return
+    choice_lookup = {
+        str(choice.get("choice_id") or ""): dict(choice)
+        for choice in prompt.get("choices") or []
+        if isinstance(choice, Mapping) and str(choice.get("choice_id") or "")
+    }
+    matched_choice = choice_lookup.get(choice_id)
+    if matched_choice is None:
+        await callback_query.answer("That option is not valid for this prompt.", show_alert=True)
+        return
+    await callback_query.answer()
+    answer = {
+        "question_id": question_id,
+        "group_id": prompt.get("group_id"),
+        "primary_segment_id": prompt.get("primary_segment_id"),
+        "segment_ids": list(prompt.get("segment_ids") or []),
+        "question_kind": prompt.get("question_kind"),
+        "answer_type": prompt.get("answer_type"),
+        "required": bool(prompt.get("required")),
+        "choice_id": choice_id,
+        "value": matched_choice.get("label"),
+    }
+    if str(prompt.get("answer_type") or "").strip().lower() == "confirm":
+        answer["approval_status"] = "APPROVED" if choice_id == "approve" else "CORRECTED"
+    elif str(prompt.get("question_kind") or "").strip().upper() == "SOURCE_ORIGIN":
+        answer["source_type"] = interview_service.parse_interview_text(
+            text=str(matched_choice.get("label") or ""),
+            context=prompt,
+        ).get("source_type")
+    else:
+        answer["name"] = matched_choice.get("label")
+        answer["approval_status"] = "CORRECTED"
+
+    updated_state = interview_service.complete_target_question(state, answer)
+    if updated_state.get("roadmap_step") == "CONFIRMATION":
+        updated_state["last_prompted_at"] = datetime.now(UTC)
+        await interview_service.persist_interview_step(
+            session=session,
+            interview=interview,
+            state=updated_state,
+            user_payload=answer,
+        )
+        await callback_query.message.reply_text(
+            format_interview_confirmation_message(_confirmation_items_from_state(updated_state), action="log it")
+        )
+        return
+    next_prompt = interview_service.current_target_question(updated_state)
+    await _persist_and_reply_with_prompt(
+        session=session,
+        interview=interview,
+        state=updated_state,
+        user_payload=answer,
+        prompt=next_prompt,
+        reply_callable=callback_query.message.reply_text,
+        meal_id=meal_id,
+    )
+
+
 async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.callback_query is None:
         return
     if await _reject_unpinned_update(update):
         return
-    await update.callback_query.answer()
     data = update.callback_query.data or ""
+    if data.startswith("interview:"):
+        _prefix, meal_id, question_id, choice_id = (data.split(":", 3) + ["", "", "", ""])[:4]
+        chat_id = _chat_id_from_update(update)
+        if chat_id is None or not meal_id or not question_id or not choice_id:
+            return
+        settings = get_settings()
+        engine, session_factory = _make_session_factory(settings)
+        try:
+            async with session_factory() as session:
+                interview = await _load_active_interview(session, chat_id=chat_id, meal_id=meal_id)
+                if interview is None:
+                    return
+                state = _interview_state(interview)
+                if not _is_deterministic_meal_interview(state):
+                    await update.callback_query.answer("That prompt is no longer active.", show_alert=True)
+                    return
+                await _handle_deterministic_meal_callback(
+                    session=session,
+                    interview=interview,
+                    state=state,
+                    callback_query=update.callback_query,
+                    meal_id=meal_id,
+                    question_id=question_id,
+                    choice_id=choice_id,
+                )
+            return
+        finally:
+            await engine.dispose()
     if not data.startswith("confirm:"):
         return
+    await update.callback_query.answer()
     meal_id = data.split(":", 1)[1]
     chat_id = _chat_id_from_update(update)
     if chat_id is None:
@@ -467,6 +697,15 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(format_grounding_pending_message(interview.meal_log_id))
                 return
             mode = str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL)
+            if _is_deterministic_meal_interview(state):
+                await _handle_deterministic_meal_text(
+                    session=session,
+                    interview=interview,
+                    state=state,
+                    text=text,
+                    update=update,
+                )
+                return
             if mode == interview_service.SESSION_MODE_MEAL and state.get("roadmap_step") != "CONFIRMATION":
                 await _handle_meal_interview_turn(
                     session=session,

@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.models import InterviewMessage, InterviewSession, MealSegment, MealLog, MealProcessingStatus
 from app.services.llm_client import get_llm_client
@@ -373,8 +374,74 @@ def _kickoff_validation_fallback_prompt(state: Mapping[str, Any]) -> str:
     return "I couldn't safely generate the first interview prompt. Please tell me what this meal should be called."
 
 
+def _kickoff_reply_markup(prompt: Mapping[str, Any], *, meal_id: str | None) -> InlineKeyboardMarkup | None:
+    answer_type = str(prompt.get("answer_type") or "").strip().lower()
+    question_id = str(prompt.get("question_id") or "").strip()
+    if answer_type not in {"confirm", "single_choice"} or not meal_id or not question_id:
+        return None
+    choices = prompt.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    rows = []
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            continue
+        label = str(choice.get("label") or "").strip()
+        choice_id = str(choice.get("choice_id") or "").strip()
+        if not label or not choice_id:
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"interview:{meal_id}:{question_id}:{choice_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
 async def _start_meal_interview_turn(*, bot, session, interview: InterviewSession, settings) -> interview_turn_manager.InterviewTurnResult | None:
     state = dict(interview.current_prompt_payload or {})
+    if interview_service.has_deterministic_question_state(state):
+        prompt = interview_service.current_target_question(state)
+        sent = await bot.send_message(
+            chat_id=interview.chat_id,
+            text=prompt["prompt"],
+            reply_markup=_kickoff_reply_markup(prompt, meal_id=str(state.get("meal_id") or interview.meal_log_id or "")),
+        )
+        updated_state = interview_service.append_interview_transcript_entry(
+            state,
+            role="bot",
+            content=prompt["prompt"],
+            payload={
+                "type": "prompt",
+                "prompt": dict(prompt),
+            },
+            message_id=getattr(sent, "message_id", None),
+        )
+        updated_state["current_question"] = dict(prompt)
+        updated_state["current_question_id"] = prompt.get("question_id")
+        updated_state["last_prompted_at"] = datetime.now(UTC)
+        interview.current_prompt_payload = interview_service.json_safe_payload(updated_state)
+        if isinstance(getattr(sent, "message_id", None), int):
+            interview.last_bot_message_id = sent.message_id
+        session.add(interview)
+        session.add(
+            InterviewMessage(
+                id=str(uuid.uuid4()),
+                session_id=interview.id,
+                role="bot",
+                payload={
+                    "type": "prompt",
+                    "prompt": dict(prompt),
+                },
+                message_id=getattr(sent, "message_id", None) if isinstance(getattr(sent, "message_id", None), int) else None,
+            )
+        )
+        await session.commit()
+        return None
+
     try:
         turn = await interview_turn_manager.run_interview_turn(
             authoritative_state=state,

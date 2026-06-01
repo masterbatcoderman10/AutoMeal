@@ -68,6 +68,30 @@ def is_pinned_chat_update(callback: object, session: object) -> bool:
 
 
 def current_target_question(state: Mapping[str, Any]) -> dict[str, Any]:
+    if has_deterministic_question_state(state):
+        question = _current_clarification_question(state)
+        if question is None:
+            return {
+                "roadmap_step": "CONFIRMATION",
+                "prompt": "Confirm or correct the identified meal items.",
+                "invalid_prompt": "Confirm or correct the identified meal items.",
+                "session_mode": str(state.get("session_mode") or SESSION_MODE_MEAL),
+            }
+        prompt, invalid_prompt = _render_clarification_question(question)
+        prompt_payload = dict(question)
+        prompt_payload.update(
+            {
+                "segment_id": _optional_text(question.get("primary_segment_id")) or _first_segment_id(question.get("segment_ids")),
+                "roadmap_step": "QUESTION_BATCH",
+                "prompt": prompt,
+                "invalid_prompt": invalid_prompt,
+                "session_mode": str(state.get("session_mode") or SESSION_MODE_MEAL),
+                "pending_question_ids": list(state.get("pending_question_ids") or []),
+                "remaining_required_question_ids": list(state.get("remaining_required_question_ids") or []),
+            }
+        )
+        return prompt_payload
+
     target = _current_target(state)
     step = str(state.get("roadmap_step") or "INITIAL_QUESTION")
     answer = _answer_record_for_state(state, target)
@@ -150,6 +174,9 @@ def current_target_question(state: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def complete_target_question(state: Mapping[str, Any], answer: Mapping[str, Any]) -> dict[str, Any]:
+    if has_deterministic_question_state(state):
+        return _apply_clarification_answer(state, answer)
+
     updated = dict(state)
     messages = list(updated.get("interview_messages") or [])
     messages.append({"role": "user", "payload": dict(answer)})
@@ -197,6 +224,9 @@ def complete_target_question(state: Mapping[str, Any], answer: Mapping[str, Any]
 
 
 def parse_interview_text(*, text: str, context: Mapping[str, Any]) -> dict[str, Any]:
+    if _optional_text(context.get("question_id")):
+        return _parse_clarification_text(text=text, context=context)
+
     cleaned = _clean_identity_text(text)
     step = str(context.get("roadmap_step") or "INITIAL_QUESTION")
     payload: dict[str, Any] = {
@@ -354,6 +384,11 @@ def confirmation_items_from_state(state: Mapping[str, Any]) -> list[dict[str, An
     if isinstance(explicit_items, list) and explicit_items:
         return [dict(item) for item in explicit_items if isinstance(item, Mapping)]
 
+    if has_deterministic_question_state(state):
+        items = _confirmation_items_from_clarification_answers(state)
+        if items:
+            return items
+
     items: list[dict[str, Any]] = []
     for target in list(state.get("pending_targets") or []):
         answer = _answer_for_target(state, target)
@@ -500,6 +535,16 @@ def build_interview_turn_state(
             "reasoning_summary": _reasoning_summary(getattr(meal, "reasoning_state_json", None)),
         }
     )
+    question_state = _build_clarification_question_state(
+        reasoning_state=getattr(meal, "reasoning_state_json", None),
+        approval_candidates=approval_candidates,
+    )
+    if question_state:
+        state.update(question_state)
+        state["roadmap_step"] = "QUESTION_BATCH" if state.get("pending_question_ids") else "CONFIRMATION"
+        state["current_question"] = current_target_question(state)
+        return state
+
     current_question = current_target_question(state) if pending_targets else {
         "segment_id": None,
         "roadmap_step": "CONFIRMATION",
@@ -635,10 +680,14 @@ async def persist_interview_step(
     state: Mapping[str, Any],
     user_payload: Mapping[str, Any],
     next_prompt: Mapping[str, Any] | None = None,
+    user_message_id: int | None = None,
+    next_prompt_message_id: int | None = None,
 ) -> InterviewSession:
     persisted_state = _json_safe_payload(state)
     interview.current_prompt_payload = persisted_state
     interview.state_key = str(persisted_state.get("roadmap_step") or interview.state_key)
+    if isinstance(next_prompt_message_id, int):
+        interview.last_bot_message_id = next_prompt_message_id
     session.add(interview)
     session.add(
         InterviewMessage(
@@ -646,6 +695,7 @@ async def persist_interview_step(
             session_id=interview.id,
             role="user",
             payload=dict(user_payload),
+            message_id=user_message_id if isinstance(user_message_id, int) else None,
         )
     )
     if next_prompt is not None:
@@ -658,6 +708,7 @@ async def persist_interview_step(
                     "type": "prompt",
                     "prompt": dict(next_prompt),
                 },
+                message_id=next_prompt_message_id if isinstance(next_prompt_message_id, int) else None,
             )
         )
     if hasattr(session, "commit"):
@@ -1138,6 +1189,418 @@ def _reasoning_summary(reasoning_state: object) -> str:
     return rationale
 
 
+def has_deterministic_question_state(state: Mapping[str, Any]) -> bool:
+    return isinstance(state.get("questions_by_id"), Mapping) and isinstance(state.get("question_order"), list)
+
+
+def _clarification_schema_from_reasoning_state(reasoning_state: object) -> list[dict[str, Any]]:
+    if not isinstance(reasoning_state, Mapping):
+        return []
+    clarification = reasoning_state.get("clarification_schema")
+    if isinstance(clarification, Mapping):
+        clarification = clarification.get("questions")
+    if not isinstance(clarification, list):
+        meal_reasoning = reasoning_state.get("meal_reasoning")
+        clarification = meal_reasoning.get("clarification_schema") if isinstance(meal_reasoning, Mapping) else None
+    if isinstance(clarification, Mapping):
+        clarification = clarification.get("questions")
+    if not isinstance(clarification, list):
+        return []
+    return [dict(question) for question in clarification if isinstance(question, Mapping)]
+
+
+def _build_clarification_question_state(
+    *,
+    reasoning_state: object,
+    approval_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    clarification_questions = _clarification_schema_from_reasoning_state(reasoning_state)
+    if not clarification_questions:
+        return {}
+
+    questions: list[dict[str, Any]] = [
+        _approval_question_from_candidate(candidate)
+        for candidate in approval_candidates
+        if _optional_text(candidate.get("group_id"))
+    ]
+    questions.extend(_normalize_clarification_question(question) for question in clarification_questions)
+    question_order = [question["question_id"] for question in questions if _optional_text(question.get("question_id"))]
+    questions_by_id = {
+        question["question_id"]: question
+        for question in questions
+        if _optional_text(question.get("question_id"))
+    }
+    pending_question_ids = list(question_order)
+    return {
+        "question_order": question_order,
+        "questions_by_id": questions_by_id,
+        "answers_by_question_id": {},
+        "pending_question_ids": pending_question_ids,
+        "remaining_required_question_ids": _remaining_required_question_ids(
+            question_order=question_order,
+            questions_by_id=questions_by_id,
+            answers_by_question_id={},
+        ),
+    }
+
+
+def _normalize_clarification_question(question: Mapping[str, Any]) -> dict[str, Any]:
+    segment_ids = [
+        str(segment_id).strip()
+        for segment_id in question.get("segment_ids") or []
+        if str(segment_id).strip()
+    ]
+    normalized = {
+        "question_id": _optional_text(question.get("question_id")) or f"question-{len(segment_ids)}",
+        "group_id": _optional_text(question.get("group_id")) or "group-unknown",
+        "primary_segment_id": _optional_text(question.get("primary_segment_id")) or _first_segment_id(segment_ids),
+        "segment_ids": segment_ids,
+        "question_kind": _question_kind(question.get("question_kind")),
+        "question_focus": _optional_text(question.get("question_focus")),
+        "answer_type": _normalize_answer_type(question.get("answer_type")),
+        "required": bool(question.get("required")),
+        "label": _optional_text(question.get("group_label") or question.get("label")) or "this item",
+        "choices": _normalize_question_choices(question.get("choices")),
+        "validation_hints": dict(question.get("validation_hints") or {}) if isinstance(question.get("validation_hints"), Mapping) else {},
+        "question_examples": _coerce_examples(question.get("choices") if _question_kind(question.get("question_kind")) == "CHOICE" else question.get("question_examples")),
+    }
+    return normalized
+
+
+def _approval_question_from_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    label = _optional_text(candidate.get("proposed_name") or candidate.get("label")) or "this item"
+    group_id = _optional_text(candidate.get("group_id")) or "group-approval"
+    return {
+        "question_id": f"{group_id}:confirm",
+        "group_id": group_id,
+        "primary_segment_id": _optional_text(candidate.get("primary_segment_id")) or _optional_text(candidate.get("segment_id")),
+        "segment_ids": [
+            str(segment_id).strip()
+            for segment_id in candidate.get("segment_ids") or [candidate.get("segment_id")]
+            if str(segment_id or "").strip()
+        ],
+        "question_kind": "APPROVAL",
+        "question_focus": "confirm the detected food",
+        "answer_type": "confirm",
+        "required": False,
+        "label": label,
+        "choices": [
+            {"choice_id": "approve", "label": "Yes"},
+            {"choice_id": "correct", "label": "No"},
+        ],
+        "validation_hints": {"required": False, "min_choices": 1, "max_choices": 1},
+        "question_examples": [],
+    }
+
+
+def _normalize_answer_type(value: object) -> str:
+    if not isinstance(value, str):
+        return "free_text"
+    normalized = value.strip().lower()
+    if normalized in {"single_choice", "multi_choice", "free_text", "confirm"}:
+        return normalized
+    return "free_text"
+
+
+def _normalize_question_choices(value: object) -> list[dict[str, str]]:
+    choices: list[dict[str, str]] = []
+    if not isinstance(value, list):
+        return choices
+    for raw_choice in value:
+        if isinstance(raw_choice, Mapping):
+            label = _optional_text(raw_choice.get("label")) or _optional_text(raw_choice.get("value")) or _optional_text(raw_choice.get("choice_id"))
+            if not label:
+                continue
+            choice_id = _optional_text(raw_choice.get("choice_id")) or _slugify_choice_id(label)
+            choices.append({"choice_id": choice_id, "label": label})
+            continue
+        label = _optional_text(raw_choice)
+        if label:
+            choices.append({"choice_id": _slugify_choice_id(label), "label": label})
+    return choices
+
+
+def _slugify_choice_id(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_") or "choice"
+
+
+def _coerce_examples(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _first_segment_id(segment_ids: object) -> str | None:
+    if not isinstance(segment_ids, list):
+        return None
+    for segment_id in segment_ids:
+        normalized = _optional_text(segment_id)
+        if normalized:
+            return normalized
+    return None
+
+
+def _remaining_required_question_ids(
+    *,
+    question_order: list[str],
+    questions_by_id: Mapping[str, Any],
+    answers_by_question_id: Mapping[str, Any],
+) -> list[str]:
+    return [
+        question_id
+        for question_id in question_order
+        if bool(dict(questions_by_id.get(question_id) or {}).get("required"))
+        and question_id not in answers_by_question_id
+    ]
+
+
+def _current_clarification_question(state: Mapping[str, Any]) -> dict[str, Any] | None:
+    question_id = _current_clarification_question_id(state)
+    if not question_id:
+        return None
+    questions_by_id = state.get("questions_by_id") or {}
+    question = questions_by_id.get(question_id)
+    return dict(question) if isinstance(question, Mapping) else None
+
+
+def _current_clarification_question_id(state: Mapping[str, Any]) -> str | None:
+    remaining_required = [
+        str(question_id)
+        for question_id in state.get("remaining_required_question_ids") or []
+        if str(question_id)
+    ]
+    if remaining_required:
+        return remaining_required[0]
+    pending = [
+        str(question_id)
+        for question_id in state.get("pending_question_ids") or []
+        if str(question_id)
+    ]
+    if pending:
+        return pending[0]
+    return None
+
+
+def _render_clarification_question(question: Mapping[str, Any]) -> tuple[str, str]:
+    label = _optional_text(question.get("label")) or "this item"
+    answer_type = _normalize_answer_type(question.get("answer_type"))
+    question_kind = _question_kind(question.get("question_kind"))
+    choice_labels = [choice["label"] for choice in _normalize_question_choices(question.get("choices"))]
+    if answer_type == "confirm" or question_kind == "APPROVAL":
+        prompt = f"I likely have {label}. Is that right?"
+        return prompt, "Tap Yes if that's right, or No if it needs correction."
+    if question_kind == "SOURCE_ORIGIN":
+        prompt = f"Was the {label} homemade, packaged, or from a restaurant?"
+        return prompt, prompt
+    if answer_type == "single_choice":
+        question_focus = _optional_text(question.get("question_focus")) or "best match"
+        prompt = f"Which {question_focus} best matches the {label}?"
+        if choice_labels:
+            prompt = f"{prompt} Options: {', '.join(choice_labels)}."
+        return prompt, prompt
+    return _render_initial_question(target=question, label=label)
+
+
+def _parse_clarification_text(*, text: str, context: Mapping[str, Any]) -> dict[str, Any]:
+    cleaned = _clean_identity_text(text)
+    answer_type = _normalize_answer_type(context.get("answer_type"))
+    payload: dict[str, Any] = {
+        "question_id": context.get("question_id"),
+        "group_id": context.get("group_id"),
+        "primary_segment_id": context.get("primary_segment_id"),
+        "segment_ids": list(context.get("segment_ids") or []),
+        "question_kind": _question_kind(context.get("question_kind")),
+        "answer_type": answer_type,
+        "required": bool(context.get("required")),
+        "raw_text": str(text or "").strip(),
+        "value": cleaned,
+    }
+    if answer_type in {"confirm", "single_choice"}:
+        matched_choice = _match_question_choice(cleaned=cleaned, context=context)
+        if matched_choice is None:
+            payload["invalid"] = True
+            return payload
+        payload["choice_id"] = matched_choice["choice_id"]
+        payload["value"] = matched_choice["label"]
+        if payload["question_kind"] == "SOURCE_ORIGIN":
+            payload["source_type"] = _source_type_from_choice(matched_choice["choice_id"], matched_choice["label"])
+        elif answer_type == "confirm":
+            payload["approval_status"] = "APPROVED" if matched_choice["choice_id"] == "approve" else "CORRECTED"
+        else:
+            payload["name"] = matched_choice["label"]
+            payload["approval_status"] = "CORRECTED"
+        return payload
+    if answer_type == "multi_choice":
+        payload["values"] = [part.strip() for part in re.split(r"\s*,\s*", str(text or "").strip()) if part.strip()]
+        return payload
+    if payload["question_kind"] == "QUANTITY":
+        payload["portion_bucket"] = _infer_portion_bucket(text)
+        payload["quantity_display"] = _optional_text(str(text or "").strip())
+        return payload
+    payload["name"] = cleaned
+    payload["approval_status"] = "CORRECTED"
+    return payload
+
+
+def _match_question_choice(*, cleaned: str, context: Mapping[str, Any]) -> dict[str, str] | None:
+    choices = _normalize_question_choices(context.get("choices"))
+    if _question_kind(context.get("question_kind")) == "APPROVAL":
+        lowered = cleaned.casefold()
+        if lowered in {"yes", "y", "correct", "right", "approve"}:
+            return {"choice_id": "approve", "label": "Yes"}
+        if lowered in {"no", "n", "wrong", "incorrect", "change", "correct it"}:
+            return {"choice_id": "correct", "label": "No"}
+    for choice in choices:
+        if cleaned.casefold() in {choice["choice_id"].casefold(), choice["label"].casefold()}:
+            return choice
+    return None
+
+
+def _source_type_from_choice(choice_id: str, label: str) -> str:
+    lowered = f"{choice_id} {label}".casefold()
+    if "pack" in lowered or "brand" in lowered:
+        return "PACKAGED"
+    if "restaurant" in lowered or "takeout" in lowered:
+        return "RESTAURANT"
+    return "HOME"
+
+
+def _apply_clarification_answer(state: Mapping[str, Any], answer: Mapping[str, Any]) -> dict[str, Any]:
+    updated = dict(state)
+    question_id = _optional_text(answer.get("question_id"))
+    questions_by_id = {
+        str(key): dict(value)
+        for key, value in dict(updated.get("questions_by_id") or {}).items()
+        if isinstance(value, Mapping)
+    }
+    if not question_id or question_id not in questions_by_id:
+        return updated
+
+    answers_by_question_id = {
+        str(key): dict(value)
+        for key, value in dict(updated.get("answers_by_question_id") or {}).items()
+        if isinstance(value, Mapping)
+    }
+    question = questions_by_id[question_id]
+    answer_record = _answer_record_for_question(question=question, answer=answer)
+    answers_by_question_id[question_id] = answer_record
+    question_order = [str(item) for item in updated.get("question_order") or [] if str(item)]
+    pending_question_ids = [question_id for question_id in question_order if question_id not in answers_by_question_id]
+    remaining_required = _remaining_required_question_ids(
+        question_order=question_order,
+        questions_by_id=questions_by_id,
+        answers_by_question_id=answers_by_question_id,
+    )
+    updated["answers_by_question_id"] = answers_by_question_id
+    updated["pending_question_ids"] = pending_question_ids
+    updated["remaining_required_question_ids"] = remaining_required
+    updated["answers_by_segment"] = _answers_by_segment_from_clarification_answers(updated)
+    messages = [dict(item) for item in updated.get("interview_messages") or [] if isinstance(item, Mapping)]
+    messages.append({"role": "user", "payload": dict(answer_record)})
+    updated["interview_messages"] = messages
+    next_question_id = _current_clarification_question_id(updated)
+    if next_question_id is None:
+        updated["roadmap_step"] = "CONFIRMATION"
+        updated["confirmation_items"] = _confirmation_items_from_clarification_answers(updated)
+    else:
+        updated["roadmap_step"] = "QUESTION_BATCH"
+        updated["current_question_id"] = next_question_id
+        updated["current_question"] = current_target_question(updated)
+    return updated
+
+
+def _answer_record_for_question(*, question: Mapping[str, Any], answer: Mapping[str, Any]) -> dict[str, Any]:
+    record = {
+        "question_id": _optional_text(answer.get("question_id")) or _optional_text(question.get("question_id")),
+        "group_id": _optional_text(answer.get("group_id")) or _optional_text(question.get("group_id")),
+        "primary_segment_id": _optional_text(answer.get("primary_segment_id")) or _optional_text(question.get("primary_segment_id")),
+        "segment_ids": list(answer.get("segment_ids") or question.get("segment_ids") or []),
+        "question_kind": _question_kind(answer.get("question_kind") or question.get("question_kind")),
+        "answer_type": _normalize_answer_type(answer.get("answer_type") or question.get("answer_type")),
+        "required": bool(answer.get("required") if "required" in answer else question.get("required")),
+        "label": _optional_text(question.get("label")),
+        "choice_id": _optional_text(answer.get("choice_id")),
+        "value": answer.get("value"),
+        "name": _optional_text(answer.get("name")),
+        "source_type": _optional_text(answer.get("source_type")),
+        "portion_bucket": _optional_text(answer.get("portion_bucket")),
+        "quantity_display": _optional_text(answer.get("quantity_display")),
+        "approval_status": _optional_text(answer.get("approval_status")),
+        "raw_text": _optional_text(answer.get("raw_text")),
+    }
+    return {key: value for key, value in record.items() if value is not None}
+
+
+def _answers_by_segment_from_clarification_answers(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            key: value
+            for key, value in item.items()
+            if key not in {"approval_status", "question_id", "answer_type", "required", "choice_id", "value", "raw_text"}
+        }
+        for item in _confirmation_items_from_clarification_answers(state)
+    ]
+
+
+def _confirmation_items_from_clarification_answers(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    questions_by_id = {
+        str(key): dict(value)
+        for key, value in dict(state.get("questions_by_id") or {}).items()
+        if isinstance(value, Mapping)
+    }
+    answers_by_question_id = {
+        str(key): dict(value)
+        for key, value in dict(state.get("answers_by_question_id") or {}).items()
+        if isinstance(value, Mapping)
+    }
+    groups: dict[str, dict[str, Any]] = {}
+
+    for question in questions_by_id.values():
+        group_id = _optional_text(question.get("group_id")) or _optional_text(question.get("question_id")) or "group"
+        item = groups.setdefault(
+            group_id,
+            {
+                "group_id": group_id,
+                "primary_segment_id": _optional_text(question.get("primary_segment_id")),
+                "segment_id": _optional_text(question.get("primary_segment_id")) or _first_segment_id(question.get("segment_ids")),
+                "segment_ids": list(question.get("segment_ids") or []),
+                "name": _optional_text(question.get("label")),
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+            },
+        )
+        if _question_kind(question.get("question_kind")) == "APPROVAL" and item.get("approval_status") is None:
+            item["approval_status"] = "APPROVED"
+
+    for answer in answers_by_question_id.values():
+        group_id = _optional_text(answer.get("group_id")) or _optional_text(answer.get("question_id")) or "group"
+        item = groups.setdefault(group_id, {"group_id": group_id, "source_type": "HOME", "portion_bucket": "STANDARD"})
+        if answer.get("primary_segment_id") and not item.get("primary_segment_id"):
+            item["primary_segment_id"] = answer["primary_segment_id"]
+        if answer.get("primary_segment_id") and not item.get("segment_id"):
+            item["segment_id"] = answer["primary_segment_id"]
+        if isinstance(answer.get("segment_ids"), list) and not item.get("segment_ids"):
+            item["segment_ids"] = list(answer["segment_ids"])
+        question_kind = _question_kind(answer.get("question_kind"))
+        if question_kind == "SOURCE_ORIGIN" and answer.get("source_type"):
+            item["source_type"] = answer["source_type"]
+        elif question_kind == "QUANTITY":
+            if answer.get("portion_bucket"):
+                item["portion_bucket"] = answer["portion_bucket"]
+            if answer.get("quantity_display"):
+                item["quantity_display"] = answer["quantity_display"]
+        elif answer.get("name"):
+            item["name"] = answer["name"]
+        if answer.get("approval_status"):
+            item["approval_status"] = answer["approval_status"]
+
+    return [
+        {key: value for key, value in item.items() if value is not None}
+        for _, item in sorted(groups.items())
+        if item.get("segment_id") or item.get("primary_segment_id") or item.get("name")
+    ]
+
+
 def _question_with_approval_candidates(
     prompt_payload: Mapping[str, Any],
     *,
@@ -1303,6 +1766,7 @@ __all__ = [
     "final_resolution_from_confirmation",
     "finalize_confirmed_interview",
     "get_interview_roadmap",
+    "has_deterministic_question_state",
     "is_pinned_chat_update",
     "interview_transcript_from_state",
     "apply_interview_turn_result",

@@ -33,6 +33,20 @@ _GROUP_REQUIRED_FIELDS = (
     "question_examples",
     "top_3",
 )
+_CLARIFICATION_REQUIRED_FIELDS = (
+    "question_id",
+    "group_id",
+    "group_label",
+    "question_kind",
+    "question_focus",
+    "answer_type",
+    "required",
+    "segment_ids",
+    "primary_segment_id",
+    "choices",
+    "validation_hints",
+)
+_ALLOWED_ANSWER_TYPES = ("single_choice", "multi_choice", "free_text", "confirm")
 _INTERVIEW_STATES = {
     "PENDING_INTERVIEW",
     "PENDING_CHOICE",
@@ -79,6 +93,40 @@ def reasoning_response_format() -> dict[str, Any]:
         "source": {"type": "string"},
         "decision_rationale": {"type": "string"},
         "nutrition_impact": {"type": "number"},
+    }
+    clarification_properties = {
+        "question_id": {"type": "string"},
+        "group_id": {"type": "string"},
+        "group_label": {"type": "string"},
+        "question_kind": {"type": "string"},
+        "question_focus": {"type": "string"},
+        "answer_type": {
+            "type": "string",
+            "enum": list(_ALLOWED_ANSWER_TYPES),
+        },
+        "required": {"type": "boolean"},
+        "segment_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+        },
+        "primary_segment_id": {"type": "string"},
+        "choices": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "validation_hints": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["required"],
+            "properties": {
+                "required": {"type": "boolean"},
+                "min_choices": {"type": "integer"},
+                "max_choices": {"type": "integer"},
+                "min_length": {"type": "integer"},
+                "max_length": {"type": "integer"},
+            },
+        },
     }
     group_properties = {
         "group_id": {"type": "string"},
@@ -141,6 +189,7 @@ def reasoning_response_format() -> dict[str, Any]:
                     "segment_count",
                     "food_group_count",
                     "food_groups",
+                    "clarification_schema",
                 ],
                 "properties": {
                     "action": {
@@ -165,6 +214,15 @@ def reasoning_response_format() -> dict[str, Any]:
                             "additionalProperties": False,
                             "required": list(_GROUP_REQUIRED_FIELDS),
                             "properties": group_properties,
+                        },
+                    },
+                    "clarification_schema": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": list(_CLARIFICATION_REQUIRED_FIELDS),
+                            "properties": clarification_properties,
                         },
                     },
                 },
@@ -207,6 +265,20 @@ def _coerce_list_of_text(value: object, field: str) -> list[str]:
         if text:
             normalized.append(text)
     return normalized
+
+
+def _coerce_bool(value: object, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    raise TypeError(f"{field} must be a boolean")
 
 
 def _coerce_candidate_payload(candidate: Mapping[str, object], idx: int) -> dict[str, Any]:
@@ -310,6 +382,68 @@ def _coerce_segment_ids(value: object, *, primary_segment_id: str, fallback: str
     if unique_ids:
         return unique_ids
     return [primary_segment_id or fallback]
+
+
+def _coerce_validation_hints(value: object, *, required: bool) -> dict[str, int | bool]:
+    if not isinstance(value, Mapping):
+        value = {}
+    hints: dict[str, int | bool] = {"required": required}
+    for field in ("min_choices", "max_choices", "min_length", "max_length"):
+        raw_value = value.get(field)
+        if raw_value is None:
+            continue
+        if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+            raise TypeError(f"{field} must be an integer")
+        hints[field] = raw_value
+    return hints
+
+
+def _coerce_clarification_question(question: Mapping[str, object], idx: int) -> dict[str, Any]:
+    answer_type = _coerce_str(question.get("answer_type"), "answer_type") or "free_text"
+    if answer_type not in _ALLOWED_ANSWER_TYPES:
+        answer_type = "free_text"
+    required = _coerce_bool(question.get("required"), "required")
+    primary_segment_id = (
+        _coerce_str(question.get("primary_segment_id"), "primary_segment_id")
+        or f"segment-{idx + 1}"
+    )
+    group_id = _coerce_str(question.get("group_id"), "group_id") or f"group-{idx + 1}"
+    return {
+        "question_id": _coerce_str(question.get("question_id"), "question_id")
+        or f"{group_id}-{idx:03d}",
+        "group_id": group_id,
+        "group_label": _coerce_str(question.get("group_label"), "group_label") or group_id,
+        "question_kind": _coerce_str(question.get("question_kind"), "question_kind") or "DETAIL",
+        "question_focus": _coerce_str(question.get("question_focus"), "question_focus")
+        or "General clarification",
+        "answer_type": answer_type,
+        "required": required,
+        "segment_ids": _coerce_segment_ids(
+            question.get("segment_ids"),
+            primary_segment_id=primary_segment_id,
+            fallback=primary_segment_id,
+        ),
+        "primary_segment_id": primary_segment_id,
+        "choices": _coerce_list_of_text(question.get("choices"), "choices"),
+        "validation_hints": _coerce_validation_hints(
+            question.get("validation_hints"),
+            required=required,
+        ),
+    }
+
+
+def _coerce_clarification_schema(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            normalized.append(_coerce_clarification_question(item, index))
+        except TypeError:
+            continue
+    return normalized
 
 
 def _normalize_group_state(action: str, state: str) -> str:
@@ -443,6 +577,7 @@ def coerce_reasoning_response(payload: Mapping[str, object] | object | None) -> 
         ]
     else:
         food_groups = _legacy_group_from_root(payload)
+    clarification_schema = _coerce_clarification_schema(payload.get("clarification_schema"))
 
     raw_segment_count = payload.get("segment_count")
     if raw_segment_count is not None:
@@ -471,6 +606,7 @@ def coerce_reasoning_response(payload: Mapping[str, object] | object | None) -> 
             "segment_count": segment_count,
             "food_group_count": 0,
             "food_groups": [],
+            "clarification_schema": [],
             "top_3": [],
         }
 
@@ -507,6 +643,7 @@ def coerce_reasoning_response(payload: Mapping[str, object] | object | None) -> 
         "segment_count": segment_count,
         "food_group_count": reported_food_group_count,
         "food_groups": food_groups,
+        "clarification_schema": clarification_schema,
         "top_3": top_3,
     }
 

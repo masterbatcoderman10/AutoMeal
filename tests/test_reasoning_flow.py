@@ -467,6 +467,91 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(source_origin_questions), 1)
         self.assertEqual(source_origin_questions[0]["group_id"], "group-wrap")
 
+    async def test_run_reasoning_request_persists_group_owned_clarification_actions_before_telegram_mapping(self) -> None:
+        from app.services import reasoning_service
+
+        meal = type("Meal", (), {"id": "meal-group-contract", "image_url": None})()
+        segment = type(
+            "MealSegment",
+            (),
+            {
+                "id": "segment-bread",
+                "label": "packaged flatbread",
+                "bounding_box": [0.1, 0.2, 0.5, 0.7],
+                "cropped_image_url": None,
+            },
+        )()
+        candidate = _candidate_payload()
+        candidate["label"] = "Packaged wrap flatbread"
+        candidate["candidate_id"] = "candidate-wrap"
+        candidate["identity_confidence"] = 0.99
+        candidate["source"] = "visual_reasoning"
+        candidate["missing_evidence"] = []
+        response_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-group-contract-run",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-wrap",
+                    "group_label": "Packaged Flatbread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "candidate-wrap",
+                    "question_kind": "none",
+                    "question_focus": "none",
+                    "question_examples": [],
+                    "visual_evidence": ["visible wrapper"],
+                    "missing_evidence": [],
+                    "decision_rationale": "identity is visually strong but still needs affirmation and source",
+                    "gate_reason": "",
+                    "top_3": [candidate, _candidate_payload(), _candidate_payload()],
+                }
+            ],
+            "decision_rationale": "preserve the full contract before Telegram mapping",
+            "gate_reason": "",
+        }
+        llm_client = type("LLM", (), {})()
+        llm_client.chat_completion = AsyncMock(
+            return_value={"choices": [{"message": {"content": json.dumps(response_payload)}}]}
+        )
+        settings = type(
+            "Settings",
+            (),
+            {
+                "REASONING_MODEL": "reasoning-primary",
+                "REASONING_FALLBACK_MODEL": "reasoning-fallback",
+                "REASONING_PARSER_MODEL": "parser-model",
+                "REASONING_PARSER_FALLBACK_MODEL": "parser-fallback-model",
+                "REASONING_MATCH_THRESHOLD": 0.9,
+            },
+        )()
+
+        with patch.object(reasoning_service.tracing_service, "maybe_start_trace", return_value=nullcontext(None)):
+            result, _trace = await reasoning_service.run_reasoning_request(
+                llm_client=llm_client,
+                meal_id=meal.id,
+                meal=meal,
+                match_results=[(segment, type("Result", (), {"top_candidates": [candidate]})())],
+                settings=settings,
+            )
+
+        group = result["food_groups"][0]
+        self.assertIn("clarification_needed", group)
+        self.assertTrue(group["clarification_needed"])
+        self.assertEqual(
+            [action["type"] for action in group["clarification_actions"]],
+            ["AFFIRMATION", "SOURCE_ORIGIN"],
+        )
+        self.assertEqual(group["clarification"]["type"], "AFFIRMATION")
+        self.assertIn("user_prompt", group["clarification_actions"][0])
+        self.assertIn("validation_hints", group["clarification_actions"][0])
+        self.assertEqual(group["clarification_actions"][1]["type"], "SOURCE_ORIGIN")
+
     async def test_reasoning_trace_captures_exact_model_input_and_output(self) -> None:
         from app.services import reasoning_service
 

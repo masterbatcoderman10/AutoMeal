@@ -466,7 +466,7 @@ class ReasoningGateTests(unittest.TestCase):
         result = _run_gate(payload)
 
         self.assertIn(result["meal_state"], INTERVIEW_STATES)
-        self.assertEqual(result["food_groups"][0]["group_action"], "ASK_CHOICE")
+        self.assertEqual(result["food_groups"][0]["group_action"], "AFFIRMATION_REQUIRED")
         self.assertIn("visual-only", result["food_groups"][0]["gate_reason"])
 
     def test_gate_adds_derived_question_when_source_schema_omits_gated_group(self) -> None:
@@ -561,8 +561,8 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertIn("group_bread", question_group_ids)
         self.assertIn("group_chicken", question_group_ids)
         chicken_question = next(question for question in questions if question["group_id"] == "group_chicken")
-        self.assertEqual(chicken_question["question_kind"], "CHOICE")
-        self.assertIn("Chicken Drumstick Curry", chicken_question["choices"])
+        self.assertEqual(chicken_question["question_kind"], "AFFIRMATION")
+        self.assertEqual(chicken_question["choices"], ["Yes", "No"])
 
     def test_source_origin_question_only_for_ambiguous_material_foods(self) -> None:
         payload = {
@@ -773,6 +773,228 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertEqual(groups["group-pita"]["group_state"], "READY_TO_WRITE")
         self.assertIn(
             groups["group-curry"]["group_action"],
-            {"ASK_CHOICE", "ASK_QUANTITY", "INTERVIEW"},
+            {"ASK_CHOICE", "ASK_QUANTITY", "INTERVIEW", "IDENTITY_CLARIFICATION_REQUIRED"},
         )
         self.assertEqual(groups["group-curry"]["group_state"], "PENDING_INTERVIEW")
+
+    def test_identity_clarification_actions_use_ranked_top_three_and_contract_owned_other(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-identity-actions",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "bread candidates are visually close",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "Flatbread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "candidate-khubz",
+                    "visual_evidence": ["round flatbread"],
+                    "missing_evidence": [],
+                    "decision_rationale": "needs ranked identity confirmation",
+                    "gate_reason": "",
+                    "question_kind": "identity",
+                    "question_focus": "bread type",
+                    "question_examples": [],
+                    "top_3": [
+                        _candidate_payload(candidate_id="candidate-khubz", similarity=0.94, label="Brown khubz"),
+                        _candidate_payload(candidate_id="candidate-pita", similarity=0.93, label="Whole wheat pita bread"),
+                        _candidate_payload(candidate_id="candidate-roti", similarity=0.92, label="Tandoori roti"),
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        group = result["food_groups"][0]
+        self.assertEqual(group["group_action"], "IDENTITY_CLARIFICATION_REQUIRED")
+        self.assertTrue(group["clarification_needed"])
+        self.assertEqual([action["type"] for action in group["clarification_actions"]], ["CHOICE"])
+        self.assertEqual(
+            [choice["value"] for choice in group["clarification_actions"][0]["choices"]],
+            ["candidate-khubz", "candidate-pita", "candidate-roti", "OTHER"],
+        )
+        self.assertEqual(
+            [choice["quick_prompt"] for choice in group["clarification_actions"][0]["choices"][:3]],
+            ["Brown khubz", "Whole wheat pita bread", "Tandoori roti"],
+        )
+
+    def test_visual_only_high_confidence_requires_affirmation_but_learned_match_auto_confirms(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-affirmation-routing",
+            "food_group_count": 2,
+            "segment_count": 2,
+            "decision_rationale": "split learned matches from visual-only confidence",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "Flatbread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "candidate-pita",
+                    "visual_evidence": ["flatbread"],
+                    "missing_evidence": [],
+                    "decision_rationale": "visual-only top candidate looks like pita",
+                    "gate_reason": "",
+                    "question_kind": "none",
+                    "question_focus": "none",
+                    "question_examples": [],
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="candidate-pita",
+                            similarity=0.99,
+                            label="Whole wheat pita bread",
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-khubz",
+                            similarity=0.81,
+                            label="Brown khubz",
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-flatbread",
+                            similarity=0.7,
+                            label="Flatbread",
+                            source="visual_reasoning",
+                        ),
+                    ],
+                },
+                {
+                    "group_id": "group-curry",
+                    "group_label": "Egg Curry",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-curry",
+                    "segment_ids": ["segment-curry"],
+                    "selected_candidate_id": "candidate-egg-curry",
+                    "visual_evidence": ["egg curry"],
+                    "missing_evidence": [],
+                    "decision_rationale": "learned match is strong",
+                    "gate_reason": "",
+                    "question_kind": "none",
+                    "question_focus": "none",
+                    "question_examples": [],
+                    "top_3": [
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-egg-curry",
+                                similarity=0.98,
+                                label="Egg Curry with Bottle Gourd",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-item-egg-curry",
+                        },
+                        _candidate_payload(
+                            candidate_id="candidate-chicken-curry",
+                            similarity=0.7,
+                            label="Chicken Curry",
+                            source="vector_match",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-mixed-curry",
+                            similarity=0.6,
+                            label="Mixed Curry",
+                            source="vector_match",
+                        ),
+                    ],
+                },
+            ],
+        }
+
+        result = _run_gate(payload)
+        groups = {group["group_id"]: group for group in result["food_groups"]}
+
+        self.assertEqual(groups["group-bread"]["group_action"], "AFFIRMATION_REQUIRED")
+        self.assertEqual(
+            [action["type"] for action in groups["group-bread"]["clarification_actions"]],
+            ["AFFIRMATION"],
+        )
+        self.assertEqual(groups["group-curry"]["group_action"], "AUTO_CONFIRM_LEARNED")
+        self.assertFalse(groups["group-curry"]["clarification_needed"])
+        self.assertEqual(groups["group-curry"]["clarification_actions"], [])
+
+    def test_source_origin_is_reasoning_owned_and_ordered_after_affirmation(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-source-origin-actions",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "packaged-looking bread still needs source clarification",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "Packaged Flatbread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "candidate-wrap",
+                    "visual_evidence": ["wrapped flatbread in branded sleeve"],
+                    "missing_evidence": [],
+                    "decision_rationale": "looks like a learned bread but source changes nutrition grounding",
+                    "gate_reason": "",
+                    "question_kind": "none",
+                    "question_focus": "none",
+                    "question_examples": [],
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="candidate-wrap",
+                            similarity=0.99,
+                            label="Packaged wrap flatbread",
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-pita",
+                            similarity=0.7,
+                            label="Whole wheat pita bread",
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-khubz",
+                            similarity=0.65,
+                            label="Brown khubz",
+                            source="visual_reasoning",
+                        ),
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        group = result["food_groups"][0]
+        self.assertEqual(group["group_action"], "AFFIRMATION_REQUIRED")
+        self.assertEqual(
+            [action["type"] for action in group["clarification_actions"]],
+            ["AFFIRMATION", "SOURCE_ORIGIN"],
+        )
+        source_origin = group["clarification_actions"][1]
+        self.assertEqual(
+            [choice["value"] for choice in source_origin["choices"]],
+            [
+                "HOME_COOKED",
+                "STORE_BOUGHT_PREPARED",
+                "PACKAGED_BRANDED",
+                "RESTAURANT",
+                "UNKNOWN",
+            ],
+        )
+        self.assertEqual(
+            [choice["label"] for choice in source_origin["choices"]],
+            ["homemade", "store bought", "packaged", "restaurant", "not sure"],
+        )

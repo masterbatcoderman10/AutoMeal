@@ -24,12 +24,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.config import get_settings
-from app.models import FoodItem, FoodVisual, MealLog, MealSegment, MealProcessingStatus
-from app.services import embedding_service, interview_service, matching_service, reasoning_service
-from app.services.image_service import HEIC_CONTENT_TYPES, compute_hash, save_segment_crop, transcode_to_jpeg
-from app.services.llm_client import get_llm_client
-from app.services.vision_service import (
+from app.config import get_settings  # noqa: E402
+from app.models import FoodItem, FoodVisual, MealLog, MealSegment, MealProcessingStatus  # noqa: E402
+from app.services import embedding_service, interview_service, matching_service, reasoning_service  # noqa: E402
+from app.services.image_service import HEIC_CONTENT_TYPES, compute_hash, save_segment_crop, transcode_to_jpeg  # noqa: E402
+from app.services.llm_client import get_llm_client  # noqa: E402
+from app.services.vision_service import (  # noqa: E402
     dedupe_overlapping_segments,
     detect_food_photo,
     segment_food_photo_with_retry,

@@ -304,3 +304,61 @@ class ReasoningContractTests(unittest.TestCase):
                 "confirm",
             },
         )
+
+    def test_grouped_reasoning_migrates_root_clarification_into_group_contract(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "ASK_CHOICE",
+                "meal_state": "PENDING_INTERVIEW",
+                "trace_id": "trace-group-contract",
+                "decision_rationale": "bread identity still needs confirmation",
+                "gate_reason": "top candidates are too close",
+                "segment_count": 1,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_id": "group-bread",
+                        "group_label": "Flatbread",
+                        "group_action": "ASK_CHOICE",
+                        "group_state": "PENDING_INTERVIEW",
+                        "primary_segment_id": "segment-bread",
+                        "segment_ids": ["segment-bread"],
+                        "selected_candidate_id": "candidate-khubz",
+                        "visual_evidence": ["flatbread"],
+                        "missing_evidence": ["bread subtype"],
+                        "decision_rationale": "flatbread candidates are ambiguous",
+                        "gate_reason": "bread subtype required",
+                        "top_3": [_candidate_payload(), _candidate_payload(), _candidate_payload()],
+                    }
+                ],
+                "clarification_schema": [
+                    {
+                        "question_id": "group-bread:identity",
+                        "group_id": "group-bread",
+                        "group_label": "Flatbread",
+                        "question_kind": "identity",
+                        "question_focus": "bread type",
+                        "answer_type": "single_choice",
+                        "required": True,
+                        "segment_ids": ["segment-bread"],
+                        "primary_segment_id": "segment-bread",
+                        "choices": ["Brown khubz", "Whole wheat pita bread", "Tandoori roti"],
+                        "validation_hints": {"required": True, "min_choices": 1, "max_choices": 1},
+                    }
+                ],
+            }
+        )
+
+        group = grouped["food_groups"][0]
+        self.assertTrue(group["clarification_needed"])
+        self.assertEqual(
+            [action["type"] for action in group["clarification_actions"]],
+            ["CHOICE"],
+        )
+        self.assertEqual(group["clarification"]["question_id"], "group-bread:identity")
+        self.assertEqual(
+            [choice["label"] for choice in group["clarification_actions"][0]["choices"]],
+            ["Brown khubz", "Whole wheat pita bread", "Tandoori roti"],
+        )

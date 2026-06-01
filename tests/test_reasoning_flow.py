@@ -385,6 +385,88 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["meal_state"], "READY_TO_WRITE")
         self.assertIn(result["action"], {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE"})
 
+    async def test_run_reasoning_request_adds_deterministic_clarification_schema_for_reviewable_groups(self) -> None:
+        from app.services import reasoning_service
+
+        meal = type("Meal", (), {"id": "meal-clarify", "image_url": None})()
+        segment = type(
+            "MealSegment",
+            (),
+            {
+                "id": "segment-wrap",
+                "label": "wrapped flatbread",
+                "bounding_box": [0.1, 0.2, 0.5, 0.7],
+                "cropped_image_url": None,
+            },
+        )()
+        candidate = _candidate_payload()
+        candidate["label"] = "restaurant wrap flatbread"
+        candidate["candidate_id"] = "candidate-wrap"
+        candidate["identity_confidence"] = 0.74
+        candidate["missing_evidence"] = ["bread type"]
+        response_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-clarify-run",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-wrap",
+                    "group_label": "restaurant wrap",
+                    "group_action": "ASK_CHOICE",
+                    "group_state": "PENDING_INTERVIEW",
+                    "primary_segment_id": "segment-wrap",
+                    "segment_ids": ["segment-wrap"],
+                    "selected_candidate_id": "candidate-wrap",
+                    "question_kind": "SOURCE_ORIGIN",
+                    "question_focus": "Where did this food come from?",
+                    "question_examples": ["home cooked", "packaged", "restaurant"],
+                    "visual_evidence": ["visible wrapper"],
+                    "missing_evidence": ["source channel"],
+                    "decision_rationale": "source ambiguity impacts grounding path",
+                    "gate_reason": "material source origin ambiguity",
+                    "top_3": [_candidate_payload()],
+                }
+            ],
+            "decision_rationale": "source ambiguity remains",
+            "gate_reason": "needs source clarification",
+        }
+        llm_client = type("LLM", (), {})()
+        llm_client.chat_completion = AsyncMock(return_value={"choices": [{"message": {"content": json.dumps(response_payload)}}]})
+        settings = type(
+            "Settings",
+            (),
+            {
+                "REASONING_MODEL": "reasoning-primary",
+                "REASONING_FALLBACK_MODEL": "reasoning-fallback",
+                "REASONING_PARSER_MODEL": "parser-model",
+                "REASONING_PARSER_FALLBACK_MODEL": "parser-fallback-model",
+                "REASONING_MATCH_THRESHOLD": 0.9,
+            },
+        )()
+
+        with patch.object(reasoning_service.tracing_service, "maybe_start_trace", return_value=nullcontext(None)):
+            result, _trace = await reasoning_service.run_reasoning_request(
+                llm_client=llm_client,
+                meal_id=meal.id,
+                meal=meal,
+                match_results=[(segment, type("Result", (), {"top_candidates": [candidate]})())],
+                settings=settings,
+            )
+
+        self.assertEqual(result["meal_state"], "PENDING_INTERVIEW")
+        self.assertIn("clarification_schema", result)
+        self.assertIsInstance(result["clarification_schema"], list)
+        self.assertGreaterEqual(len(result["clarification_schema"]), 1)
+        source_origin_questions = [
+            question
+            for question in result["clarification_schema"]
+            if question["question_kind"] == "SOURCE_ORIGIN"
+        ]
+        self.assertEqual(len(source_origin_questions), 1)
+        self.assertEqual(source_origin_questions[0]["group_id"], "group-wrap")
+
     async def test_reasoning_trace_captures_exact_model_input_and_output(self) -> None:
         from app.services import reasoning_service
 

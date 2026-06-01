@@ -270,3 +270,37 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertEqual(group["question_kind"], "DETAIL")
         self.assertEqual(group["question_focus"], "vegetable inside egg curry")
         self.assertEqual(group["question_examples"], ["egg curry with bottle gourd"])
+
+    def test_reasoning_response_format_contains_strict_clarification_schema(self) -> None:
+        from app.services.reasoning_schema import reasoning_response_format
+
+        response_format = reasoning_response_format()
+        schema = response_format["json_schema"]["schema"]
+        self.assertIn("clarification_schema", schema["properties"])
+        self.assertIn("clarification_schema", schema["required"])
+
+        clarification = schema["properties"]["clarification_schema"]["items"]
+        self.assertEqual(clarification["type"], "object")
+        self.assertFalse(clarification["additionalProperties"])
+        self.assertIn("question_id", clarification["required"])
+        self.assertIn("group_id", clarification["required"])
+        self.assertIn("group_label", clarification["required"])
+        self.assertIn("question_kind", clarification["required"])
+        self.assertIn("question_focus", clarification["required"])
+        self.assertIn("answer_type", clarification["required"])
+        self.assertIn("segment_ids", clarification["required"])
+        self.assertIn("primary_segment_id", clarification["required"])
+        self.assertIn("choices", clarification["required"])
+        self.assertIn("validation_hints", clarification["required"])
+        self.assertIn("required", clarification["required"])
+
+        answer_type_enum = set(clarification["properties"]["answer_type"]["enum"])
+        self.assertEqual(
+            answer_type_enum,
+            {
+                "single_choice",
+                "multi_choice",
+                "free_text",
+                "confirm",
+            },
+        )

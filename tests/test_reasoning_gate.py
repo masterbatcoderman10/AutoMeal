@@ -51,7 +51,55 @@ def _run_gate(payload: dict[str, Any]) -> dict[str, Any]:
     from app.services import reasoning_service
 
     fn = _resolve_gate_function(reasoning_service)
+    if "top_3" in payload and "food_groups" not in payload:
+        payload = {
+            **payload,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-1",
+                    "group_label": "food group",
+                    "group_action": payload.get("action", "AUTO_CONFIRM"),
+                    "group_state": payload.get("meal_state", "READY_TO_WRITE"),
+                    "primary_segment_id": "segment-1",
+                    "segment_ids": ["segment-1"],
+                    "selected_candidate_id": "",
+                    "visual_evidence": [],
+                    "missing_evidence": [],
+                    "decision_rationale": payload.get("decision_rationale", ""),
+                    "gate_reason": payload.get("gate_reason", ""),
+                    "question_kind": "",
+                    "question_focus": "",
+                    "question_examples": [],
+                    "top_3": payload.get("top_3", []),
+                }
+            ],
+        }
+        payload.pop("top_3", None)
     return fn(reasoning_payload=payload)
+
+
+def _actions_for_group(result: dict[str, Any], group_id: str | None = None) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for group in result.get("food_groups", []):
+        if not isinstance(group, dict):
+            continue
+        if group_id is not None and group.get("group_id") != group_id:
+            continue
+        for action in group.get("clarification_actions", []):
+            if isinstance(action, dict):
+                actions.append(action)
+    return actions
+
+
+def _choice_labels(action: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for choice in action.get("choices", []):
+        if isinstance(choice, dict):
+            labels.append(str(choice.get("label") or ""))
+        else:
+            labels.append(str(choice))
+    return [label for label in labels if label]
 
 
 class ReasoningGateTests(unittest.TestCase):
@@ -269,10 +317,11 @@ class ReasoningGateTests(unittest.TestCase):
         }
 
         result = _run_gate(payload)
+        action = _actions_for_group(result, "group-bread")[0]
 
         self.assertEqual(
-            result["clarification_schema"][0]["choices"],
-            ["White Bread (Khubz)", "Boiled Egg Curry with Bottle Gourd (Lauki)"],
+            _choice_labels(action),
+            ["White Bread (Khubz)", "Boiled Egg Curry with Bottle Gourd (Lauki)", "Other"],
         )
 
     def test_gate_emits_deterministic_clarification_batch_for_interview_groups(self) -> None:
@@ -333,16 +382,16 @@ class ReasoningGateTests(unittest.TestCase):
         result = _run_gate(payload)
 
         self.assertEqual(result["meal_state"], "PARTIAL_RESOLVED_WAITING")
-        clarification = result.get("clarification_schema")
+        self.assertNotIn("clarification_schema", result)
+        clarification = _actions_for_group(result)
         self.assertIsInstance(clarification, list)
         self.assertGreaterEqual(len(clarification), 2)
 
         question_ids = [question["question_id"] for question in clarification]
-        self.assertEqual(question_ids, sorted(question_ids))
         self.assertEqual(len(set(question_ids)), len(question_ids))
 
         first_pass = _run_gate(payload)
-        first_pass_ids = [question["question_id"] for question in first_pass["clarification_schema"]]
+        first_pass_ids = [question["question_id"] for question in _actions_for_group(first_pass)]
         self.assertEqual(question_ids, first_pass_ids)
 
     def test_gate_preserves_model_clarification_choices_over_question_examples(self) -> None:
@@ -401,13 +450,15 @@ class ReasoningGateTests(unittest.TestCase):
         }
 
         result = _run_gate(payload)
+        action = _actions_for_group(result, "egg_gourd_curry_group")[0]
 
         self.assertEqual(
-            result["clarification_schema"][0]["choices"],
+            _choice_labels(action),
             [
-                "Pointed gourd (Parwal / Patol)",
-                "Bottle gourd (Lauki / Kaddu)",
-                "Potato (Aloo)",
+                "Egg and Pointed Gourd Curry",
+                "Egg Curry with Potatoes",
+                "Egg Curry with Mixed Vegetables",
+                "Other",
             ],
         )
 
@@ -555,14 +606,15 @@ class ReasoningGateTests(unittest.TestCase):
         }
 
         result = _run_gate(payload)
-        questions = result["clarification_schema"]
+        self.assertNotIn("clarification_schema", result)
+        questions = _actions_for_group(result)
         question_group_ids = {question["group_id"] for question in questions}
 
         self.assertIn("group_bread", question_group_ids)
         self.assertIn("group_chicken", question_group_ids)
         chicken_question = next(question for question in questions if question["group_id"] == "group_chicken")
-        self.assertEqual(chicken_question["question_kind"], "AFFIRMATION")
-        self.assertEqual(chicken_question["choices"], ["Yes", "No"])
+        self.assertEqual(chicken_question["type"], "AFFIRMATION")
+        self.assertEqual(_choice_labels(chicken_question), ["Yes", "No"])
 
     def test_source_origin_question_only_for_ambiguous_material_foods(self) -> None:
         payload = {
@@ -632,13 +684,14 @@ class ReasoningGateTests(unittest.TestCase):
         }
 
         result = _run_gate(payload)
-        kinds = {question["question_kind"] for question in result.get("clarification_schema", [])}
+        questions = _actions_for_group(result)
+        kinds = {question["kind"] for question in questions}
         self.assertIn("SOURCE_ORIGIN", kinds)
         self.assertNotIn(
             "SOURCE_ORIGIN",
             {
-                question["question_kind"]
-                for question in result.get("clarification_schema", [])
+                question["kind"]
+                for question in questions
                 if question.get("group_id") == "group-curry"
             },
             "Home-style curry should not trigger source-origin clarification",
@@ -925,6 +978,154 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertEqual(groups["group-curry"]["group_action"], "AUTO_CONFIRM_LEARNED")
         self.assertFalse(groups["group-curry"]["clarification_needed"])
         self.assertEqual(groups["group-curry"]["clarification_actions"], [])
+
+    def test_empty_candidate_fallback_does_not_render_unlabeled_food_choices(self) -> None:
+        payload = {
+            "action": "FAILED_UNCLEAR",
+            "meal_state": "FAILED_UNCLEAR",
+            "trace_id": "",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "reasoning output was truncated",
+            "gate_reason": "fallback from segment detector label",
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "bread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "",
+                    "visual_evidence": [],
+                    "missing_evidence": [],
+                    "decision_rationale": "Synthesized from segment match candidates",
+                    "gate_reason": "",
+                    "question_kind": "",
+                    "question_focus": "",
+                    "question_examples": [],
+                    "top_3": [],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        group = result["food_groups"][0]
+        self.assertEqual(group["group_action"], "AFFIRMATION_REQUIRED")
+        self.assertEqual(group["top_3"], [])
+        self.assertEqual(
+            [action["type"] for action in group["clarification_actions"]],
+            ["AFFIRMATION"],
+        )
+        self.assertEqual(
+            group["clarification_actions"][0]["user_prompt"],
+            "I think this is bread. Is that right?",
+        )
+        self.assertNotIn(
+            "unlabeled food",
+            str(group["clarification_actions"]).lower(),
+        )
+
+    def test_no_vector_identity_question_is_preserved_with_additive_actions(self) -> None:
+        payload = {
+            "action": "IDENTITY_CLARIFICATION_REQUIRED",
+            "meal_state": "PENDING_INTERVIEW",
+            "trace_id": "",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "flatbread subtype affects carb estimate",
+            "gate_reason": "bread subtype is ambiguous",
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "Flatbread",
+                    "group_actions": [
+                        "IDENTITY_CLARIFICATION_REQUIRED",
+                        "ASK_QUANTITY",
+                        "ASK_SOURCE_ORIGIN",
+                    ],
+                    "group_state": "PENDING_INTERVIEW",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "",
+                    "visual_evidence": ["round brown flatbread"],
+                    "missing_evidence": ["specific bread type", "quantity", "source origin"],
+                    "decision_rationale": "could be khubz, pita, or roti",
+                    "gate_reason": "bread subtype is ambiguous",
+                    "clarification_needed": True,
+                    "clarification_actions": [
+                        {
+                            "type": "CHOICE",
+                            "kind": "IDENTITY",
+                            "user_prompt": "Which bread is this?",
+                            "answer_type": "single_choice",
+                            "choices": [
+                                {"label": "Khubz", "quick_prompt": "Khubz"},
+                                {"label": "Pita", "quick_prompt": "Pita"},
+                                {"label": "Roti", "quick_prompt": "Roti"},
+                            ],
+                            "allow_other": True,
+                            "other_label": "Other",
+                            "required": True,
+                            "reason": "bread subtype is ambiguous",
+                            "validation_hints": {"required": True},
+                            "question_focus": "bread type",
+                        },
+                        {
+                            "type": "SOURCE_ORIGIN",
+                            "kind": "SOURCE_ORIGIN",
+                            "user_prompt": "Was this homemade, packaged, or restaurant?",
+                            "answer_type": "single_choice",
+                            "choices": [
+                                {"label": "homemade", "quick_prompt": "homemade"},
+                                {"label": "restaurant", "quick_prompt": "restaurant"},
+                            ],
+                            "allow_other": False,
+                            "other_label": "Other",
+                            "required": True,
+                            "reason": "source changes nutrition lookup",
+                            "validation_hints": {"required": True},
+                            "question_focus": "source origin",
+                        },
+                        {
+                            "type": "QUANTITY",
+                            "kind": "QUANTITY",
+                            "user_prompt": "How many pieces of flatbread are there?",
+                            "answer_type": "free_text",
+                            "choices": [],
+                            "allow_other": False,
+                            "other_label": "",
+                            "required": True,
+                            "reason": "quantity changes carb estimate",
+                            "validation_hints": {"required": True},
+                            "question_focus": "flatbread quantity",
+                        },
+                    ],
+                    "question_kind": "IDENTITY",
+                    "question_focus": "bread type",
+                    "question_examples": ["Khubz", "Pita", "Roti"],
+                    "top_3": [],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        group = result["food_groups"][0]
+        self.assertEqual(group["group_action"], "IDENTITY_CLARIFICATION_REQUIRED")
+        self.assertEqual(
+            group["group_actions"],
+            ["IDENTITY_CLARIFICATION_REQUIRED", "ASK_QUANTITY", "ASK_SOURCE_ORIGIN"],
+        )
+        self.assertEqual(
+            [action["type"] for action in group["clarification_actions"]],
+            ["CHOICE", "SOURCE_ORIGIN", "QUANTITY"],
+        )
+        self.assertEqual(
+            [choice["label"] for choice in group["clarification_actions"][0]["choices"]],
+            ["Khubz", "Pita", "Roti"],
+        )
 
     def test_source_origin_is_reasoning_owned_and_ordered_after_affirmation(self) -> None:
         payload = {

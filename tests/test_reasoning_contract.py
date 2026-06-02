@@ -21,7 +21,7 @@ def _candidate_payload() -> dict[str, Any]:
 
 
 class ReasoningContractTests(unittest.TestCase):
-    def test_reasoning_response_format_is_strict_and_action_is_open_string(self) -> None:
+    def test_reasoning_response_format_is_strict_and_actions_are_enumerated(self) -> None:
         from app.services.reasoning_schema import reasoning_response_format
 
         response_format = reasoning_response_format()
@@ -39,35 +39,31 @@ class ReasoningContractTests(unittest.TestCase):
         group_schema = food_group_schema["items"]
         self.assertEqual(group_schema["type"], "object")
         self.assertFalse(group_schema["additionalProperties"])
-        self.assertIn("group_id", group_schema["required"])
-        self.assertIn("primary_segment_id", group_schema["required"])
-        self.assertIn("segment_ids", group_schema["required"])
-        self.assertIn("top_3", group_schema["required"])
-
-        top_three_schema = group_schema["properties"]["top_3"]
-        self.assertEqual(top_three_schema["type"], "array")
-        self.assertEqual(top_three_schema["minItems"], 3)
-        self.assertEqual(top_three_schema["maxItems"], 3)
-        self.assertFalse(top_three_schema["additionalItems"])
-
-        candidate_schema = top_three_schema["items"]
-        self.assertEqual(candidate_schema["type"], "object")
-        self.assertFalse(candidate_schema["additionalProperties"])
-        self.assertIn("items", candidate_schema["properties"]["visual_evidence"])
-        self.assertIn("items", candidate_schema["properties"]["missing_evidence"])
-        self.assertEqual(
-            candidate_schema["properties"]["visual_evidence"]["items"]["type"],
-            "string",
-        )
-        self.assertEqual(
-            candidate_schema["properties"]["missing_evidence"]["items"]["type"],
-            "string",
-        )
+        self.assertNotIn("trace_id", schema["properties"])
+        self.assertNotIn("group_id", group_schema["properties"])
+        self.assertNotIn("primary_segment_id", group_schema["properties"])
+        self.assertNotIn("segment_ids", group_schema["properties"])
+        self.assertNotIn("selected_candidate_id", group_schema["properties"])
+        self.assertNotIn("top_3", group_schema["properties"])
+        self.assertIn("segment_indexes", group_schema["required"])
 
         action_schema = schema["properties"]["action"]
         self.assertEqual(action_schema["type"], "string")
-        self.assertNotIn("enum", action_schema)
+        self.assertIn("enum", action_schema)
+        self.assertNotIn("INTERVIEW_USER", action_schema["enum"])
+        self.assertNotIn("INTERVIEW", action_schema["enum"])
+        self.assertIn("AFFIRMATION_REQUIRED", action_schema["enum"])
         self.assertNotIn("const", action_schema)
+        self.assertNotIn("group_action", group_schema["properties"])
+        group_actions_schema = group_schema["properties"]["group_actions"]
+        self.assertEqual(group_actions_schema["type"], "array")
+        self.assertEqual(action_schema["enum"], group_actions_schema["items"]["enum"])
+        self.assertNotIn("INTERVIEW_USER", group_actions_schema["items"]["enum"])
+        self.assertIn("ASK_SOURCE_ORIGIN", group_actions_schema["items"]["enum"])
+        question_kind_schema = group_schema["properties"]["question_kind"]
+        self.assertIn("enum", question_kind_schema)
+        self.assertIn("IDENTITY", question_kind_schema["enum"])
+        self.assertIn("NONE", question_kind_schema["enum"])
 
         meal_state_schema = schema["properties"]["meal_state"]
         self.assertEqual(
@@ -93,29 +89,27 @@ class ReasoningContractTests(unittest.TestCase):
         group_schema = schema["properties"]["food_groups"]["items"]
         self.assertEqual(set(group_schema["required"]), set(group_schema["properties"]))
 
-        candidate_schema = group_schema["properties"]["top_3"]["items"]
-        self.assertEqual(set(candidate_schema["required"]), set(candidate_schema["properties"]))
-        self.assertIn("nutrition_impact", candidate_schema["required"])
+        action_schema = group_schema["properties"]["clarification_actions"]["items"]
+        self.assertEqual(set(action_schema["required"]), set(action_schema["properties"]))
+        choice_schema = action_schema["properties"]["choices"]["items"]
+        self.assertEqual(set(choice_schema["required"]), set(choice_schema["properties"]))
 
     def test_reasoning_contract_requires_evidence_and_rationale_fields(self) -> None:
         from app.services.reasoning_schema import reasoning_response_format
 
         response_format = reasoning_response_format()
-        candidate_schema = response_format["json_schema"]["schema"]["properties"]["food_groups"]["items"]["properties"]["top_3"]["items"]
-        required_fields = set(candidate_schema["required"])
+        group_schema = response_format["json_schema"]["schema"]["properties"]["food_groups"]["items"]
+        required_fields = set(group_schema["required"])
 
         expected_fields = {
-            "candidate_id",
-            "label",
-            "identity_confidence",
-            "quantity_confidence",
-            "match_consistency_confidence",
+            "group_label",
+            "group_actions",
+            "group_state",
+            "segment_indexes",
             "visual_evidence",
             "missing_evidence",
-            "specificity",
-            "nutrition_relevance",
-            "source",
             "decision_rationale",
+            "gate_reason",
         }
         for field in expected_fields:
             self.assertIn(field, required_fields)
@@ -155,7 +149,7 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertEqual(coerced["meal_state"], "NEEDS_SCHEMA_REVIEW")
         self.assertIn("action", coerced["decision_rationale"].lower())
 
-    def test_top_three_payload_preserves_open_action_and_missing_evidence(self) -> None:
+    def test_top_three_payload_preserves_allowed_action_and_missing_evidence(self) -> None:
         from app.services.reasoning_schema import coerce_reasoning_response
 
         payload = {
@@ -214,6 +208,7 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertIn("food_groups", schema["required"])
         self.assertIn("food_group_count", schema["required"])
         self.assertNotIn("top_3", schema["properties"])
+        self.assertNotIn("clarification_schema", schema["properties"])
         group_schema = schema["properties"]["food_groups"]["items"]
         self.assertIn("question_kind", group_schema["required"])
         self.assertIn("question_focus", group_schema["required"])
@@ -271,25 +266,60 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertEqual(group["question_focus"], "vegetable inside egg curry")
         self.assertEqual(group["question_examples"], ["egg curry with bottle gourd"])
 
-    def test_reasoning_response_format_contains_strict_clarification_schema(self) -> None:
+    def test_group_actions_list_derives_legacy_primary_action(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "IDENTITY_CLARIFICATION_REQUIRED",
+                "meal_state": "PENDING_INTERVIEW",
+                "decision_rationale": "flatbread identity and source are both needed",
+                "gate_reason": "subtype and source affect nutrition",
+                "segment_count": 1,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_label": "Flatbread",
+                        "group_actions": ["AFFIRMATION_REQUIRED", "IDENTITY_CLARIFICATION_REQUIRED", "ASK_SOURCE_ORIGIN"],
+                        "group_state": "PENDING_INTERVIEW",
+                        "segment_indexes": [1],
+                        "visual_evidence": ["round flatbread"],
+                        "missing_evidence": ["bread subtype"],
+                        "decision_rationale": "could be pita, khubz, or roti",
+                        "gate_reason": "bread subtype required",
+                        "clarification_needed": True,
+                        "clarification_actions": [],
+                        "question_kind": "IDENTITY",
+                        "question_focus": "bread type",
+                        "question_examples": ["pita", "khubz", "roti"],
+                    }
+                ],
+            }
+        )
+
+        group = grouped["food_groups"][0]
+        self.assertEqual(group["group_action"], "IDENTITY_CLARIFICATION_REQUIRED")
+        self.assertEqual(
+            group["group_actions"],
+            ["IDENTITY_CLARIFICATION_REQUIRED", "ASK_SOURCE_ORIGIN"],
+        )
+
+    def test_reasoning_response_format_contains_group_owned_clarification_actions_only(self) -> None:
         from app.services.reasoning_schema import reasoning_response_format
 
         response_format = reasoning_response_format()
         schema = response_format["json_schema"]["schema"]
-        self.assertIn("clarification_schema", schema["properties"])
-        self.assertIn("clarification_schema", schema["required"])
+        self.assertNotIn("clarification_schema", schema["properties"])
+        self.assertNotIn("trace_id", schema["properties"])
 
-        clarification = schema["properties"]["clarification_schema"]["items"]
+        group = schema["properties"]["food_groups"]["items"]
+        clarification = group["properties"]["clarification_actions"]["items"]
         self.assertEqual(clarification["type"], "object")
         self.assertFalse(clarification["additionalProperties"])
-        self.assertIn("question_id", clarification["required"])
-        self.assertIn("group_id", clarification["required"])
-        self.assertIn("group_label", clarification["required"])
-        self.assertIn("question_kind", clarification["required"])
+        self.assertNotIn("question_id", clarification["properties"])
+        self.assertNotIn("group_id", clarification["properties"])
         self.assertIn("question_focus", clarification["required"])
         self.assertIn("answer_type", clarification["required"])
-        self.assertIn("segment_ids", clarification["required"])
-        self.assertIn("primary_segment_id", clarification["required"])
         self.assertIn("choices", clarification["required"])
         self.assertIn("validation_hints", clarification["required"])
         self.assertIn("required", clarification["required"])
@@ -304,8 +334,30 @@ class ReasoningContractTests(unittest.TestCase):
                 "confirm",
             },
         )
+        self.assertEqual(
+            set(clarification["properties"]["kind"]["enum"]),
+            {
+                "AFFIRMATION",
+                "CHOICE",
+                "DETAIL",
+                "FREE_TEXT",
+                "IDENTITY",
+                "QUANTITY",
+                "SOURCE_ORIGIN",
+            },
+        )
+        self.assertEqual(
+            set(clarification["properties"]["type"]["enum"]),
+            {
+                "AFFIRMATION",
+                "CHOICE",
+                "SOURCE_ORIGIN",
+                "QUANTITY",
+                "FREE_TEXT",
+            },
+        )
 
-    def test_grouped_reasoning_migrates_root_clarification_into_group_contract(self) -> None:
+    def test_grouped_reasoning_ignores_root_clarification_schema(self) -> None:
         from app.services.reasoning_schema import coerce_reasoning_response
 
         grouped = coerce_reasoning_response(
@@ -330,6 +382,25 @@ class ReasoningContractTests(unittest.TestCase):
                         "missing_evidence": ["bread subtype"],
                         "decision_rationale": "flatbread candidates are ambiguous",
                         "gate_reason": "bread subtype required",
+                        "clarification_needed": True,
+                        "clarification_actions": [
+                            {
+                                "type": "CHOICE",
+                                "kind": "IDENTITY",
+                                "user_prompt": "Which bread?",
+                                "answer_type": "single_choice",
+                                "choices": [
+                                    {"label": "Brown khubz", "quick_prompt": "Brown khubz"},
+                                    {"label": "Whole wheat pita bread", "quick_prompt": "Whole wheat pita bread"},
+                                ],
+                                "allow_other": True,
+                                "other_label": "Other",
+                                "required": True,
+                                "reason": "bread subtype required",
+                                "validation_hints": {"required": True},
+                                "question_focus": "bread type",
+                            }
+                        ],
                         "top_3": [_candidate_payload(), _candidate_payload(), _candidate_payload()],
                     }
                 ],
@@ -357,8 +428,8 @@ class ReasoningContractTests(unittest.TestCase):
             [action["type"] for action in group["clarification_actions"]],
             ["CHOICE"],
         )
-        self.assertEqual(group["clarification"]["question_id"], "group-bread:identity")
+        self.assertNotIn("clarification_schema", grouped)
         self.assertEqual(
             [choice["label"] for choice in group["clarification_actions"][0]["choices"]],
-            ["Brown khubz", "Whole wheat pita bread", "Tandoori roti"],
+            ["Brown khubz", "Whole wheat pita bread"],
         )

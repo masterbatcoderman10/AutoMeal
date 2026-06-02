@@ -17,10 +17,27 @@ _REASONING_TOP_FIELDS = (
     "decision_rationale",
 )
 
+_MODEL_GROUP_REQUIRED_FIELDS = (
+    "group_label",
+    "group_actions",
+    "group_state",
+    "segment_indexes",
+    "visual_evidence",
+    "missing_evidence",
+    "decision_rationale",
+    "gate_reason",
+    "clarification_needed",
+    "clarification_actions",
+    "question_kind",
+    "question_focus",
+    "question_examples",
+)
+
 _GROUP_REQUIRED_FIELDS = (
     "group_id",
     "group_label",
     "group_action",
+    "group_actions",
     "group_state",
     "primary_segment_id",
     "segment_ids",
@@ -31,25 +48,10 @@ _GROUP_REQUIRED_FIELDS = (
     "gate_reason",
     "clarification_needed",
     "clarification_actions",
-    "clarification",
     "question_kind",
     "question_focus",
     "question_examples",
     "top_3",
-)
-
-_CLARIFICATION_REQUIRED_FIELDS = (
-    "question_id",
-    "group_id",
-    "group_label",
-    "question_kind",
-    "question_focus",
-    "answer_type",
-    "required",
-    "segment_ids",
-    "primary_segment_id",
-    "validation_hints",
-    "choices",
 )
 
 _ALLOWED_ANSWER_TYPES = ("single_choice", "multi_choice", "free_text", "confirm")
@@ -60,6 +62,16 @@ _ALLOWED_CLARIFICATION_ACTION_TYPES = (
     "QUANTITY",
     "FREE_TEXT",
 )
+_ALLOWED_CLARIFICATION_KINDS = (
+    "AFFIRMATION",
+    "CHOICE",
+    "DETAIL",
+    "FREE_TEXT",
+    "IDENTITY",
+    "QUANTITY",
+    "SOURCE_ORIGIN",
+)
+_MODEL_QUESTION_KINDS = (*_ALLOWED_CLARIFICATION_KINDS, "NONE")
 _ALLOWED_GROUP_ACTIONS = {
     "AUTO_CONFIRM",
     "AUTO_CONFIRM_LEARNED",
@@ -68,11 +80,22 @@ _ALLOWED_GROUP_ACTIONS = {
     "IDENTITY_CLARIFICATION_REQUIRED",
     "READY_TO_WRITE",
     "ASK_QUANTITY",
+    "ASK_SOURCE_ORIGIN",
     "ASK_CHOICE",
     "INTERVIEW",
     "FAILED_UNCLEAR",
     "NEEDS_SCHEMA_REVIEW",
 }
+_MODEL_ACTIONS = (
+    "AUTO_CONFIRM",
+    "AUTO_CONFIRM_LEARNED",
+    "AUTO_CONFIRM_WITH_TRACE",
+    "AFFIRMATION_REQUIRED",
+    "IDENTITY_CLARIFICATION_REQUIRED",
+    "ASK_QUANTITY",
+    "ASK_SOURCE_ORIGIN",
+    "FAILED_UNCLEAR",
+)
 _SOURCE_ORIGIN_STATES = (
     "HOME_COOKED",
     "STORE_BOUGHT_PREPARED",
@@ -95,6 +118,7 @@ _GROUP_ACTIONS = (
     "AFFIRMATION_REQUIRED",
     "IDENTITY_CLARIFICATION_REQUIRED",
     "ASK_QUANTITY",
+    "ASK_SOURCE_ORIGIN",
     "ASK_CHOICE",
     "INTERVIEW",
     "READY_TO_WRITE",
@@ -104,84 +128,16 @@ _GROUP_ACTIONS = (
 
 
 def reasoning_response_format() -> dict[str, Any]:
-    candidate_properties = {
-        "candidate_id": {"type": "string"},
-        "label": {"type": "string"},
-        "identity_confidence": {"type": "number"},
-        "quantity_confidence": {"type": "number"},
-        "match_consistency_confidence": {"type": "number"},
-        "visual_evidence": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "missing_evidence": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "specificity": {"type": "string"},
-        "nutrition_relevance": {"type": "string"},
-        "source": {"type": "string"},
-        "decision_rationale": {"type": "string"},
-        "nutrition_impact": {"type": "number"},
-        "food_item_id": {"type": "string"},
-        "source_type": {"type": "string"},
-        "brand_name": {"type": "string"},
-        "restaurant_name": {"type": "string"},
-        "portion_bucket": {"type": "string"},
-    }
-    legacy_clarification_properties = {
-        "question_id": {"type": "string"},
-        "group_id": {"type": "string"},
-        "group_label": {"type": "string"},
-        "question_kind": {"type": "string"},
-        "question_focus": {"type": "string"},
-        "answer_type": {
-            "type": "string",
-            "enum": list(_ALLOWED_ANSWER_TYPES),
-        },
-        "required": {"type": "boolean"},
-        "segment_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "minItems": 1,
-        },
-        "primary_segment_id": {"type": "string"},
-        "choices": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "validation_hints": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["required"],
-            "properties": {
-                "required": {"type": "boolean"},
-                "min_choices": {"type": "integer"},
-                "max_choices": {"type": "integer"},
-                "min_length": {"type": "integer"},
-                "max_length": {"type": "integer"},
-            },
-        },
-    }
     clarification_choice_properties = {
-        "value": {"type": "string"},
         "label": {"type": "string"},
         "quick_prompt": {"type": "string"},
-        "food_item_id": {"type": "string"},
-        "source_type": {"type": "string"},
-        "brand_name": {"type": "string"},
-        "restaurant_name": {"type": "string"},
     }
     clarification_validation_hints_properties = {
         "required": {"type": "boolean"},
-        "min_choices": {"type": "integer"},
-        "max_choices": {"type": "integer"},
-        "min_length": {"type": "integer"},
-        "max_length": {"type": "integer"},
     }
     clarification_action_properties = {
         "type": {"type": "string", "enum": list(_ALLOWED_CLARIFICATION_ACTION_TYPES)},
-        "kind": {"type": "string"},
+        "kind": {"type": "string", "enum": list(_ALLOWED_CLARIFICATION_KINDS)},
         "user_prompt": {"type": "string"},
         "answer_type": {
             "type": "string",
@@ -192,7 +148,7 @@ def reasoning_response_format() -> dict[str, Any]:
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["value", "label", "quick_prompt"],
+                "required": ["label", "quick_prompt"],
                 "properties": clarification_choice_properties,
             },
         },
@@ -206,49 +162,24 @@ def reasoning_response_format() -> dict[str, Any]:
             "required": ["required"],
             "properties": clarification_validation_hints_properties,
         },
-        "question_id": {"type": "string"},
-        "group_id": {"type": "string"},
-        "group_label": {"type": "string"},
         "question_focus": {"type": "string"},
     }
-    clarification_alias_properties = {
-        "type": {"type": "string", "enum": list(_ALLOWED_CLARIFICATION_ACTION_TYPES)},
-        "kind": {"type": "string"},
-        "user_prompt": {"type": "string"},
-        "answer_type": {
-            "type": "string",
-            "enum": list(_ALLOWED_ANSWER_TYPES),
-        },
-        "choices": {
-            "type": "array",
-            "items": clarification_choice_properties,
-        },
-        "allow_other": {"type": "boolean"},
-        "other_label": {"type": "string"},
-        "required": {"type": "boolean"},
-        "reason": {"type": "string"},
-        "validation_hints": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["required"],
-            "properties": clarification_validation_hints_properties,
-        },
-    }
     group_properties = {
-        "group_id": {"type": "string"},
         "group_label": {"type": "string"},
-        "group_action": {"type": "string"},
+        "group_actions": {
+            "type": "array",
+            "items": {"type": "string", "enum": sorted(_MODEL_ACTIONS)},
+            "minItems": 1,
+        },
         "group_state": {
             "type": "string",
             "enum": sorted(_MEAL_STATES),
         },
-        "primary_segment_id": {"type": "string"},
-        "segment_ids": {
+        "segment_indexes": {
             "type": "array",
-            "items": {"type": "string"},
+            "items": {"type": "integer"},
             "minItems": 1,
         },
-        "selected_candidate_id": {"type": "string"},
         "visual_evidence": {
             "type": "array",
             "items": {"type": "string"},
@@ -276,50 +207,17 @@ def reasoning_response_format() -> dict[str, Any]:
                     "required",
                     "reason",
                     "validation_hints",
+                    "question_focus",
                 ],
                 "properties": clarification_action_properties,
             },
             "minItems": 0,
         },
-        "clarification": {
-            "anyOf": [
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": [
-                        "type",
-                        "kind",
-                        "user_prompt",
-                        "answer_type",
-                        "choices",
-                        "allow_other",
-                        "other_label",
-                        "required",
-                        "reason",
-                        "validation_hints",
-                    ],
-                    "properties": clarification_alias_properties,
-                },
-                {"type": "null"},
-            ]
-        },
-        "question_kind": {"type": "string"},
+        "question_kind": {"type": "string", "enum": list(_MODEL_QUESTION_KINDS)},
         "question_focus": {"type": "string"},
         "question_examples": {
             "type": "array",
             "items": {"type": "string"},
-        },
-        "top_3": {
-            "type": "array",
-            "minItems": 3,
-            "maxItems": 3,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": list(candidate_properties),
-                "properties": candidate_properties,
-            },
-            "additionalItems": False,
         },
     }
     return {
@@ -333,25 +231,23 @@ def reasoning_response_format() -> dict[str, Any]:
                 "required": [
                     "action",
                     "meal_state",
-                    "trace_id",
                     "decision_rationale",
                     "gate_reason",
                     "segment_count",
                     "food_group_count",
                     "food_groups",
-                    "clarification_schema",
                 ],
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "Open-string routing action from the reasoning model",
+                        "enum": sorted(_MODEL_ACTIONS),
+                        "description": "Meal-level routing action",
                     },
                     "meal_state": {
                         "type": "string",
                         "enum": sorted(_MEAL_STATES),
                         "description": "Next meal-level pipeline state",
                     },
-                    "trace_id": {"type": "string"},
                     "decision_rationale": {"type": "string"},
                     "gate_reason": {"type": "string"},
                     "segment_count": {"type": "integer"},
@@ -362,17 +258,8 @@ def reasoning_response_format() -> dict[str, Any]:
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": list(_GROUP_REQUIRED_FIELDS),
+                            "required": list(_MODEL_GROUP_REQUIRED_FIELDS),
                             "properties": group_properties,
-                        },
-                    },
-                    "clarification_schema": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": list(_CLARIFICATION_REQUIRED_FIELDS),
-                            "properties": legacy_clarification_properties,
                         },
                     },
                 },
@@ -434,15 +321,29 @@ def _coerce_bool(value: object, field: str) -> bool:
 def _coerce_top_three(value: object) -> list[dict[str, Any]]:
     normalized = value if isinstance(value, list) else []
     payloads: list[dict[str, Any]] = []
-    for index in range(3):
-        candidate = normalized[index] if index < len(normalized) else {}
+    for index, candidate in enumerate(normalized[:3]):
         if not isinstance(candidate, Mapping):
-            candidate = {}
+            continue
         try:
             payloads.append(_coerce_candidate_payload(candidate, index))
         except TypeError:
-            payloads.append(_invalid_candidate_payload(index))
+            continue
     return payloads
+
+
+def _coerce_segment_indexes(value: object) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    indexes: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            continue
+        if item < 1 or item in seen:
+            continue
+        seen.add(item)
+        indexes.append(item)
+    return indexes
 
 
 def _coerce_candidate_payload(candidate: Mapping[str, object], idx: int) -> dict[str, Any]:
@@ -599,7 +500,6 @@ def _coerce_clarification_choice_list(value: object, field: str, *, required: bo
         elif isinstance(item, str):
             choices.append(_coerce_choice_option(item, index))
         else:
-            # Preserve unknown legacy shape by normalizing via string coercion when possible.
             choice = _coerce_str(item, "choice")
             if choice:
                 choices.append(_coerce_choice_option(choice, index))
@@ -647,9 +547,6 @@ def _coerce_clarification_action(
         "required": required,
         "reason": _coerce_str(action.get("reason"), "reason") or "Model-requested clarification",
         "validation_hints": validation_hints,
-        "question_id": _coerce_str(action.get("question_id"), "question_id") or f"group_{idx}_clarification",
-        "group_id": _coerce_str(action.get("group_id"), "group_id") or f"group-{idx + 1}",
-        "group_label": _coerce_str(action.get("group_label"), "group_label") or f"group-{idx + 1}",
         "question_focus": _coerce_str(action.get("question_focus"), "question_focus"),
     }
 
@@ -662,111 +559,93 @@ def _coerce_clarification_actions(value: object, *, group_id: str, group_label: 
         if not isinstance(item, Mapping):
             continue
         try:
-            normalized.append(
-                {
-                    **_coerce_clarification_action(item, index),
-                    "group_id": _coerce_str(item.get("group_id"), "group_id") or group_id,
-                    "group_label": _coerce_str(item.get("group_label"), "group_label") or group_label,
-                }
-            )
+            action_payload = _coerce_clarification_action(item, index)
         except TypeError:
             continue
-    return normalized
-
-
-def _coerce_group_legacy_action(group: Mapping[str, object], idx: int) -> list[dict[str, Any]]:
-    question_kind = _coerce_str(group.get("question_kind"), "question_kind").upper()
-    if not question_kind:
-        return []
-
-    answer_type = _coerce_str(group.get("answer_type"), "answer_type") or "free_text"
-    if answer_type not in _ALLOWED_ANSWER_TYPES:
-        answer_type = "free_text"
-    group_id = _coerce_str(group.get("group_id"), "group_id") or f"group-{idx + 1}"
-    group_label = _coerce_str(group.get("group_label"), "group_label") or group_id
-    primary_segment_id = (
-        _coerce_str(group.get("primary_segment_id"), "primary_segment_id") or f"segment-{idx + 1}"
-    )
-    required = True
-    validation_hints = _coerce_validation_hints(
-        {"min_choices": 1, "max_choices": 1} if answer_type == "single_choice" else {},
-        required=required,
-    )
-    raw_choices = _coerce_list_of_text(group.get("question_examples"), "question_examples")
-    choices = _coerce_clarification_choice_list(raw_choices, "question_examples", required=required)
-
-    action_type = "CHOICE"
-    if question_kind == "SOURCE_ORIGIN":
-        action_type = "SOURCE_ORIGIN"
-    elif question_kind == "QUANTITY":
-        action_type = "QUANTITY"
-
-    return [
-        _coerce_clarification_action(
+        question_kind = _coerce_str(action_payload.get("kind"), "kind") or _coerce_str(action_payload.get("type"), "type")
+        suffix = question_kind.strip().casefold().replace(" ", "_") or f"clarification_{index + 1}"
+        question_id = f"{group_id}:{suffix}"
+        if any(action.get("question_id") == question_id for action in normalized):
+            question_id = f"{question_id}_{index + 1}"
+        normalized.append(
             {
-                "type": action_type,
-                "kind": question_kind or action_type,
-                "user_prompt": _coerce_str(group.get("question_focus"), "question_focus")
-                or f"Please clarify {group_label}",
-                "answer_type": answer_type,
-                "required": required,
-                "choices": choices,
-                "allow_other": question_kind == "CHOICE",
-                "other_label": "Other",
-                "reason": "Legacy question compatibility",
-                "validation_hints": validation_hints,
+                **action_payload,
+                "question_id": question_id,
                 "group_id": group_id,
                 "group_label": group_label,
-                "question_id": f"{group_id}:legacy",
-                "question_focus": _coerce_str(group.get("question_focus"), "question_focus"),
-            },
-            idx,
+            }
         )
-    ]
-
-
-def _coerce_clarification_schema(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    normalized: list[dict[str, Any]] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, Mapping):
-            continue
-        try:
-            normalized.append(_coerce_clarification_action(item, index))
-        except TypeError:
-            continue
     return normalized
 
 
-def _attach_root_clarification_actions(
-    food_groups: list[dict[str, Any]],
-    clarification_schema: list[dict[str, Any]],
-) -> None:
-    if not clarification_schema:
-        return
+def _normalize_action_label(value: object) -> str:
+    action = _coerce_str(value, "action").upper()
+    if action in {"ASK_CHOICE", "INTERVIEW"}:
+        return "IDENTITY_CLARIFICATION_REQUIRED"
+    if action == "READY_TO_WRITE":
+        return "AUTO_CONFIRM"
+    return action
 
-    actions_by_group: dict[str, list[dict[str, Any]]] = {}
-    for action in clarification_schema:
-        if not isinstance(action, Mapping):
-            continue
-        group_id = _coerce_str(action.get("group_id"), "group_id")
-        if not group_id:
-            continue
-        actions_by_group.setdefault(group_id, []).append(dict(action))
 
-    for group in food_groups:
-        group_id = _coerce_str(group.get("group_id"), "group_id")
-        if not group_id:
-            continue
-        if group.get("clarification_actions"):
-            continue
-        migrated = actions_by_group.get(group_id, [])
-        if not migrated:
-            continue
-        group["clarification_actions"] = migrated
-        group["clarification"] = migrated[0]
-        group["clarification_needed"] = True
+def _coerce_group_actions(group: Mapping[str, object]) -> list[str]:
+    raw_actions = group.get("group_actions")
+    actions: list[str] = []
+    if isinstance(raw_actions, list):
+        actions = [
+            normalized
+            for item in raw_actions
+            if (normalized := _normalize_action_label(item)) in _MODEL_ACTIONS
+        ]
+    if not actions:
+        action = _normalize_action_label(group.get("group_action") or group.get("action"))
+        if action in _ALLOWED_GROUP_ACTIONS or action in _MODEL_ACTIONS:
+            actions = [action]
+    if not actions:
+        actions = ["AUTO_CONFIRM"]
+
+    deduped: list[str] = []
+    for action in actions:
+        if action not in deduped:
+            deduped.append(action)
+
+    if "FAILED_UNCLEAR" in deduped:
+        return ["FAILED_UNCLEAR"]
+    if "NEEDS_SCHEMA_REVIEW" in deduped:
+        return ["NEEDS_SCHEMA_REVIEW"]
+
+    identity_actions = [
+        action
+        for action in deduped
+        if action in {"AFFIRMATION_REQUIRED", "IDENTITY_CLARIFICATION_REQUIRED"}
+    ]
+    if len(identity_actions) > 1:
+        deduped = [action for action in deduped if action != "AFFIRMATION_REQUIRED"]
+
+    if any(action in {"AFFIRMATION_REQUIRED", "IDENTITY_CLARIFICATION_REQUIRED", "ASK_QUANTITY", "ASK_SOURCE_ORIGIN"} for action in deduped):
+        deduped = [
+            action
+            for action in deduped
+            if action not in {"AUTO_CONFIRM", "AUTO_CONFIRM_LEARNED", "AUTO_CONFIRM_WITH_TRACE"}
+        ]
+
+    return deduped or ["AUTO_CONFIRM"]
+
+
+def _primary_group_action(group_actions: list[str]) -> str:
+    for action in (
+        "NEEDS_SCHEMA_REVIEW",
+        "FAILED_UNCLEAR",
+        "IDENTITY_CLARIFICATION_REQUIRED",
+        "AFFIRMATION_REQUIRED",
+        "ASK_QUANTITY",
+        "ASK_SOURCE_ORIGIN",
+        "AUTO_CONFIRM_LEARNED",
+        "AUTO_CONFIRM_WITH_TRACE",
+        "AUTO_CONFIRM",
+    ):
+        if action in group_actions:
+            return action
+    return "NEEDS_SCHEMA_REVIEW"
 
 
 def _normalize_group_state(action: str, state: str) -> str:
@@ -774,6 +653,7 @@ def _normalize_group_state(action: str, state: str) -> str:
         return state
     if action in {
         "ASK_QUANTITY",
+        "ASK_SOURCE_ORIGIN",
         "ASK_CHOICE",
         "INTERVIEW",
         "AFFIRMATION_REQUIRED",
@@ -788,30 +668,34 @@ def _normalize_group_state(action: str, state: str) -> str:
 
 
 def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, Any]:
-    action_raw = _coerce_str(group.get("group_action") or group.get("action"), "group_action")
-    if not action_raw:
-        action = "AUTO_CONFIRM"
-    elif action_raw in _ALLOWED_GROUP_ACTIONS:
-        action = action_raw
-    elif action_raw in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE", "ASK_QUANTITY", "ASK_CHOICE", "INTERVIEW", "READY_TO_WRITE"}:
-        action = "AUTO_CONFIRM"
-    else:
-        action = "NEEDS_SCHEMA_REVIEW"
+    group_actions = _coerce_group_actions(group)
+    action = _primary_group_action(group_actions)
     group_id = _coerce_str(group.get("group_id"), "group_id") or f"group-{idx + 1}"
     group_label = _coerce_str(group.get("group_label") or group.get("label"), "group_label")
+    segment_indexes = _coerce_segment_indexes(group.get("segment_indexes"))
     top_3 = _coerce_top_three(group.get("top_3"))
-    top_candidate = top_3[0] if top_3 else _invalid_candidate_payload(0)
+    top_candidate = top_3[0] if top_3 else {}
     primary_segment_id = _coerce_str(group.get("primary_segment_id"), "primary_segment_id")
     if not primary_segment_id:
-        primary_segment_id = _coerce_str(group.get("segment_id"), "segment_id") or f"segment-{idx + 1}"
-    segment_ids = _coerce_segment_ids(
-        group.get("segment_ids"),
-        primary_segment_id=primary_segment_id,
-        fallback=f"segment-{idx + 1}",
-    )
+        primary_segment_id = (
+            _coerce_str(group.get("segment_id"), "segment_id")
+            or (f"segment-{segment_indexes[0]}" if segment_indexes else f"segment-{idx + 1}")
+        )
+    if isinstance(group.get("segment_ids"), list):
+        segment_ids = _coerce_segment_ids(
+            group.get("segment_ids"),
+            primary_segment_id=primary_segment_id,
+            fallback=f"segment-{idx + 1}",
+        )
+    elif segment_indexes:
+        segment_ids = [f"segment-{segment_index}" for segment_index in segment_indexes]
+        if primary_segment_id not in segment_ids:
+            segment_ids.insert(0, primary_segment_id)
+    else:
+        segment_ids = [primary_segment_id]
     selected_candidate_id = (
         _coerce_str(group.get("selected_candidate_id"), "selected_candidate_id")
-        or str(top_candidate.get("candidate_id") or f"candidate-{idx}")
+        or str(top_candidate.get("candidate_id") or "")
     )
     decision_rationale = (
         _coerce_str(group.get("decision_rationale"), "decision_rationale")
@@ -838,30 +722,15 @@ def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, An
         group_id=group_id,
         group_label=group_label or str(top_candidate.get("label") or f"group {idx + 1}"),
     )
-    if not clarification_actions:
-        clarification_legacy = group.get("clarification")
-        if isinstance(clarification_legacy, Mapping):
-            clarification_actions = _coerce_clarification_actions(
-                [clarification_legacy],
-                group_id=group_id,
-                group_label=group_label or str(top_candidate.get("label") or f"group {idx + 1}"),
-            )
-        elif question_kind:
-            clarification_actions = _coerce_group_legacy_action(group, idx)
-
     clarification_needed = _coerce_bool(group.get("clarification_needed"), "clarification_needed")
     if not clarification_needed:
         clarification_needed = bool(clarification_actions)
-
-    if group.get("clarification") is None:
-        clarification_alias: dict[str, Any] | None = clarification_actions[0] if clarification_actions else None
-    else:
-        clarification_alias = clarification_actions[0] if isinstance(group.get("clarification"), Mapping) else None
 
     return {
         "group_id": group_id,
         "group_label": group_label or str(top_candidate.get("label") or f"group {idx + 1}"),
         "group_action": action,
+        "group_actions": group_actions,
         "group_state": group_state,
         "primary_segment_id": primary_segment_id,
         "segment_ids": segment_ids,
@@ -872,60 +741,11 @@ def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, An
         "gate_reason": gate_reason,
         "clarification_needed": clarification_needed,
         "clarification_actions": clarification_actions,
-        "clarification": clarification_alias,
         "question_kind": question_kind,
         "question_focus": question_focus,
         "question_examples": question_examples,
         "top_3": top_3,
     }
-
-
-def _legacy_group_from_root(payload: Mapping[str, object]) -> list[dict[str, Any]]:
-    if not isinstance(payload.get("top_3"), list):
-        return []
-
-    action_raw = _coerce_str(payload.get("action"), "action")
-    meal_state = _coerce_str(payload.get("meal_state"), "meal_state")
-    top_3 = _coerce_top_three(payload.get("top_3"))
-    primary_segment_id = _coerce_str(payload.get("primary_segment_id"), "primary_segment_id") or "segment-1"
-    raw_segment_count = payload.get("segment_count")
-    try:
-        segment_count = int(raw_segment_count) if raw_segment_count is not None else 1
-    except (TypeError, ValueError):
-        segment_count = 1
-    if segment_count < 1:
-        segment_count = 1
-    segment_ids = payload.get("segment_ids") if isinstance(payload.get("segment_ids"), list) else [
-        f"segment-{index}" for index in range(1, segment_count + 1)
-    ]
-    group = {
-        "group_id": _coerce_str(payload.get("group_id"), "group_id") or "group-1",
-        "group_label": _coerce_str(payload.get("group_label"), "group_label")
-        or str(top_3[0].get("label") or "unlabeled food"),
-        "group_action": action_raw or "NEEDS_SCHEMA_REVIEW",
-        "group_state": meal_state or "NEEDS_SCHEMA_REVIEW",
-        "primary_segment_id": primary_segment_id,
-        "segment_ids": segment_ids,
-        "selected_candidate_id": str(top_3[0].get("candidate_id") or "candidate-0"),
-        "visual_evidence": list(top_3[0].get("visual_evidence", [])),
-        "missing_evidence": list(top_3[0].get("missing_evidence", [])),
-        "decision_rationale": _coerce_str(payload.get("decision_rationale"), "decision_rationale")
-        or str(top_3[0].get("decision_rationale") or "No candidate rationale provided"),
-        "gate_reason": _coerce_str(payload.get("gate_reason"), "gate_reason"),
-        "clarification_needed": False,
-        "clarification_actions": _coerce_clarification_schema(payload.get("clarification_schema")),
-        "top_3": top_3,
-        "question_kind": _coerce_str(payload.get("question_kind"), "question_kind"),
-        "question_focus": _coerce_str(payload.get("question_focus"), "question_focus"),
-        "question_examples": _coerce_list_of_text(payload.get("question_examples"), "question_examples"),
-    }
-    if not group["clarification_actions"]:
-        legacy_question = _coerce_group_legacy_action(group, 0)
-        group["clarification_actions"] = legacy_question
-        group["clarification"] = legacy_question[0] if legacy_question else None
-        group["clarification_needed"] = bool(group["clarification_actions"])
-
-    return [_coerce_group_payload(group, 0)]
 
 
 def coerce_reasoning_response(payload: Mapping[str, object] | object | None) -> dict[str, Any]:
@@ -945,10 +765,7 @@ def coerce_reasoning_response(payload: Mapping[str, object] | object | None) -> 
             if isinstance(group, Mapping)
         ]
     else:
-        food_groups = _legacy_group_from_root(payload)
-
-    clarification_schema = _coerce_clarification_schema(payload.get("clarification_schema"))
-    _attach_root_clarification_actions(food_groups, clarification_schema)
+        food_groups = []
 
     raw_segment_count = payload.get("segment_count")
     if raw_segment_count is not None:
@@ -977,12 +794,9 @@ def coerce_reasoning_response(payload: Mapping[str, object] | object | None) -> 
             "segment_count": segment_count,
             "food_group_count": 0,
             "food_groups": [],
-            "clarification_schema": [],
-            "top_3": [],
         }
 
     food_group_count = len(food_groups)
-    top_3 = list(food_groups[0].get("top_3", []))
     state_raw = _coerce_str(payload.get("meal_state"), "meal_state")
     meal_state = state_raw if state_raw in _MEAL_STATES else _normalize_group_state(action_raw, state_raw)
 
@@ -1018,8 +832,6 @@ def coerce_reasoning_response(payload: Mapping[str, object] | object | None) -> 
         "segment_count": segment_count,
         "food_group_count": reported_food_group_count,
         "food_groups": food_groups,
-        "clarification_schema": clarification_schema,
-        "top_3": top_3,
     }
 
 

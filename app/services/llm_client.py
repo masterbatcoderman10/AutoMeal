@@ -55,6 +55,7 @@ class OpenRouterClient:
         tools: list[dict[str, Any]] | None = None,
         extra_body: dict[str, Any] | None = None,
         max_tokens: int | None = None,
+        temperature: float = 0.3,
     ) -> dict[str, Any]:
         request: dict[str, Any] = {
             "model": model,
@@ -62,6 +63,7 @@ class OpenRouterClient:
             "response_format": response_format,
             "tools": tools,
             "extra_body": extra_body,
+            "temperature": temperature,
         }
         if max_tokens is not None:
             request["max_tokens"] = max_tokens

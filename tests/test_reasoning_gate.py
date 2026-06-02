@@ -1242,8 +1242,9 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertEqual(groups["group-bread"]["group_action"], "AFFIRMATION_REQUIRED")
         self.assertEqual(
             [action["type"] for action in groups["group-bread"]["clarification_actions"]],
-            ["AFFIRMATION"],
+            ["AFFIRMATION", "SOURCE_ORIGIN"],
         )
+        self.assertEqual(groups["group-bread"]["source_question_policy"], "ask_generic")
         self.assertEqual(groups["group-curry"]["group_action"], "AUTO_CONFIRM_LEARNED")
         self.assertFalse(groups["group-curry"]["clarification_needed"])
         self.assertEqual(groups["group-curry"]["clarification_actions"], [])

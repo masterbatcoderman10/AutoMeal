@@ -22,6 +22,7 @@ _MODEL_GROUP_REQUIRED_FIELDS = (
     "group_actions",
     "group_state",
     "segment_indexes",
+    "segment_ids",
     "visual_evidence",
     "missing_evidence",
     "decision_rationale",
@@ -31,6 +32,10 @@ _MODEL_GROUP_REQUIRED_FIELDS = (
     "question_kind",
     "question_focus",
     "question_examples",
+    "source_question_policy",
+    "source_trigger_reason",
+    "learned_source_distribution",
+    "selected_identity",
 )
 
 _GROUP_REQUIRED_FIELDS = (
@@ -51,6 +56,10 @@ _GROUP_REQUIRED_FIELDS = (
     "question_kind",
     "question_focus",
     "question_examples",
+    "source_question_policy",
+    "source_trigger_reason",
+    "learned_source_distribution",
+    "selected_identity",
     "top_3",
 )
 
@@ -164,6 +173,17 @@ def reasoning_response_format() -> dict[str, Any]:
         },
         "question_focus": {"type": "string"},
     }
+    learned_source_distribution_item_properties = {
+        "candidate_id": {"type": "string"},
+        "source": {"type": "string"},
+        "count": {"type": "integer"},
+        "share": {"type": "number"},
+    }
+    selected_identity_properties = {
+        "candidate_id": {"type": "string"},
+        "label": {"type": "string"},
+        "food_item_id": {"type": "string"},
+    }
     group_properties = {
         "group_label": {"type": "string"},
         "group_actions": {
@@ -178,6 +198,11 @@ def reasoning_response_format() -> dict[str, Any]:
         "segment_indexes": {
             "type": "array",
             "items": {"type": "integer"},
+            "minItems": 1,
+        },
+        "segment_ids": {
+            "type": "array",
+            "items": {"type": "string"},
             "minItems": 1,
         },
         "visual_evidence": {
@@ -218,6 +243,23 @@ def reasoning_response_format() -> dict[str, Any]:
         "question_examples": {
             "type": "array",
             "items": {"type": "string"},
+        },
+        "source_question_policy": {"type": "string"},
+        "source_trigger_reason": {"type": "string"},
+        "learned_source_distribution": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(learned_source_distribution_item_properties),
+                "properties": learned_source_distribution_item_properties,
+            },
+        },
+        "selected_identity": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(selected_identity_properties),
+            "properties": selected_identity_properties,
         },
     }
     return {
@@ -438,6 +480,14 @@ def _coerce_segment_ids(value: object, *, primary_segment_id: str, fallback: str
     return [primary_segment_id or fallback]
 
 
+def _coerce_int(value: object, field: str) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field} must be an integer")
+    return value
+
+
 def _coerce_validation_hints(value: object, *, required: bool) -> dict[str, int | bool]:
     if not isinstance(value, Mapping):
         value = {}
@@ -578,6 +628,61 @@ def _coerce_clarification_actions(value: object, *, group_id: str, group_label: 
     return normalized
 
 
+def _coerce_learned_source_distribution(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    distribution: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        candidate_id = _coerce_str(item.get("candidate_id"), "candidate_id")
+        source = _coerce_str(item.get("source"), "source")
+        if not candidate_id or not source:
+            continue
+        try:
+            count = max(0, _coerce_int(item.get("count"), "count"))
+            share = max(0.0, min(_coerce_number(item.get("share"), "share"), 1.0))
+        except TypeError:
+            continue
+        distribution.append(
+            {
+                "candidate_id": candidate_id,
+                "source": source,
+                "count": count,
+                "share": share,
+            }
+        )
+    return distribution
+
+
+def _coerce_selected_identity(
+    value: object,
+    *,
+    top_candidate: Mapping[str, Any],
+) -> dict[str, str]:
+    if isinstance(value, Mapping):
+        candidate_id = _coerce_str(value.get("candidate_id"), "candidate_id")
+        label = _coerce_str(value.get("label"), "label")
+        food_item_id = _coerce_str(value.get("food_item_id"), "food_item_id")
+    else:
+        candidate_id = ""
+        label = ""
+        food_item_id = ""
+
+    if not candidate_id:
+        candidate_id = _coerce_str(top_candidate.get("candidate_id"), "candidate_id")
+    if not label:
+        label = _coerce_str(top_candidate.get("label"), "label")
+    if not food_item_id:
+        food_item_id = _coerce_str(top_candidate.get("food_item_id"), "food_item_id")
+
+    return {
+        "candidate_id": candidate_id,
+        "label": label,
+        "food_item_id": food_item_id,
+    }
+
+
 def _normalize_action_label(value: object) -> str:
     action = _coerce_str(value, "action").upper()
     if action in {"ASK_CHOICE", "INTERVIEW"}:
@@ -716,6 +821,19 @@ def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, An
     question_kind = _coerce_str(group.get("question_kind"), "question_kind")
     question_focus = _coerce_str(group.get("question_focus"), "question_focus")
     question_examples = _coerce_list_of_text(group.get("question_examples"), "question_examples")
+    source_question_policy = _coerce_str(group.get("source_question_policy"), "source_question_policy")
+    source_trigger_reason = _coerce_str(group.get("source_trigger_reason"), "source_trigger_reason")
+    learned_source_distribution = _coerce_learned_source_distribution(group.get("learned_source_distribution"))
+    selected_identity = _coerce_selected_identity(
+        group.get("selected_identity"),
+        top_candidate=top_candidate if isinstance(top_candidate, Mapping) else {},
+    )
+    learned_match_count = None
+    if group.get("learned_match_count") is not None:
+        learned_match_count = max(
+            0,
+            _coerce_int(group.get("learned_match_count"), "learned_match_count"),
+        )
 
     clarification_actions = _coerce_clarification_actions(
         group.get("clarification_actions"),
@@ -744,6 +862,11 @@ def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, An
         "question_kind": question_kind,
         "question_focus": question_focus,
         "question_examples": question_examples,
+        "source_question_policy": source_question_policy,
+        "source_trigger_reason": source_trigger_reason,
+        "learned_source_distribution": learned_source_distribution,
+        "learned_match_count": learned_match_count,
+        "selected_identity": selected_identity,
         "top_3": top_3,
     }
 

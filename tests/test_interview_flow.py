@@ -1511,11 +1511,18 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
             context=state["questions_by_id"]["q-source"],
         )
         updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
-        item = updated["confirmation_items"][0]
+        self.assertEqual(updated["current_question"]["question_id"], "group-flatbread:brand_name")
+        brand_answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="Acme",
+            context=updated["questions_by_id"]["group-flatbread:brand_name"],
+        )
+        completed = interview_service._apply_clarification_answer(updated, brand_answer)  # noqa: SLF001
+        item = completed["confirmation_items"][0]
         resolution = interview_service.final_resolution_from_confirmation(item=item)
 
         self.assertEqual(item["source_origin_state"], "STORE_BOUGHT_PREPARED")
         self.assertEqual(item["source_type"], "PACKAGED")
+        self.assertEqual(item["brand_name"], "Acme")
         self.assertTrue(resolution.food.needs_grounding)
         self.assertFalse(resolution.food.is_verified)
 

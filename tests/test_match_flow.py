@@ -1171,39 +1171,25 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        captured: dict[str, object] = {}
-
-        async def _capture_apply_final_meal_resolution(**kwargs):
-            captured.update(kwargs)
-            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
-
-        with (
-            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
-            patch.object(
-                interview_service,
-                "apply_final_meal_resolution",
-                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
-            ),
-        ):
-            await interview_service.finalize_confirmed_interview(
+        with patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True):
+            result = await interview_service.finalize_confirmed_interview(
                 session=session,
                 meal=meal,
                 confirmation_items=confirmation_items,
                 segments=[segment],
             )
 
-        final_segments = captured["final_segments"]
-        self.assertEqual(final_segments[0].food.source_type, "PACKAGED")
-        self.assertEqual(final_segments[0].food.brand_name, "Acme")
-        reasoning_state_json = captured["reasoning_state_json"]
+        self.assertTrue(result["grounding_required"])
+        reasoning_state_json = meal.reasoning_state_json
         self.assertEqual(
-            reasoning_state_json["resolver_payload"]["confirmation_items"][0]["segment_ids"],
+            reasoning_state_json["confirmation_items"][0]["segment_ids"],
             ["seg-bar-1", "seg-bar-2"],
         )
         self.assertEqual(
-            reasoning_state_json["resolver_payload"]["confirmation_items"][0]["brand_name"],
+            reasoning_state_json["confirmation_items"][0]["brand_name"],
             "Acme",
         )
+        self.assertEqual(reasoning_state_json["confirmation_items"][0]["source_type"], "PACKAGED")
 
 
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):

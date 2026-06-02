@@ -40,6 +40,17 @@ SESSION_MODE_MEAL = "MEAL_INTERVIEW"
 SESSION_MODE_FIX = "ENTRY_FIX"
 FINALIZER_MAX_ATTEMPTS = 2
 FINALIZER_MAX_TOKENS = 1200
+SOURCE_POLICY_NONE = ""
+SOURCE_POLICY_ASK_GENERIC = "ask_generic"
+SOURCE_POLICY_ASK_AFFIRMATION = "ask_affirmation"
+SOURCE_POLICY_DEFER_UNTIL_IDENTITY = "defer_until_identity"
+SOURCE_ORIGIN_STATES = {
+    "HOME_COOKED",
+    "STORE_BOUGHT_PREPARED",
+    "PACKAGED_BRANDED",
+    "RESTAURANT",
+    "UNKNOWN",
+}
 
 
 @dataclass(frozen=True)
@@ -1903,6 +1914,19 @@ def _clarification_questions_from_food_groups(reasoning_state: object) -> list[d
                 "question_kind",
                 action.get("kind") or action.get("question_kind") or action.get("type"),
             )
+            for key in (
+                "source_question_policy",
+                "source_trigger_reason",
+                "learned_source_distribution",
+                "source_affirmation",
+                "source_correction",
+                "source_type",
+                "source_origin_state",
+                "brand_name",
+                "restaurant_name",
+            ):
+                if key in group:
+                    action_payload.setdefault(key, group.get(key))
             questions.append(_normalize_clarification_question(action_payload))
     return questions
 
@@ -1976,6 +2000,15 @@ def _normalize_clarification_question(question: Mapping[str, Any]) -> dict[str, 
         "validation_hints": dict(question.get("validation_hints") or {}) if isinstance(question.get("validation_hints"), Mapping) else {},
         "question_examples": _coerce_examples(question.get("question_examples")),
         "correction_for_question_id": _optional_text(question.get("correction_for_question_id")),
+        "source_question_policy": _optional_text(question.get("source_question_policy")),
+        "source_trigger_reason": _optional_text(question.get("source_trigger_reason")),
+        "learned_source_distribution": _coerce_source_distribution(question.get("learned_source_distribution")),
+        "source_affirmation": bool(question.get("source_affirmation")),
+        "source_correction": bool(question.get("source_correction")),
+        "source_type": normalize_source_type(question.get("source_type")) if question.get("source_type") is not None else None,
+        "source_origin_state": _normalized_source_origin_state(question.get("source_origin_state")),
+        "brand_name": _optional_text(question.get("brand_name")),
+        "restaurant_name": _optional_text(question.get("restaurant_name")),
     }
     return normalized
 
@@ -2091,6 +2124,36 @@ def _coerce_examples(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _coerce_source_distribution(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        source_origin_state = _normalized_source_origin_state(item.get("source_origin_state"))
+        source_type = normalize_source_type(item.get("source_type")) if item.get("source_type") is not None else None
+        normalized.append(
+            {
+                "source_origin_state": source_origin_state,
+                "source_type": source_type or (_source_type_from_source_origin_state(source_origin_state) if source_origin_state else None),
+                "brand_name": _optional_text(item.get("brand_name")),
+                "restaurant_name": _optional_text(item.get("restaurant_name")),
+                "count": item.get("count"),
+                "share": item.get("share"),
+            }
+        )
+    return normalized
+
+
+def _normalized_source_origin_state(value: object) -> str | None:
+    normalized = _optional_text(value)
+    if not normalized:
+        return None
+    upper = normalized.upper()
+    return upper if upper in SOURCE_ORIGIN_STATES else None
+
+
 def _first_segment_id(segment_ids: object) -> str | None:
     if not isinstance(segment_ids, list):
         return None
@@ -2171,12 +2234,13 @@ def _render_clarification_question(question: Mapping[str, Any]) -> tuple[str, st
 def _parse_clarification_text(*, text: str, context: Mapping[str, Any]) -> dict[str, Any]:
     cleaned = _clean_identity_text(text)
     answer_type = _normalize_answer_type(context.get("answer_type"))
+    question_kind = _question_kind(context.get("question_kind"))
     payload: dict[str, Any] = {
         "question_id": context.get("question_id"),
         "group_id": context.get("group_id"),
         "primary_segment_id": context.get("primary_segment_id"),
         "segment_ids": list(context.get("segment_ids") or []),
-        "question_kind": _question_kind(context.get("question_kind")),
+        "question_kind": question_kind,
         "answer_type": answer_type,
         "required": bool(context.get("required")),
         "raw_text": str(text or "").strip(),
@@ -2208,9 +2272,23 @@ def _parse_clarification_text(*, text: str, context: Mapping[str, Any]) -> dict[
     if answer_type == "multi_choice":
         payload["values"] = [part.strip() for part in re.split(r"\s*,\s*", str(text or "").strip()) if part.strip()]
         return payload
-    if payload["question_kind"] == "QUANTITY":
+    if question_kind == "QUANTITY":
         payload["portion_bucket"] = _infer_portion_bucket(text)
         payload["quantity_display"] = _optional_text(str(text or "").strip())
+        return payload
+    if question_kind == "BRAND_NAME":
+        payload["brand_name"] = _optional_unknown_text(cleaned)
+        payload["source_type"] = normalize_source_type(context.get("source_type"))
+        payload["source_origin_state"] = _normalized_source_origin_state(context.get("source_origin_state"))
+        return payload
+    if question_kind == "RESTAURANT_NAME":
+        payload["restaurant_name"] = _optional_unknown_text(cleaned)
+        payload["source_type"] = normalize_source_type(context.get("source_type"))
+        payload["source_origin_state"] = _normalized_source_origin_state(context.get("source_origin_state"))
+        return payload
+    if bool(context.get("source_correction")):
+        payload.update(_parse_source_correction_response(cleaned=cleaned, raw_text=str(text or "").strip()))
+        payload["source_correction"] = True
         return payload
     payload["name"] = cleaned
     payload["approval_status"] = "CORRECTED"
@@ -2274,6 +2352,345 @@ def _source_type_from_source_origin_state(source_origin_state: str) -> str:
     return "PACKAGED"
 
 
+def _optional_unknown_text(value: str | None) -> str | None:
+    normalized = _optional_text(value)
+    if not normalized:
+        return None
+    if normalized.casefold() in {"unknown", "not sure", "unsure", "dont know", "don't know"}:
+        return None
+    return normalized
+
+
+def _parse_source_correction_response(*, cleaned: str, raw_text: str) -> dict[str, Any]:
+    lowered = raw_text.casefold()
+    source_origin_state = "UNKNOWN"
+    source_type = "PACKAGED"
+    brand_name: str | None = None
+    restaurant_name: str | None = None
+
+    if "home" in lowered or "homemade" in lowered:
+        source_origin_state = "HOME_COOKED"
+        source_type = "HOME"
+    elif "restaurant" in lowered or "takeout" in lowered:
+        source_origin_state = "RESTAURANT"
+        source_type = "RESTAURANT"
+        restaurant_name = _trailing_source_detail(raw_text)
+    elif "store" in lowered:
+        source_origin_state = "STORE_BOUGHT_PREPARED"
+        source_type = "PACKAGED"
+        brand_name = _trailing_source_detail(raw_text)
+    elif "pack" in lowered or "brand" in lowered:
+        source_origin_state = "PACKAGED_BRANDED"
+        source_type = "PACKAGED"
+        brand_name = _trailing_source_detail(raw_text)
+
+    payload: dict[str, Any] = {
+        "source_origin_state": source_origin_state,
+        "source_type": source_type,
+    }
+    if brand_name:
+        payload["brand_name"] = brand_name
+    if restaurant_name:
+        payload["restaurant_name"] = restaurant_name
+    if cleaned:
+        payload["value"] = cleaned
+    return payload
+
+
+def _trailing_source_detail(raw_text: str) -> str | None:
+    stripped = raw_text.strip()
+    if not stripped:
+        return None
+    if ":" in stripped:
+        detail = stripped.split(":", 1)[1].strip()
+        return detail or None
+    if " from " in stripped.casefold():
+        parts = re.split(r"\bfrom\b", stripped, maxsplit=1, flags=re.IGNORECASE)
+        detail = parts[1].strip() if len(parts) == 2 else ""
+        return detail or None
+    return None
+
+
+def _next_dynamic_question(
+    *,
+    question: Mapping[str, Any],
+    answer_record: Mapping[str, Any],
+    questions_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    question_kind = _question_kind(question.get("question_kind"))
+    if question_kind == "IDENTITY":
+        return _build_post_identity_source_question(
+            question=question,
+            answer_record=answer_record,
+            questions_by_id=questions_by_id,
+        )
+    if question_kind == "SOURCE_ORIGIN":
+        return _build_source_detail_question(
+            question=question,
+            answer_record=answer_record,
+            questions_by_id=questions_by_id,
+        )
+    if bool(question.get("source_affirmation")):
+        if _optional_text(answer_record.get("approval_status")) == "APPROVED":
+            return _build_source_detail_question(
+                question=question,
+                answer_record=answer_record,
+                questions_by_id=questions_by_id,
+            )
+    if bool(question.get("source_correction")):
+        return _build_source_detail_question(
+            question=question,
+            answer_record=answer_record,
+            questions_by_id=questions_by_id,
+        )
+    return None
+
+
+def _build_post_identity_source_question(
+    *,
+    question: Mapping[str, Any],
+    answer_record: Mapping[str, Any],
+    questions_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    group_id = _optional_text(question.get("group_id")) or "group"
+    if _group_has_question(questions_by_id=questions_by_id, group_id=group_id, kinds={"SOURCE_ORIGIN"}, include_answered=False):
+        return None
+    if _group_has_source_affirmation(questions_by_id=questions_by_id, group_id=group_id):
+        return None
+
+    policy = _optional_text(question.get("source_question_policy")) or SOURCE_POLICY_NONE
+    label = _optional_text(answer_record.get("name")) or _optional_text(question.get("label")) or "this item"
+    segment_ids = list(question.get("segment_ids") or answer_record.get("segment_ids") or [])
+    primary_segment_id = _optional_text(question.get("primary_segment_id")) or _first_segment_id(segment_ids)
+
+    if policy == SOURCE_POLICY_ASK_GENERIC:
+        return _build_source_origin_question(
+            group_id=group_id,
+            label=label,
+            primary_segment_id=primary_segment_id,
+            segment_ids=segment_ids,
+            reason=_optional_text(question.get("source_trigger_reason")),
+        )
+    if policy == SOURCE_POLICY_ASK_AFFIRMATION:
+        dominant = _dominant_learned_source(question.get("learned_source_distribution"))
+        if dominant is not None:
+            return _build_source_affirmation_question(
+                group_id=group_id,
+                label=label,
+                primary_segment_id=primary_segment_id,
+                segment_ids=segment_ids,
+                dominant=dominant,
+                reason=_optional_text(question.get("source_trigger_reason")),
+            )
+        return _build_source_origin_question(
+            group_id=group_id,
+            label=label,
+            primary_segment_id=primary_segment_id,
+            segment_ids=segment_ids,
+            reason=_optional_text(question.get("source_trigger_reason")),
+        )
+    return None
+
+
+def _dominant_learned_source(value: object) -> dict[str, Any] | None:
+    distribution = _coerce_source_distribution(value)
+    if not distribution:
+        return None
+    for item in distribution:
+        if item.get("source_origin_state") or item.get("source_type"):
+            return item
+    return None
+
+
+def _build_source_origin_question(
+    *,
+    group_id: str,
+    label: str,
+    primary_segment_id: str | None,
+    segment_ids: list[str],
+    reason: str | None,
+) -> dict[str, Any]:
+    return _normalize_clarification_question(
+        {
+            "question_id": f"{group_id}:source_origin",
+            "group_id": group_id,
+            "primary_segment_id": primary_segment_id,
+            "segment_ids": segment_ids,
+            "question_kind": "SOURCE_ORIGIN",
+            "type": "SOURCE_ORIGIN",
+            "answer_type": "single_choice",
+            "required": True,
+            "label": label,
+            "user_prompt": (
+                f"How should I treat the {label} for nutrition: homemade, store bought, packaged, restaurant, or not sure?"
+            ),
+            "choices": [
+                {"choice_id": "HOME_COOKED", "label": "homemade", "value": "HOME_COOKED"},
+                {"choice_id": "STORE_BOUGHT_PREPARED", "label": "store bought", "value": "STORE_BOUGHT_PREPARED"},
+                {"choice_id": "PACKAGED_BRANDED", "label": "packaged", "value": "PACKAGED_BRANDED"},
+                {"choice_id": "RESTAURANT", "label": "restaurant", "value": "RESTAURANT"},
+                {"choice_id": "UNKNOWN", "label": "not sure", "value": "UNKNOWN"},
+            ],
+            "allow_other": False,
+            "reason": reason or "",
+        }
+    )
+
+
+def _build_source_affirmation_question(
+    *,
+    group_id: str,
+    label: str,
+    primary_segment_id: str | None,
+    segment_ids: list[str],
+    dominant: Mapping[str, Any],
+    reason: str | None,
+) -> dict[str, Any]:
+    source_origin_state = _normalized_source_origin_state(dominant.get("source_origin_state")) or "UNKNOWN"
+    source_type = normalize_source_type(dominant.get("source_type")) or _source_type_from_source_origin_state(source_origin_state)
+    brand_name = _optional_text(dominant.get("brand_name"))
+    restaurant_name = _optional_text(dominant.get("restaurant_name"))
+    prompt_suffix = _source_affirmation_prompt_suffix(
+        source_origin_state=source_origin_state,
+        brand_name=brand_name,
+        restaurant_name=restaurant_name,
+    )
+    return _normalize_clarification_question(
+        {
+            "question_id": f"{group_id}:source_affirmation",
+            "group_id": group_id,
+            "primary_segment_id": primary_segment_id,
+            "segment_ids": segment_ids,
+            "question_kind": "AFFIRMATION",
+            "type": "AFFIRMATION",
+            "answer_type": "confirm",
+            "required": True,
+            "label": label,
+            "user_prompt": f"Was the {label} {prompt_suffix}?",
+            "choices": [
+                {"choice_id": "approve", "label": "Yes", "value": "Yes"},
+                {"choice_id": "correct", "label": "No", "value": "No"},
+            ],
+            "source_affirmation": True,
+            "source_type": source_type,
+            "source_origin_state": source_origin_state,
+            "brand_name": brand_name,
+            "restaurant_name": restaurant_name,
+            "reason": reason or "",
+        }
+    )
+
+
+def _source_affirmation_prompt_suffix(
+    *,
+    source_origin_state: str,
+    brand_name: str | None,
+    restaurant_name: str | None,
+) -> str:
+    if source_origin_state == "HOME_COOKED":
+        return "homemade"
+    if source_origin_state == "STORE_BOUGHT_PREPARED":
+        return "store bought"
+    if source_origin_state == "PACKAGED_BRANDED" and brand_name:
+        return f"packaged from {brand_name}"
+    if source_origin_state == "PACKAGED_BRANDED":
+        return "packaged"
+    if source_origin_state == "RESTAURANT" and restaurant_name:
+        return f"from {restaurant_name}"
+    if source_origin_state == "RESTAURANT":
+        return "from a restaurant"
+    return "sourced this way"
+
+
+def _build_source_detail_question(
+    *,
+    question: Mapping[str, Any],
+    answer_record: Mapping[str, Any],
+    questions_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    source_origin_state = _normalized_source_origin_state(answer_record.get("source_origin_state")) or _normalized_source_origin_state(question.get("source_origin_state"))
+    source_type = normalize_source_type(answer_record.get("source_type")) or normalize_source_type(question.get("source_type"))
+    group_id = _optional_text(question.get("group_id")) or "group"
+    label = _optional_text(question.get("label")) or "this item"
+    segment_ids = list(answer_record.get("segment_ids") or question.get("segment_ids") or [])
+    primary_segment_id = _optional_text(answer_record.get("primary_segment_id")) or _optional_text(question.get("primary_segment_id")) or _first_segment_id(segment_ids)
+
+    if source_origin_state in {"PACKAGED_BRANDED", "STORE_BOUGHT_PREPARED"}:
+        if _group_has_question(questions_by_id=questions_by_id, group_id=group_id, kinds={"BRAND_NAME"}, include_answered=False):
+            return None
+        if _optional_text(answer_record.get("brand_name")):
+            return None
+        return _normalize_clarification_question(
+            {
+                "question_id": f"{group_id}:brand_name",
+                "group_id": group_id,
+                "primary_segment_id": primary_segment_id,
+                "segment_ids": segment_ids,
+                "question_kind": "BRAND_NAME",
+                "type": "FREE_TEXT",
+                "answer_type": "free_text",
+                "required": True,
+                "label": label,
+                "user_prompt": f"What brand should I record for {label}?",
+                "source_type": source_type,
+                "source_origin_state": source_origin_state,
+            }
+        )
+    if source_origin_state == "RESTAURANT":
+        if _group_has_question(questions_by_id=questions_by_id, group_id=group_id, kinds={"RESTAURANT_NAME"}, include_answered=False):
+            return None
+        if _optional_text(answer_record.get("restaurant_name")):
+            return None
+        return _normalize_clarification_question(
+            {
+                "question_id": f"{group_id}:restaurant_name",
+                "group_id": group_id,
+                "primary_segment_id": primary_segment_id,
+                "segment_ids": segment_ids,
+                "question_kind": "RESTAURANT_NAME",
+                "type": "FREE_TEXT",
+                "answer_type": "free_text",
+                "required": True,
+                "label": label,
+                "user_prompt": f"What restaurant should I record for {label}?",
+                "source_type": source_type,
+                "source_origin_state": source_origin_state,
+            }
+        )
+    return None
+
+
+def _group_has_source_affirmation(
+    *,
+    questions_by_id: Mapping[str, Mapping[str, Any]],
+    group_id: str,
+) -> bool:
+    for question in questions_by_id.values():
+        if _optional_text(question.get("group_id")) != group_id:
+            continue
+        if bool(question.get("source_affirmation")):
+            return True
+    return False
+
+
+def _group_has_question(
+    *,
+    questions_by_id: Mapping[str, Mapping[str, Any]],
+    group_id: str,
+    kinds: set[str],
+    include_answered: bool,
+) -> bool:
+    for question in questions_by_id.values():
+        if _optional_text(question.get("group_id")) != group_id:
+            continue
+        if _question_kind(question.get("question_kind")) not in kinds:
+            continue
+        if include_answered:
+            return True
+        return True
+    return False
+
+
 def _apply_clarification_answer(state: Mapping[str, Any], answer: Mapping[str, Any]) -> dict[str, Any]:
     updated = dict(state)
     question_id = _optional_text(answer.get("question_id"))
@@ -2294,6 +2711,17 @@ def _apply_clarification_answer(state: Mapping[str, Any], answer: Mapping[str, A
     answer_record = _answer_record_for_question(question=question, answer=answer)
     answers_by_question_id[question_id] = answer_record
     question_order = [str(item) for item in updated.get("question_order") or [] if str(item)]
+    next_dynamic_question = _next_dynamic_question(
+        question=question,
+        answer_record=answer_record,
+        questions_by_id=questions_by_id,
+    )
+    if next_dynamic_question is not None:
+        next_dynamic_question_id = next_dynamic_question["question_id"]
+        questions_by_id[next_dynamic_question_id] = next_dynamic_question
+        if next_dynamic_question_id not in question_order:
+            insertion_index = question_order.index(question_id) + 1 if question_id in question_order else len(question_order)
+            question_order.insert(insertion_index, next_dynamic_question_id)
     correction_question = _build_affirmation_correction_question(
         question=question,
         answer_record=answer_record,
@@ -2353,7 +2781,27 @@ def _answer_record_for_question(*, question: Mapping[str, Any], answer: Mapping[
         "quantity_display": _optional_text(answer.get("quantity_display")),
         "approval_status": _optional_text(answer.get("approval_status")),
         "raw_text": _optional_text(answer.get("raw_text")),
+        "source_affirmation": bool(question.get("source_affirmation")),
+        "source_correction": bool(question.get("source_correction") or answer.get("source_correction")),
     }
+    question_kind = _question_kind(question.get("question_kind"))
+    if bool(question.get("source_affirmation")) and record.get("approval_status") == "APPROVED":
+        record["source_type"] = normalize_source_type(answer.get("source_type") or question.get("source_type"))
+        record["source_origin_state"] = _normalized_source_origin_state(answer.get("source_origin_state") or question.get("source_origin_state"))
+        record["brand_name"] = _optional_text(answer.get("brand_name") or question.get("brand_name"))
+        record["restaurant_name"] = _optional_text(answer.get("restaurant_name") or question.get("restaurant_name"))
+    if question_kind == "BRAND_NAME":
+        record["brand_name"] = _optional_text(answer.get("brand_name") or answer.get("value"))
+        record["source_type"] = normalize_source_type(answer.get("source_type") or question.get("source_type"))
+        record["source_origin_state"] = _normalized_source_origin_state(answer.get("source_origin_state") or question.get("source_origin_state"))
+        record.pop("name", None)
+    if question_kind == "RESTAURANT_NAME":
+        record["restaurant_name"] = _optional_text(answer.get("restaurant_name") or answer.get("value"))
+        record["source_type"] = normalize_source_type(answer.get("source_type") or question.get("source_type"))
+        record["source_origin_state"] = _normalized_source_origin_state(answer.get("source_origin_state") or question.get("source_origin_state"))
+        record.pop("name", None)
+    if bool(record.get("source_correction")):
+        record.pop("name", None)
     return {key: value for key, value in record.items() if value is not None}
 
 
@@ -2379,9 +2827,14 @@ def _build_affirmation_correction_question(
         "answer_type": "free_text",
         "required": True,
         "label": label,
-        "user_prompt": f"What should I call {label} instead?",
+        "user_prompt": (
+            f"What source should I record for {label} instead?"
+            if bool(question.get("source_affirmation"))
+            else f"What should I call {label} instead?"
+        ),
         "validation_hints": {"required": True, "max_length": 220},
         "correction_for_question_id": _optional_text(question.get("question_id")),
+        "source_correction": bool(question.get("source_affirmation")),
     }
 
 
@@ -2436,16 +2889,20 @@ def _confirmation_items_from_clarification_answers(state: Mapping[str, Any]) -> 
         if isinstance(answer.get("segment_ids"), list) and not item.get("segment_ids"):
             item["segment_ids"] = list(answer["segment_ids"])
         question_kind = _question_kind(answer.get("question_kind"))
-        if question_kind == "SOURCE_ORIGIN" and answer.get("source_type"):
+        if answer.get("source_type"):
             item["source_type"] = answer["source_type"]
-            if answer.get("source_origin_state"):
-                item["source_origin_state"] = answer["source_origin_state"]
-        elif question_kind == "QUANTITY":
+        if answer.get("source_origin_state"):
+            item["source_origin_state"] = answer["source_origin_state"]
+        if answer.get("brand_name"):
+            item["brand_name"] = answer["brand_name"]
+        if answer.get("restaurant_name"):
+            item["restaurant_name"] = answer["restaurant_name"]
+        if question_kind == "QUANTITY":
             if answer.get("portion_bucket"):
                 item["portion_bucket"] = answer["portion_bucket"]
             if answer.get("quantity_display"):
                 item["quantity_display"] = answer["quantity_display"]
-        elif answer.get("name"):
+        elif answer.get("name") and question_kind not in {"SOURCE_ORIGIN", "BRAND_NAME", "RESTAURANT_NAME"}:
             item["name"] = answer["name"]
             for key in ("food_item_id", "source_type", "brand_name", "restaurant_name"):
                 if answer.get(key):

@@ -1511,11 +1511,18 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
             context=state["questions_by_id"]["q-source"],
         )
         updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
-        item = updated["confirmation_items"][0]
+        self.assertEqual(updated["current_question"]["question_id"], "group-flatbread:brand_name")
+        brand_answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="Acme",
+            context=updated["questions_by_id"]["group-flatbread:brand_name"],
+        )
+        completed = interview_service._apply_clarification_answer(updated, brand_answer)  # noqa: SLF001
+        item = completed["confirmation_items"][0]
         resolution = interview_service.final_resolution_from_confirmation(item=item)
 
         self.assertEqual(item["source_origin_state"], "STORE_BOUGHT_PREPARED")
         self.assertEqual(item["source_type"], "PACKAGED")
+        self.assertEqual(item["brand_name"], "Acme")
         self.assertTrue(resolution.food.needs_grounding)
         self.assertFalse(resolution.food.is_verified)
 
@@ -1606,3 +1613,277 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual((resolution.segment_embedding or [])[2], 0.3)
         self.assertEqual(resolution.segment_cropped_image_url, "/data/uploads/crops/seg-visual.jpg")
         self.assertTrue(resolution.create_food_visual)
+
+    def test_identity_answer_inserts_learned_source_affirmation_before_existing_follow_up(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "question_order": ["q-identity", "q-quantity"],
+            "questions_by_id": {
+                "q-identity": {
+                    "question_id": "q-identity",
+                    "group_id": "group-bread",
+                    "primary_segment_id": "seg-bread-1",
+                    "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                    "question_kind": "IDENTITY",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "label": "flatbread",
+                    "source_question_policy": "ask_affirmation",
+                    "source_trigger_reason": "Strong packaged history exists for the selected identity.",
+                    "learned_source_distribution": [
+                        {
+                            "source_type": "PACKAGED",
+                            "source_origin_state": "PACKAGED_BRANDED",
+                            "brand_name": "Acme",
+                            "count": 7,
+                            "share": 0.9,
+                        }
+                    ],
+                    "choices": [
+                        {
+                            "choice_id": "candidate-khubz",
+                            "label": "White Khubz",
+                            "value": "White Khubz",
+                            "food_item_id": "food-khubz",
+                        }
+                    ],
+                },
+                "q-quantity": {
+                    "question_id": "q-quantity",
+                    "group_id": "group-bread",
+                    "primary_segment_id": "seg-bread-1",
+                    "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                    "question_kind": "QUANTITY",
+                    "answer_type": "free_text",
+                    "required": True,
+                    "label": "flatbread",
+                },
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["q-identity", "q-quantity"],
+            "remaining_required_question_ids": ["q-identity", "q-quantity"],
+            "interview_messages": [],
+        }
+
+        answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="White Khubz",
+            context=state["questions_by_id"]["q-identity"],
+        )
+        updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
+
+        self.assertEqual(
+            updated["question_order"],
+            ["q-identity", "group-bread:source_affirmation", "q-quantity"],
+        )
+        self.assertEqual(
+            updated["remaining_required_question_ids"],
+            ["group-bread:source_affirmation", "q-quantity"],
+        )
+        self.assertEqual(updated["current_question"]["question_id"], "group-bread:source_affirmation")
+        self.assertEqual(updated["current_question"]["answer_type"], "confirm")
+        self.assertIn("Acme", updated["current_question"]["prompt"])
+
+    def test_identity_answer_inserts_generic_source_question_when_policy_requires_fallback(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "question_order": ["q-identity", "q-quantity"],
+            "questions_by_id": {
+                "q-identity": {
+                    "question_id": "q-identity",
+                    "group_id": "group-wrap",
+                    "primary_segment_id": "seg-wrap-1",
+                    "segment_ids": ["seg-wrap-1"],
+                    "question_kind": "IDENTITY",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "label": "wrap",
+                    "source_question_policy": "ask_generic",
+                    "source_trigger_reason": "Few learned matches require a direct source question.",
+                    "choices": [
+                        {
+                            "choice_id": "candidate-wrap",
+                            "label": "Chicken Wrap",
+                            "value": "Chicken Wrap",
+                        }
+                    ],
+                },
+                "q-quantity": {
+                    "question_id": "q-quantity",
+                    "group_id": "group-wrap",
+                    "primary_segment_id": "seg-wrap-1",
+                    "segment_ids": ["seg-wrap-1"],
+                    "question_kind": "QUANTITY",
+                    "answer_type": "free_text",
+                    "required": True,
+                    "label": "wrap",
+                },
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["q-identity", "q-quantity"],
+            "remaining_required_question_ids": ["q-identity", "q-quantity"],
+            "interview_messages": [],
+        }
+
+        answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="Chicken Wrap",
+            context=state["questions_by_id"]["q-identity"],
+        )
+        updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
+
+        self.assertEqual(
+            updated["question_order"],
+            ["q-identity", "group-wrap:source_origin", "q-quantity"],
+        )
+        self.assertEqual(updated["current_question"]["question_id"], "group-wrap:source_origin")
+        self.assertEqual(updated["current_question"]["question_kind"], "SOURCE_ORIGIN")
+        self.assertFalse(updated["questions_by_id"]["group-wrap:source_origin"]["allow_other"])
+
+    def test_rejected_source_affirmation_prompts_same_group_source_correction(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "question_order": ["group-bread:source_affirmation"],
+            "questions_by_id": {
+                "group-bread:source_affirmation": {
+                    "question_id": "group-bread:source_affirmation",
+                    "group_id": "group-bread",
+                    "primary_segment_id": "seg-bread-1",
+                    "segment_ids": ["seg-bread-1"],
+                    "question_kind": "AFFIRMATION",
+                    "answer_type": "confirm",
+                    "required": True,
+                    "label": "White Khubz",
+                    "source_affirmation": True,
+                    "source_type": "PACKAGED",
+                    "source_origin_state": "PACKAGED_BRANDED",
+                    "brand_name": "Acme",
+                    "user_prompt": "Was the White Khubz packaged from Acme?",
+                    "choices": [
+                        {"choice_id": "approve", "label": "Yes"},
+                        {"choice_id": "correct", "label": "No"},
+                    ],
+                }
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["group-bread:source_affirmation"],
+            "remaining_required_question_ids": ["group-bread:source_affirmation"],
+            "interview_messages": [],
+        }
+
+        answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="No",
+            context=state["questions_by_id"]["group-bread:source_affirmation"],
+        )
+        updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
+
+        self.assertEqual(updated["current_question"]["group_id"], "group-bread")
+        self.assertEqual(updated["current_question"]["answer_type"], "free_text")
+        self.assertIn("source", updated["current_question"]["prompt"].lower())
+        self.assertEqual(
+            updated["current_question"]["correction_for_question_id"],
+            "group-bread:source_affirmation",
+        )
+
+    def test_packaged_source_answer_inserts_brand_follow_up_and_preserves_segment_ids(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "question_order": ["q-source"],
+            "questions_by_id": {
+                "q-source": {
+                    "question_id": "q-source",
+                    "group_id": "group-bar",
+                    "primary_segment_id": "seg-bar-1",
+                    "segment_ids": ["seg-bar-1", "seg-bar-2"],
+                    "question_kind": "SOURCE_ORIGIN",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "label": "protein bar",
+                    "choices": [
+                        {
+                            "choice_id": "PACKAGED_BRANDED",
+                            "label": "packaged",
+                            "value": "PACKAGED_BRANDED",
+                        }
+                    ],
+                }
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["q-source"],
+            "remaining_required_question_ids": ["q-source"],
+            "interview_messages": [],
+        }
+
+        source_answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="packaged",
+            context=state["questions_by_id"]["q-source"],
+        )
+        updated = interview_service._apply_clarification_answer(state, source_answer)  # noqa: SLF001
+
+        self.assertEqual(updated["current_question"]["question_id"], "group-bar:brand_name")
+        self.assertEqual(updated["current_question"]["question_kind"], "BRAND_NAME")
+
+        brand_answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="Acme",
+            context=updated["questions_by_id"]["group-bar:brand_name"],
+        )
+        completed = interview_service._apply_clarification_answer(updated, brand_answer)  # noqa: SLF001
+        item = completed["confirmation_items"][0]
+
+        self.assertEqual(item["segment_ids"], ["seg-bar-1", "seg-bar-2"])
+        self.assertEqual(item["source_type"], "PACKAGED")
+        self.assertEqual(item["source_origin_state"], "PACKAGED_BRANDED")
+        self.assertEqual(item["brand_name"], "Acme")
+
+    def test_restaurant_source_answer_inserts_restaurant_follow_up_and_preserves_segment_ids(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "question_order": ["q-source"],
+            "questions_by_id": {
+                "q-source": {
+                    "question_id": "q-source",
+                    "group_id": "group-wrap",
+                    "primary_segment_id": "seg-wrap-1",
+                    "segment_ids": ["seg-wrap-1", "seg-wrap-2"],
+                    "question_kind": "SOURCE_ORIGIN",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "label": "shawarma wrap",
+                    "choices": [
+                        {
+                            "choice_id": "RESTAURANT",
+                            "label": "restaurant",
+                            "value": "RESTAURANT",
+                        }
+                    ],
+                }
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["q-source"],
+            "remaining_required_question_ids": ["q-source"],
+            "interview_messages": [],
+        }
+
+        source_answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="restaurant",
+            context=state["questions_by_id"]["q-source"],
+        )
+        updated = interview_service._apply_clarification_answer(state, source_answer)  # noqa: SLF001
+
+        self.assertEqual(updated["current_question"]["question_id"], "group-wrap:restaurant_name")
+        self.assertEqual(updated["current_question"]["question_kind"], "RESTAURANT_NAME")
+
+        restaurant_answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="Shawarma House",
+            context=updated["questions_by_id"]["group-wrap:restaurant_name"],
+        )
+        completed = interview_service._apply_clarification_answer(updated, restaurant_answer)  # noqa: SLF001
+        item = completed["confirmation_items"][0]
+
+        self.assertEqual(item["segment_ids"], ["seg-wrap-1", "seg-wrap-2"])
+        self.assertEqual(item["source_type"], "RESTAURANT")
+        self.assertEqual(item["source_origin_state"], "RESTAURANT")
+        self.assertEqual(item["restaurant_name"], "Shawarma House")

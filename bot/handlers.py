@@ -657,13 +657,19 @@ async def _handle_deterministic_meal_callback(
     if str(prompt.get("answer_type") or "").strip().lower() == "confirm":
         answer["approval_status"] = "APPROVED" if choice_id == "approve" else "CORRECTED"
     elif str(prompt.get("question_kind") or "").strip().upper() == "SOURCE_ORIGIN":
-        answer["source_type"] = interview_service.parse_interview_text(
+        parsed_source_answer = interview_service.parse_interview_text(
             text=str(matched_choice.get("label") or ""),
             context=prompt,
-        ).get("source_type")
+        )
+        for key in ("source_type", "source_origin_state", "brand_name", "restaurant_name"):
+            if parsed_source_answer.get(key):
+                answer[key] = parsed_source_answer[key]
     else:
         answer["name"] = matched_choice.get("label")
         answer["approval_status"] = "CORRECTED"
+        for key in ("food_item_id", "source_type", "brand_name", "restaurant_name"):
+            if matched_choice.get(key):
+                answer[key] = matched_choice[key]
 
     updated_state = interview_service.complete_target_question(state, answer)
     if not _has_pending_deterministic_questions(updated_state):

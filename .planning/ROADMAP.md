@@ -2,7 +2,7 @@
 
 ## Overview
 
-Eight phases transform a blank repo into a fully operational personal meal tracker: the photo arrives via iOS Shortcut, runs through detect → segment → embed → vector-match → LLM reason → AI-assisted Telegram interview, and every confirmed identification grows the FoodVisuals library so future matches are faster. Each phase ends with a working vertical slice — something you can actually fire the Shortcut at and observe improving. Schema correctness (vector(1536), TIMESTAMPTZ, FAILED status) is locked in Phase 1 and never revisited.
+Eleven phases transform a blank repo into a fully operational personal meal tracker: the photo arrives via iOS Shortcut, runs through detect → segment → embed → vector-match → LLM reason → AI-assisted Telegram interview, and every confirmed identification grows the FoodVisuals library so future matches are faster. Each phase ends with a working vertical slice — something you can actually fire the Shortcut at and observe improving. Schema correctness (vector(1536), TIMESTAMPTZ, FAILED status) is locked in Phase 1 and never revisited.
 
 ## Phases
 
@@ -14,6 +14,7 @@ Eight phases transform a blank repo into a fully operational personal meal track
 - [x] **Phase 4.2: LLM-Threaded Interview Orchestration** - Replace deterministic interview continuation with an LLM interview agent that receives grouped reasoning context, conversation history, pending unclear targets, and clear auto-proposed items for approval; it asks natural follow-ups, decides when enough information is collected, and hands structured confirmed items back to final write-back/grounding. (completed 2026-05-30)
 - [x] **Phase 4.3: Deterministic Clarification Schema & Interview UI** - Replace freeform LLM interview turns with a reasoning-produced clarification schema, deterministic Telegram MCQ/open-field rendering, structured answer capture, and a compact final resolver that feeds the existing authoritative FoodItem/DiaryEntry/FoodVisual write path. (completed 2026-06-01)
 - [ ] **Phase 4.4: Parallel Group Finalization & Lite Detect Swap** - After deterministic clarification completes, run one structured post-processing/finalization call per food group in parallel using `google/gemini-3.1-flash-lite` so final save-ready metadata comes from each group's reasoning outcome plus its own clarifications; also swap the detect/classification model from Gemma to the same Lite model.
+- [ ] **Phase 4.5: Source-Aware Clarification Expansion** - Before the existing per-group finalizer runs, add deterministic source, brand, and restaurant clarification for food groups with no vector match, too few vector matches, or ambiguous high-score distributions; extend the group contract with stable `segment_ids`.
 - [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
@@ -220,6 +221,30 @@ Eight phases transform a blank repo into a fully operational personal meal track
 
 ---
 
+### Phase 4.5: Source-Aware Clarification Expansion
+
+**Goal**: Preserve the deterministic clarification UI and the existing Phase 4.4 per-group LLM finalizer, but add source-aware clarification rules before finalization: when vector evidence is absent, shallow, or distributionally ambiguous, Telegram should ask source and, when relevant, brand or restaurant follow-ups so the finalizer receives richer group-scoped inputs without changing its role.
+**Mode:** mvp
+**Depends on**: Phase 4.4
+**Requirements**: REASON-01, REASON-04, INTERVIEW-01, INTERVIEW-03, INTERVIEW-04, MATCH-04
+**Success Criteria** (what must be TRUE):
+
+  1. For any food group with no vector match or fewer than 5 vector matches, the deterministic clarification flow asks the source question even if the reasoning output did not explicitly request one.
+  2. If that source question is answered as store bought or restaurant, the flow asks one follow-up question for the brand or restaurant name; the answer can be typed freeform and the existing partial-reply/state-recovery behavior remains intact.
+  3. For any food group with 5 or more high-score vector matches whose distribution is still not definitive, the user is still asked to choose; when the selected option matches the observed distribution, Telegram then presents the unique source values seen for that food group plus an `Other` option.
+  4. Existing clarification answers, question ordering, durable answer storage, and the current deterministic interview flow are extended rather than replaced; the new source/brand/restaurant questions are additive and must not disturb already-working clarification behavior.
+  5. The grouped reasoning/output contract carries a stable `segment_ids: string[]` field for each food group so Telegram prompts, vector-distribution logic, and the Phase 4.4 per-group finalizer all target the same group without extra inference.
+  6. The existing per-group LLM finalization step from Phase 4.4 remains in place and is not re-scoped into a new interview engine; it simply receives the richer clarification answers produced by this phase.
+
+**Plans**: 2 plans
+
+- [ ] `04.5-01-PLAN.md` - trigger rules for source questioning, group `segment_ids` contract, and vector-distribution source-option synthesis
+- [ ] `04.5-02-PLAN.md` - Telegram follow-up rendering, durable answer persistence, and warm-state UAT for no-match/few-match/ambiguous-distribution cases
+
+**Phase note**: This is still not Phase 5 grounding and does not replace the Phase 4.4 finalizer. No SearXNG or Firecrawl calls belong here. The phase only expands deterministic clarification inputs and the grouped state handed to the existing per-group LLM finalization step.
+
+---
+
 ### Phase 5: Agentic Grounding
 
 **Goal**: The reasoning stage and post-interview re-grounding stage can invoke SearXNG and Firecrawl as tools when the LLM needs brand or restaurant nutrition data; every tool call is bounded, traced, and the loop cannot run away on cost.
@@ -269,5 +294,7 @@ Eight phases transform a blank repo into a fully operational personal meal track
 | 4.1. Grouped Reasoning & Human Interview Correction | 2/2 | Complete   | 2026-05-29 |
 | 4.2. LLM-Threaded Interview Orchestration | 3/3 | Complete   | 2026-05-30 |
 | 4.3. Deterministic Clarification Schema & Interview UI | 6/6 | Complete   | 2026-06-01 |
+| 4.4. Parallel Group Finalization & Lite Detect Swap | 0/2 | Not started | - |
+| 4.5. Source-Aware Clarification Expansion | 0/2 | Not started | - |
 | 5. Agentic Grounding | 0/TBD | Not started | - |
 | 6. Bot Surface & Daily Summary | 0/TBD | Not started | - |

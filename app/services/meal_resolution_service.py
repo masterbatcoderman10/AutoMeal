@@ -59,6 +59,7 @@ class FinalSegmentResolution:
     create_food_visual: bool = True
     prior_food_visual_id_to_invalidate: str | None = None
     visual_learning_eligible: bool = False
+    skip_grounding_handoff: bool = False
     existing_diary_entry_id: str | None = None
     entry_is_verified: bool | None = None
     correction_reason: str | None = None

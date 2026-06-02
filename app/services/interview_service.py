@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -8,8 +10,15 @@ from typing import Any, Mapping
 
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog, MealProcessingStatus, MealSegment
 from app.services.grounding_stub import build_grounding_prep, normalize_source_type
+from app.services.interview_schema import (
+    FinalizedGroupResult,
+    group_finalizer_response_format,
+    parse_group_finalizer_response_payload,
+)
+from app.services.llm_client import get_llm_client
 from app.services.meal_resolution_service import (
     FinalSegmentResolution,
     ResolvedFoodInput,
@@ -29,6 +38,8 @@ INTERVIEW_ROADMAP = (
 
 SESSION_MODE_MEAL = "MEAL_INTERVIEW"
 SESSION_MODE_FIX = "ENTRY_FIX"
+FINALIZER_MAX_ATTEMPTS = 2
+FINALIZER_MAX_TOKENS = 1200
 
 
 @dataclass(frozen=True)
@@ -56,6 +67,27 @@ class InterviewAnswer:
             food_item_id=_optional_text(payload.get("food_item_id")),
             evidence=_optional_text(payload.get("evidence")),
         )
+
+
+@dataclass(frozen=True)
+class GroupFinalizerInput:
+    group_id: str
+    primary_segment_id: str
+    segment_ids: list[str]
+    confirmation_item: dict[str, Any]
+    group_state: dict[str, Any]
+    clarification_answers: list[dict[str, Any]]
+    segment: MealSegment | None
+    segment_ref: dict[str, Any]
+    trace_id: str | None = None
+
+
+@dataclass(frozen=True)
+class GroupFinalizerOutcome:
+    group_id: str
+    final_resolution: FinalSegmentResolution
+    finalized_confirmation_item: dict[str, Any]
+    audit_state: dict[str, Any]
 
 
 def get_interview_roadmap() -> list[str]:
@@ -319,6 +351,9 @@ def parse_confirmation_bulk_text(
     text: str,
     confirmation_items: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    if not _looks_like_confirmation_edit(text=text, confirmation_count=len(confirmation_items)):
+        return {"applied_bulk": False, "updates": []}
+
     parts = re.split(r"\s*,\s*|\s+and\s+|\s+second\s+is\s+", text, flags=re.IGNORECASE)
     cleaned_parts = [_clean_identity_text(part) for part in parts if _clean_identity_text(part)]
     if len(cleaned_parts) < len(confirmation_items) and "second is" in text.lower():
@@ -329,6 +364,24 @@ def parse_confirmation_bulk_text(
     for item, name in zip(confirmation_items, cleaned_parts, strict=False):
         updates.append({"segment_id": item.get("segment_id"), "name": name})
     return {"applied_bulk": bool(updates), "updates": updates}
+
+
+def _looks_like_confirmation_edit(*, text: str, confirmation_count: int) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    if re.search(
+        r"\b(first|second|third|fourth|fifth|sixth|item\s*\d+|\d+(?:st|nd|rd|th)?)\s+(?:is|=|:)\b",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    parts = [
+        _clean_identity_text(part)
+        for part in re.split(r"\s*,\s*|\s+and\s+", normalized, flags=re.IGNORECASE)
+    ]
+    meaningful_parts = [part for part in parts if part]
+    return confirmation_count > 1 and len(meaningful_parts) == confirmation_count
 
 
 def build_confirmation_message(confirmation_items: list[Mapping[str, Any]]) -> str:
@@ -729,6 +782,9 @@ def final_resolution_from_confirmation(
     item: Mapping[str, Any],
     segment: MealSegment | None = None,
     best_effort: bool = False,
+    aliases: list[str] | None = None,
+    correction_reason: str | None = None,
+    skip_grounding_handoff: bool = False,
 ) -> FinalSegmentResolution:
     parsed = InterviewAnswer.from_mapping(item)
     grounding_prep = build_grounding_prep(item)
@@ -742,11 +798,16 @@ def final_resolution_from_confirmation(
         and getattr(segment, "cropped_image_url", None) is not None
         and segment_embedding is not None
     )
+    quantity_json = _build_resolution_quantity_json(
+        item=item,
+        portion_bucket=parsed.portion_bucket,
+        grounding_prep=grounding_prep,
+    )
     return FinalSegmentResolution(
         food=ResolvedFoodInput(
             canonical_name=parsed.name,
             food_item_id=parsed.food_item_id,
-            aliases=[parsed.name],
+            aliases=_dedupe_texts(aliases or [parsed.name]),
             source_type=parsed.source_type,
             brand_name=parsed.brand_name,
             restaurant_name=parsed.restaurant_name,
@@ -760,10 +821,12 @@ def final_resolution_from_confirmation(
         segment_embedding=segment_embedding,
         portion_bucket=parsed.portion_bucket,
         identification_method="INTERVIEW_BEST_EFFORT" if best_effort else "INTERVIEW",
-        quantity_json={"grounding_prep": grounding_prep} if grounding_prep else None,
+        quantity_json=quantity_json,
         quantity_display=parsed.quantity_display,
         create_food_visual=(not best_effort) or can_preserve_visual_learning,
         visual_learning_eligible=(not best_effort) or can_preserve_visual_learning,
+        skip_grounding_handoff=skip_grounding_handoff,
+        correction_reason=_optional_text(correction_reason),
     )
 
 
@@ -817,21 +880,56 @@ async def finalize_confirmed_interview(
     force_degraded_save: bool = False,
     degraded_grounding_failure: Mapping[str, Any] | None = None,
 ):
-    segments_by_id = {segment.id: segment for segment in segments or []}
-    final_segments = [
-        final_resolution_from_confirmation(
-            item=item,
-            segment=segments_by_id.get(str(item.get("segment_id"))),
-            best_effort=best_effort,
+    finalized_confirmation_items = [dict(item) for item in confirmation_items]
+    finalizer_groups: list[dict[str, Any]] = []
+    finalizer_inputs = _build_group_finalizer_inputs(
+        meal=meal,
+        confirmation_items=confirmation_items,
+        interview_state=interview_state,
+        segments=segments or [],
+    )
+
+    if finalizer_inputs:
+        settings = get_settings()
+        llm_client = get_llm_client()
+        finalizer_outcomes = await _run_group_finalizers(
+            group_inputs=finalizer_inputs,
+            llm_client=llm_client,
+            settings=settings,
         )
-        for item in confirmation_items
-    ]
-    if any(resolution.food.needs_grounding for resolution in final_segments) and not force_degraded_save:
+        finalized_confirmation_items = [
+            dict(outcome.finalized_confirmation_item)
+            for outcome in finalizer_outcomes
+        ]
+        finalizer_groups = [
+            dict(outcome.audit_state)
+            for outcome in finalizer_outcomes
+        ]
+        final_segments = [outcome.final_resolution for outcome in finalizer_outcomes]
+    else:
+        segments_by_id = {segment.id: segment for segment in segments or []}
+        final_segments = [
+            final_resolution_from_confirmation(
+                item=item,
+                segment=segments_by_id.get(str(item.get("segment_id"))),
+                best_effort=best_effort,
+            )
+            for item in confirmation_items
+        ]
+
+    if any(
+        resolution.food.needs_grounding and not resolution.skip_grounding_handoff
+        for resolution in final_segments
+    ) and not force_degraded_save:
         meal.processing_status = MealProcessingStatus.INTERVIEWING
         meal.reasoning_state_json = build_grounding_reasoning_state(
-            confirmation_items=confirmation_items,
+            confirmation_items=finalized_confirmation_items,
             status="PENDING_HANDOFF",
-            extra={"handoff_target": "poll_post_interview_grounding"},
+            prior_state=getattr(meal, "reasoning_state_json", None),
+            extra={
+                "handoff_target": "poll_post_interview_grounding",
+                "finalizer_groups": finalizer_groups or None,
+            },
         )
         if hasattr(meal, "last_stage_started_at"):
             meal.last_stage_started_at = None
@@ -855,9 +953,10 @@ async def finalize_confirmed_interview(
         meal_status=MealProcessingStatus.COMPLETED,
         reasoning_state_json=_build_finalization_reasoning_state(
             meal=meal,
-            confirmation_items=confirmation_items,
+            confirmation_items=finalized_confirmation_items,
             best_effort=best_effort,
             interview_state=interview_state,
+            finalizer_groups=finalizer_groups,
             grounding_status=(
                 "DEGRADED_SAVED"
                 if force_degraded_save and degraded_grounding_failure is not None
@@ -879,6 +978,7 @@ def _build_finalization_reasoning_state(
     confirmation_items: list[Mapping[str, Any]],
     best_effort: bool,
     interview_state: Mapping[str, Any] | None,
+    finalizer_groups: list[Mapping[str, Any]] | None = None,
     grounding_status: str | None = None,
     grounding_failure: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -903,6 +1003,15 @@ def _build_finalization_reasoning_state(
             str(key): _json_safe_payload(value)
             for key, value in grounding_failure.items()
         }
+    if finalizer_groups:
+        state["finalizer_groups"] = [
+            {
+                str(key): _json_safe_payload(value)
+                for key, value in dict(group).items()
+            }
+            for group in finalizer_groups
+            if isinstance(group, Mapping)
+        ]
 
     clarification_answers = interview_payload.get("answers_by_question_id")
     if isinstance(clarification_answers, Mapping):
@@ -938,6 +1047,431 @@ def _build_finalization_reasoning_state(
     return state
 
 
+def _build_group_finalizer_inputs(
+    *,
+    meal: MealLog,
+    confirmation_items: list[Mapping[str, Any]],
+    interview_state: Mapping[str, Any] | None,
+    segments: list[MealSegment],
+) -> list[GroupFinalizerInput]:
+    reasoning_state = dict(getattr(meal, "reasoning_state_json", None) or {})
+    groups_by_id = {
+        _optional_text(group.get("group_id")) or f"group-{index}": dict(group)
+        for index, group in enumerate(_food_groups_from_reasoning_state(reasoning_state), start=1)
+    }
+    answers_by_question_id = _merged_answers_by_question_id(
+        reasoning_state=reasoning_state,
+        interview_state=interview_state,
+    )
+    segments_by_id = {
+        str(getattr(segment, "id", "")): segment
+        for segment in segments
+        if getattr(segment, "id", None) is not None
+    }
+
+    group_inputs: list[GroupFinalizerInput] = []
+    for index, item in enumerate(confirmation_items, start=1):
+        if not isinstance(item, Mapping):
+            continue
+        confirmation_item = dict(item)
+        group_id = _optional_text(confirmation_item.get("group_id")) or f"group-{index}"
+        segment_ids = _normalized_segment_ids(confirmation_item)
+        primary_segment_id = (
+            _optional_text(confirmation_item.get("primary_segment_id"))
+            or _optional_text(confirmation_item.get("segment_id"))
+            or (segment_ids[0] if segment_ids else None)
+            or f"segment-{index}"
+        )
+        if primary_segment_id not in segment_ids:
+            segment_ids.append(primary_segment_id)
+        group_state = dict(groups_by_id.get(group_id) or {})
+        segment = segments_by_id.get(primary_segment_id)
+        group_inputs.append(
+            GroupFinalizerInput(
+                group_id=group_id,
+                primary_segment_id=primary_segment_id,
+                segment_ids=segment_ids,
+                confirmation_item=confirmation_item,
+                group_state=group_state,
+                clarification_answers=_clarification_answers_for_group(
+                    answers_by_question_id=answers_by_question_id,
+                    group_id=group_id,
+                    primary_segment_id=primary_segment_id,
+                    segment_ids=segment_ids,
+                ),
+                segment=segment,
+                segment_ref=_segment_ref_payload(segment=segment, segment_ids=segment_ids),
+                trace_id=_group_trace_id(reasoning_state=reasoning_state, group_state=group_state),
+            )
+        )
+    return group_inputs
+
+
+async def _run_group_finalizers(
+    *,
+    group_inputs: list[GroupFinalizerInput],
+    llm_client: Any,
+    settings: Any,
+) -> list[GroupFinalizerOutcome]:
+    if not group_inputs:
+        return []
+    max_parallelism = max(1, int(getattr(settings, "FINALIZER_GROUP_PARALLELISM", 1)))
+    semaphore = asyncio.Semaphore(max_parallelism)
+
+    async def _run_one(group_input: GroupFinalizerInput) -> GroupFinalizerOutcome:
+        async with semaphore:
+            return await _finalize_group_input(
+                group_input=group_input,
+                llm_client=llm_client,
+                settings=settings,
+            )
+
+    return await asyncio.gather(*(_run_one(group_input) for group_input in group_inputs))
+
+
+async def _finalize_group_input(
+    *,
+    group_input: GroupFinalizerInput,
+    llm_client: Any,
+    settings: Any,
+) -> GroupFinalizerOutcome:
+    attempts: list[dict[str, Any]] = []
+    model_name = str(getattr(settings, "FINALIZER_MODEL", "google/gemini-3.1-flash-lite"))
+    last_error: Exception | None = None
+
+    for attempt in range(1, FINALIZER_MAX_ATTEMPTS + 1):
+        try:
+            response = await llm_client.chat_completion(
+                model=model_name,
+                messages=_group_finalizer_messages(group_input),
+                response_format=group_finalizer_response_format(),
+                extra_body={
+                    "parallel_tool_calls": False,
+                    "reasoning": {
+                        "max_tokens": 128,
+                        "exclude": True,
+                    },
+                },
+                max_tokens=FINALIZER_MAX_TOKENS,
+            )
+            parsed = parse_group_finalizer_response_payload(
+                response,
+                expected_group_id=group_input.group_id,
+            )
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "model": model_name,
+                    "status": "SUCCEEDED",
+                }
+            )
+            return _successful_group_finalizer_outcome(
+                group_input=group_input,
+                parsed=parsed,
+                attempts=attempts,
+            )
+        except Exception as exc:
+            last_error = exc
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "model": model_name,
+                    "status": "FAILED",
+                    "error": str(exc),
+                }
+            )
+
+    return _degraded_group_finalizer_outcome(
+        group_input=group_input,
+        attempts=attempts,
+        last_error=last_error,
+    )
+
+
+def _successful_group_finalizer_outcome(
+    *,
+    group_input: GroupFinalizerInput,
+    parsed: FinalizedGroupResult,
+    attempts: list[dict[str, Any]],
+) -> GroupFinalizerOutcome:
+    finalized_confirmation_item = _finalized_confirmation_item(
+        original_item=group_input.confirmation_item,
+        parsed=parsed,
+    )
+    final_resolution = final_resolution_from_confirmation(
+        item=finalized_confirmation_item,
+        segment=group_input.segment,
+        aliases=[parsed.final_name, *parsed.aliases],
+        correction_reason=parsed.correction_note,
+    )
+    handoff_action = (
+        "poll_post_interview_grounding"
+        if final_resolution.food.needs_grounding and not final_resolution.skip_grounding_handoff
+        else "apply_final_meal_resolution"
+    )
+    return GroupFinalizerOutcome(
+        group_id=group_input.group_id,
+        final_resolution=final_resolution,
+        finalized_confirmation_item=finalized_confirmation_item,
+        audit_state={
+            "group_id": group_input.group_id,
+            "status": "SUCCEEDED",
+            "attempt_count": len(attempts),
+            "attempts": attempts,
+            "final_name": parsed.final_name,
+            "source_type": parsed.source_type,
+            "handoff_action": handoff_action,
+        },
+    )
+
+
+def _degraded_group_finalizer_outcome(
+    *,
+    group_input: GroupFinalizerInput,
+    attempts: list[dict[str, Any]],
+    last_error: Exception | None,
+) -> GroupFinalizerOutcome:
+    fallback_item = dict(group_input.confirmation_item)
+    fallback_item["name"] = _best_effort_final_name(group_input)
+    final_resolution = final_resolution_from_confirmation(
+        item=fallback_item,
+        segment=group_input.segment,
+        best_effort=True,
+        skip_grounding_handoff=True,
+    )
+    finalized_confirmation_item = dict(fallback_item)
+    return GroupFinalizerOutcome(
+        group_id=group_input.group_id,
+        final_resolution=final_resolution,
+        finalized_confirmation_item=finalized_confirmation_item,
+        audit_state={
+            "group_id": group_input.group_id,
+            "status": "DEGRADED",
+            "attempt_count": len(attempts),
+            "attempts": attempts,
+            "final_name": fallback_item["name"],
+            "source_type": final_resolution.food.source_type,
+            "handoff_action": "apply_final_meal_resolution",
+            "error": str(last_error) if last_error is not None else "unknown finalizer failure",
+        },
+    )
+
+
+def _finalized_confirmation_item(
+    *,
+    original_item: Mapping[str, Any],
+    parsed: FinalizedGroupResult,
+) -> dict[str, Any]:
+    item = dict(original_item)
+    item.update(
+        {
+            "group_id": parsed.group_id,
+            "primary_segment_id": parsed.primary_segment_id,
+            "segment_id": _optional_text(item.get("segment_id")) or parsed.primary_segment_id,
+            "segment_ids": list(parsed.segment_ids),
+            "name": parsed.final_name,
+            "source_type": parsed.source_type,
+            "portion_bucket": parsed.portion_bucket,
+            "quantity_display": parsed.quantity_display,
+            "food_item_id": parsed.food_item_id,
+            "brand_name": parsed.brand_name,
+            "restaurant_name": parsed.restaurant_name,
+            "correction_note": parsed.correction_note,
+            "aliases": list(parsed.aliases),
+            "supporting_details": list(parsed.supporting_details),
+        }
+    )
+    if parsed.quantity_json is not None:
+        item["quantity_json"] = parsed.quantity_json.model_dump(mode="json", exclude_none=True)
+    return {key: value for key, value in item.items() if value is not None}
+
+
+def _group_finalizer_messages(group_input: GroupFinalizerInput) -> list[dict[str, str]]:
+    payload = {
+        "group_id": group_input.group_id,
+        "primary_segment_id": group_input.primary_segment_id,
+        "segment_ids": list(group_input.segment_ids),
+        "reasoning_group": dict(group_input.group_state),
+        "confirmation_item": dict(group_input.confirmation_item),
+        "clarification_answers": [dict(answer) for answer in group_input.clarification_answers],
+        "segment_ref": dict(group_input.segment_ref),
+    }
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You finalize one food group into strict save-ready metadata. "
+                "Do not ask any follow-up questions. Do not invent nutrition facts. "
+                "Preserve clarification answers that materially affect persistence, including identity, source/origin, and quantity. "
+                "The final_name must be a dish-level identity, not a raw fragment answer. "
+                "Return JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": "GROUP_FINALIZER_INPUT_JSON:\n"
+            + json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str),
+        },
+    ]
+
+
+def _build_resolution_quantity_json(
+    *,
+    item: Mapping[str, Any],
+    portion_bucket: str,
+    grounding_prep: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    quantity_json = (
+        dict(item.get("quantity_json"))
+        if isinstance(item.get("quantity_json"), Mapping)
+        else {}
+    )
+    if quantity_json or _optional_text(item.get("quantity_display")) or grounding_prep is not None:
+        quantity_json.setdefault("portion_bucket", portion_bucket)
+    source_origin_state = _optional_text(item.get("source_origin_state"))
+    if source_origin_state:
+        quantity_json["source_origin_state"] = source_origin_state
+    if grounding_prep is not None:
+        quantity_json["grounding_prep"] = dict(grounding_prep)
+    return quantity_json or None
+
+
+def _best_effort_final_name(group_input: GroupFinalizerInput) -> str:
+    confirmation_name = _optional_text(group_input.confirmation_item.get("name"))
+    if confirmation_name:
+        if _group_uses_detail_clarification(group_input) and (base_name := _best_effort_base_name(group_input)):
+            if base_name.casefold() not in confirmation_name.casefold():
+                return f"{base_name} ({confirmation_name})"
+        return confirmation_name
+    return _best_effort_base_name(group_input) or "Unknown food"
+
+
+def _best_effort_base_name(group_input: GroupFinalizerInput) -> str | None:
+    candidate_name = _selected_group_name(group_input.group_state)
+    group_label = _optional_text(
+        group_input.group_state.get("group_label") or group_input.group_state.get("label")
+    )
+    return candidate_name or group_label
+
+
+def _group_uses_detail_clarification(group_input: GroupFinalizerInput) -> bool:
+    question_kind = _question_kind(group_input.group_state.get("question_kind"))
+    if question_kind == "DETAIL" or _optional_text(group_input.group_state.get("question_focus")):
+        return True
+    for answer in group_input.clarification_answers:
+        if _question_kind(answer.get("question_kind")) == "DETAIL":
+            return True
+    return False
+
+
+def _food_groups_from_reasoning_state(reasoning_state: object) -> list[dict[str, Any]]:
+    if not isinstance(reasoning_state, Mapping):
+        return []
+    groups = reasoning_state.get("food_groups")
+    if not isinstance(groups, list):
+        meal_reasoning = reasoning_state.get("meal_reasoning")
+        groups = meal_reasoning.get("food_groups") if isinstance(meal_reasoning, Mapping) else None
+    if not isinstance(groups, list):
+        return []
+    return [dict(group) for group in groups if isinstance(group, Mapping)]
+
+
+def _merged_answers_by_question_id(
+    *,
+    reasoning_state: Mapping[str, Any],
+    interview_state: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for source in (
+        reasoning_state.get("answers_by_question_id"),
+        dict(interview_state or {}).get("answers_by_question_id"),
+    ):
+        if not isinstance(source, Mapping):
+            continue
+        for key, value in source.items():
+            if isinstance(value, Mapping):
+                merged[str(key)] = dict(value)
+    return merged
+
+
+def _clarification_answers_for_group(
+    *,
+    answers_by_question_id: Mapping[str, Mapping[str, Any]],
+    group_id: str,
+    primary_segment_id: str,
+    segment_ids: list[str],
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    segment_id_set = {segment_id for segment_id in segment_ids if segment_id}
+    for answer in answers_by_question_id.values():
+        answer_group_id = _optional_text(answer.get("group_id"))
+        answer_primary_segment_id = _optional_text(
+            answer.get("primary_segment_id") or answer.get("segment_id")
+        )
+        answer_segment_ids = {
+            str(segment_id)
+            for segment_id in answer.get("segment_ids") or []
+            if segment_id is not None
+        }
+        if answer_group_id == group_id:
+            selected.append(dict(answer))
+            continue
+        if answer_primary_segment_id == primary_segment_id:
+            selected.append(dict(answer))
+            continue
+        if answer_segment_ids & segment_id_set:
+            selected.append(dict(answer))
+    return selected
+
+
+def _segment_ref_payload(
+    *,
+    segment: MealSegment | None,
+    segment_ids: list[str],
+) -> dict[str, Any]:
+    if segment is None:
+        return {"segment_ids": list(segment_ids)}
+    return {
+        "segment_ids": list(segment_ids),
+        "segment_id": getattr(segment, "id", None),
+        "label": getattr(segment, "label", None),
+        "crop_path": getattr(segment, "cropped_image_url", None),
+        "image_path": getattr(segment, "image_url", None),
+    }
+
+
+def _group_trace_id(
+    *,
+    reasoning_state: Mapping[str, Any],
+    group_state: Mapping[str, Any],
+) -> str | None:
+    return (
+        _optional_text(group_state.get("trace_id"))
+        or _optional_text(reasoning_state.get("trace_id"))
+        or _optional_text(
+            dict(reasoning_state.get("meal_reasoning") or {}).get("trace_id")
+        )
+    )
+
+
+def _normalized_segment_ids(payload: Mapping[str, Any]) -> list[str]:
+    segment_ids: list[str] = []
+    for key in ("segment_ids",):
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                segment_id = str(item).strip()
+                if segment_id and segment_id not in segment_ids:
+                    segment_ids.append(segment_id)
+    segment_id = _optional_text(payload.get("segment_id"))
+    if segment_id and segment_id not in segment_ids:
+        segment_ids.append(segment_id)
+    primary_segment_id = _optional_text(payload.get("primary_segment_id"))
+    if primary_segment_id and primary_segment_id not in segment_ids:
+        segment_ids.append(primary_segment_id)
+    return segment_ids
+
+
 def _clean_identity_text(text: object) -> str:
     value = str(text or "").strip()
     value = re.sub(r"^(actually\s+)?(it'?s|its|first is|second is)\s+", "", value, flags=re.IGNORECASE)
@@ -951,6 +1485,23 @@ def _optional_text(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _dedupe_texts(values: list[str] | None) -> list[str] | None:
+    if values is None:
+        return None
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _optional_text(value)
+        if text is None:
+            continue
+        lowered = text.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(text)
+    return normalized or None
 
 
 def _text(value: object, *, default: str) -> str:
@@ -1186,9 +1737,20 @@ def _group_state_payload(group: Mapping[str, Any], *, ordinal: int) -> dict[str,
 
 
 def _group_needs_interview(group: Mapping[str, Any]) -> bool:
+    actions = _group_actions(group)
     action = str(group.get("group_action") or group.get("action") or "").upper()
     state = str(group.get("group_state") or group.get("state") or "").upper()
-    return action in {"INTERVIEW", "ASK_CHOICE", "ASK_QUANTITY"} or state in {
+    return bool(
+        actions
+        & {
+            "AFFIRMATION_REQUIRED",
+            "IDENTITY_CLARIFICATION_REQUIRED",
+            "ASK_SOURCE_ORIGIN",
+            "ASK_QUANTITY",
+            "INTERVIEW",
+            "ASK_CHOICE",
+        }
+    ) or action in {"INTERVIEW", "ASK_CHOICE", "ASK_QUANTITY", "ASK_SOURCE_ORIGIN"} or state in {
         "UNRESOLVED",
         "PENDING_INTERVIEW",
         "PENDING_CHOICE",
@@ -1200,9 +1762,25 @@ def _group_needs_interview(group: Mapping[str, Any]) -> bool:
 def _group_is_approval_candidate(group: Mapping[str, Any]) -> bool:
     if _group_needs_interview(group):
         return False
+    actions = _group_actions(group)
     action = str(group.get("group_action") or group.get("action") or "").upper()
     state = str(group.get("group_state") or group.get("state") or "").upper()
-    return action in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE", "READY_TO_WRITE"} or state == "READY_TO_WRITE"
+    return bool(actions & {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE", "AUTO_CONFIRM_LEARNED"}) or action in {
+        "AUTO_CONFIRM",
+        "AUTO_CONFIRM_WITH_TRACE",
+        "READY_TO_WRITE",
+    } or state == "READY_TO_WRITE"
+
+
+def _group_actions(group: Mapping[str, Any]) -> set[str]:
+    raw_actions = group.get("group_actions")
+    if not isinstance(raw_actions, list):
+        return set()
+    return {
+        str(action).strip().upper()
+        for action in raw_actions
+        if isinstance(action, str) and str(action).strip()
+    }
 
 
 def _pending_target_sort_key(target: Mapping[str, Any]) -> tuple[int, str]:
@@ -1291,29 +1869,10 @@ def _food_groups_from_reasoning_state(reasoning_state: object) -> list[dict[str,
     return [dict(group) for group in groups if isinstance(group, Mapping)]
 
 
-def _clarification_schema_from_reasoning_state(reasoning_state: object) -> list[dict[str, Any]]:
-    if not isinstance(reasoning_state, Mapping):
-        return []
-    clarification = reasoning_state.get("clarification_schema")
-    if isinstance(clarification, Mapping):
-        clarification = clarification.get("questions")
-    if not isinstance(clarification, list):
-        meal_reasoning = reasoning_state.get("meal_reasoning")
-        clarification = meal_reasoning.get("clarification_schema") if isinstance(meal_reasoning, Mapping) else None
-    if isinstance(clarification, Mapping):
-        clarification = clarification.get("questions")
-    if not isinstance(clarification, list):
-        return []
-    return [dict(question) for question in clarification if isinstance(question, Mapping)]
-
-
 def _clarification_questions_from_food_groups(reasoning_state: object) -> list[dict[str, Any]]:
     questions: list[dict[str, Any]] = []
     for group in _food_groups_from_reasoning_state(reasoning_state):
         actions = group.get("clarification_actions")
-        if not isinstance(actions, list):
-            clarification_alias = group.get("clarification")
-            actions = [clarification_alias] if isinstance(clarification_alias, Mapping) else []
         if not isinstance(actions, list) or not actions:
             continue
         group_id = _optional_text(group.get("group_id")) or f"group-{len(questions) + 1}"
@@ -1355,11 +1914,6 @@ def _build_clarification_question_state(
 ) -> dict[str, Any]:
     clarification_questions = _clarification_questions_from_food_groups(reasoning_state)
     if not clarification_questions:
-        clarification_questions = [
-            _normalize_clarification_question(question)
-            for question in _clarification_schema_from_reasoning_state(reasoning_state)
-        ]
-    if not clarification_questions:
         return {}
     questions = list(clarification_questions)
     question_order = [question["question_id"] for question in questions if _optional_text(question.get("question_id"))]
@@ -1391,13 +1945,16 @@ def _normalize_clarification_question(question: Mapping[str, Any]) -> dict[str, 
     question_kind = _question_kind(
         question.get("question_kind") or question.get("kind") or question.get("type")
     )
+    answer_type = _normalize_answer_type(question.get("answer_type"))
     choices = _normalize_question_choices(question.get("choices"))
+    if answer_type == "confirm":
+        choices = _normalize_confirm_choices(choices)
     allow_other = bool(question.get("allow_other"))
     if any(choice["choice_id"] == "__other__" for choice in choices):
         allow_other = True
         choices = [choice for choice in choices if choice["choice_id"] != "__other__"]
     required = bool(question.get("required"))
-    if question_kind in {"APPROVAL", "AFFIRMATION"}:
+    if question_kind == "APPROVAL":
         required = False
 
     normalized = {
@@ -1408,7 +1965,7 @@ def _normalize_clarification_question(question: Mapping[str, Any]) -> dict[str, 
         "question_kind": question_kind,
         "type": _optional_text(question.get("type")) or question_kind,
         "question_focus": _optional_text(question.get("question_focus")),
-        "answer_type": _normalize_answer_type(question.get("answer_type")),
+        "answer_type": answer_type,
         "required": required,
         "label": _optional_text(question.get("group_label") or question.get("label")) or "this item",
         "user_prompt": _optional_text(question.get("user_prompt") or question.get("prompt")),
@@ -1494,6 +2051,34 @@ def _normalize_question_choices(value: object) -> list[dict[str, Any]]:
         if label:
             choices.append({"choice_id": _slugify_choice_id(label), "label": label, "value": label})
     return choices
+
+
+def _normalize_confirm_choices(choices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    defaults = {
+        "approve": {"choice_id": "approve", "label": "Yes", "value": "Yes"},
+        "correct": {"choice_id": "correct", "label": "No", "value": "No"},
+    }
+    normalized: dict[str, dict[str, Any]] = {}
+    for choice in choices:
+        raw_id = str(choice.get("choice_id") or "").strip().lower()
+        raw_value = str(choice.get("value") or "").strip().lower()
+        raw_label = str(choice.get("label") or "").strip().lower()
+        tokens = {raw_id, raw_value, raw_label}
+        if tokens & {"approve", "approved", "yes", "y", "true"}:
+            canonical = "approve"
+        elif tokens & {"correct", "correction", "no", "n", "false", "edit"}:
+            canonical = "correct"
+        else:
+            continue
+        normalized.setdefault(
+            canonical,
+            {
+                **defaults[canonical],
+                "label": str(choice.get("label") or defaults[canonical]["label"]),
+                "value": str(choice.get("value") or choice.get("label") or defaults[canonical]["value"]),
+            },
+        )
+    return [normalized.get("approve", defaults["approve"]), normalized.get("correct", defaults["correct"])]
 
 
 def _slugify_choice_id(value: str) -> str:

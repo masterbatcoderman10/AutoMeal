@@ -782,15 +782,48 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         captured: dict[str, object] = {}
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "group_id": "group-egg",
+                                        "primary_segment_id": "seg-egg-1",
+                                        "segment_ids": ["seg-egg-1"],
+                                        "final_name": "egg curry with bottle gourd",
+                                        "aliases": ["egg curry with bottle gourd"],
+                                        "source_type": "HOME",
+                                        "portion_bucket": "STANDARD",
+                                        "quantity_display": None,
+                                        "quantity_json": None,
+                                        "food_item_id": None,
+                                        "brand_name": None,
+                                        "restaurant_name": None,
+                                        "correction_note": None,
+                                        "supporting_details": [],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
+        )
 
         async def _capture_apply_final_meal_resolution(**kwargs):
             captured.update(kwargs)
             return {"meal_entries": [], "food_visuals": [], "correction_events": []}
 
-        with patch.object(
-            interview_service,
-            "apply_final_meal_resolution",
-            new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
         ):
             await interview_service.finalize_confirmed_interview(
                 session=session,
@@ -928,7 +961,7 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
         final_segments = captured["final_segments"]
         self.assertEqual(len(final_segments), 1)
         self.assertEqual(final_segments[0].food.canonical_name, "Chicken curry (green masala)")
-        self.assertEqual(final_segments[0].food.aliases, ["Green masala chicken curry"])
+        self.assertIn("Green masala chicken curry", final_segments[0].food.aliases or [])
         self.assertEqual(final_segments[0].food.source_type, "HOME")
         self.assertEqual(final_segments[0].quantity_display, "2 pieces")
         self.assertEqual(

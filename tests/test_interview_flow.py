@@ -580,6 +580,97 @@ class InterviewConfirmationEditTests(unittest.TestCase):
 
 
 class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_interview_session_consumes_synthesized_source_actions_with_stable_segment_ids(self) -> None:
+        from app.services import interview_service, reasoning_service
+
+        class EmptyResult:
+            def scalar_one_or_none(self):
+                return None
+
+        class FakeSession:
+            async def execute(self, _statement):
+                return EmptyResult()
+
+            def add(self, _item) -> None:
+                return None
+
+        reasoning_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-interview-handoff-source",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "visual-only bread can be named but has no usable learned history",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-flatbread",
+                    "group_label": "flatbread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "seg-flatbread-1",
+                    "segment_ids": ["seg-flatbread-1", "seg-flatbread-2"],
+                    "selected_candidate_id": "candidate-khubz",
+                    "visual_evidence": ["flatbread on plate"],
+                    "missing_evidence": [],
+                    "decision_rationale": "visual-only bread looks like khubz",
+                    "gate_reason": "",
+                    "question_kind": "NONE",
+                    "question_focus": "",
+                    "question_examples": [],
+                    "learned_match_count": 0,
+                    "top_3": [
+                        {
+                            "candidate_id": "candidate-khubz",
+                            "label": "White Bread (Khubz)",
+                            "identity_confidence": 0.98,
+                            "quantity_confidence": 0.7,
+                            "match_consistency_confidence": 0.98,
+                            "visual_evidence": ["flatbread on plate"],
+                            "missing_evidence": [],
+                            "specificity": "high",
+                            "nutrition_relevance": "medium",
+                            "source": "visual_reasoning",
+                            "decision_rationale": "best bread match",
+                        },
+                        {
+                            "candidate_id": "candidate-pita",
+                            "label": "Pita Bread",
+                            "identity_confidence": 0.73,
+                            "quantity_confidence": 0.7,
+                            "match_consistency_confidence": 0.73,
+                            "visual_evidence": ["flatbread on plate"],
+                            "missing_evidence": [],
+                            "specificity": "high",
+                            "nutrition_relevance": "medium",
+                            "source": "visual_reasoning",
+                            "decision_rationale": "fallback bread match",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        gated = reasoning_service.evaluate_reasoning_gate(reasoning_payload=reasoning_payload)
+        meal = SimpleNamespace(id="meal-source-handoff", reasoning_state_json={"meal_reasoning": gated})
+        interview = await interview_service.prepare_interview_session(
+            session=FakeSession(),
+            meal=meal,
+            segments=[SimpleNamespace(id="seg-flatbread-1", label="flatbread")],
+            chat_id="chat-source-handoff",
+        )
+
+        state = interview.current_prompt_payload
+        self.assertEqual(
+            state["question_order"],
+            ["group-flatbread:affirmation", "group-flatbread:source_origin"],
+        )
+        self.assertEqual(state["current_question"]["question_id"], "group-flatbread:affirmation")
+        self.assertEqual(
+            state["questions_by_id"]["group-flatbread:source_origin"]["segment_ids"],
+            ["seg-flatbread-1", "seg-flatbread-2"],
+        )
+
     def test_build_interview_turn_state_includes_unresolved_and_approval_groups(self) -> None:
         from app.services import interview_service
 

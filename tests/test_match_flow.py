@@ -1092,6 +1092,119 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.quantity_json["unit"], "bar")
         self.assertEqual(result.food_visuals[0].cropped_image_url, "/data/uploads/crops/seg-packaged-1.jpg")
 
+    async def test_finalize_confirmed_interview_preserves_source_detail_fields_in_authoritative_write(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-source-detail-preserve",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "trace_id": "trace-source-detail",
+                    "food_groups": [
+                        {
+                            "group_id": "group-bar",
+                            "group_label": "protein bar",
+                            "question_kind": "IDENTITY",
+                            "group_actions": ["ASK_SOURCE_ORIGIN"],
+                            "primary_segment_id": "seg-bar-1",
+                            "segment_ids": ["seg-bar-1", "seg-bar-2"],
+                        }
+                    ]
+                }
+            },
+        )
+        segment = SimpleNamespace(
+            id="seg-bar-1",
+            cropped_image_url="/data/uploads/crops/seg-bar-1.jpg",
+            embedding=[0.55] * EMBEDDING_DIMENSION,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        confirmation_items = [
+            {
+                "group_id": "group-bar",
+                "primary_segment_id": "seg-bar-1",
+                "segment_id": "seg-bar-1",
+                "segment_ids": ["seg-bar-1", "seg-bar-2"],
+                "name": "Protein Bar",
+                "source_type": "PACKAGED",
+                "source_origin_state": "PACKAGED_BRANDED",
+                "brand_name": "Acme",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "quantity_display": "1 bar",
+            }
+        ]
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "group_id": "group-bar",
+                                        "primary_segment_id": "seg-bar-1",
+                                        "segment_ids": ["seg-bar-1", "seg-bar-2"],
+                                        "final_name": "Acme Protein Bar",
+                                        "aliases": ["Protein Bar"],
+                                        "source_type": "PACKAGED",
+                                        "portion_bucket": "STANDARD",
+                                        "quantity_display": "1 bar",
+                                        "quantity_json": {
+                                            "quantity": 1,
+                                            "unit": "bar",
+                                            "portion_bucket": "STANDARD",
+                                        },
+                                        "food_item_id": None,
+                                        "brand_name": "Acme",
+                                        "restaurant_name": None,
+                                        "correction_note": None,
+                                        "supporting_details": ["store-bought packaged item"],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
+        )
+
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
+        ):
+            await interview_service.finalize_confirmed_interview(
+                session=session,
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=[segment],
+            )
+
+        final_segments = captured["final_segments"]
+        self.assertEqual(final_segments[0].food.source_type, "PACKAGED")
+        self.assertEqual(final_segments[0].food.brand_name, "Acme")
+        reasoning_state_json = captured["reasoning_state_json"]
+        self.assertEqual(
+            reasoning_state_json["resolver_payload"]["confirmation_items"][0]["segment_ids"],
+            ["seg-bar-1", "seg-bar-2"],
+        )
+        self.assertEqual(
+            reasoning_state_json["resolver_payload"]["confirmation_items"][0]["brand_name"],
+            "Acme",
+        )
+
 
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_post_interview_grounding_quota_failure_surfaces_blocker_and_degraded_save(self) -> None:

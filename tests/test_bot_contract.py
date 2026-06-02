@@ -343,6 +343,176 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
+    async def test_interview_text_confirm_replaces_visible_fix_targets_with_current_meal(self) -> None:
+        from bot.handlers import interview_text
+
+        interview = SimpleNamespace(
+            id="interview-confirm-fix-targets",
+            meal_log_id="meal-confirm-fix-targets",
+            is_active=True,
+            state_key="CONFIRMATION",
+            current_prompt_payload={
+                "roadmap_step": "CONFIRMATION",
+                "confirmation_items": [
+                    {
+                        "group_id": "group-1",
+                        "segment_id": "seg-1",
+                        "primary_segment_id": "seg-1",
+                        "segment_ids": ["seg-1"],
+                        "name": "Dal",
+                        "source_type": "HOME",
+                        "portion_bucket": "STANDARD",
+                    }
+                ],
+                "interview_messages": [],
+            },
+        )
+        meal = SimpleNamespace(id="meal-confirm-fix-targets", segments=[SimpleNamespace(id="seg-1")])
+        session = AsyncMock()
+        session.add = Mock()
+        session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            message=SimpleNamespace(chat=SimpleNamespace(id="999"), text="confirm", reply_text=reply_text),
+            callback_query=None,
+        )
+        context = SimpleNamespace(
+            bot_data={
+                "recent_entries": [
+                    {
+                        "id": "old-entry",
+                        "short_id": "old-entry",
+                        "food_name": "Older meal item",
+                        "quantity_display": "1 bowl",
+                        "meal_id": "older-meal",
+                    }
+                ]
+            }
+        )
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
+            patch(
+                "bot.handlers.interview_service.finalize_confirmed_interview",
+                AsyncMock(
+                    return_value={
+                        "grounding_required": False,
+                        "meal_entries": [
+                            SimpleNamespace(
+                                id="entry-new",
+                                segment_id="seg-1",
+                                quantity_display="1 bowl",
+                            )
+                        ],
+                    }
+                ),
+            ),
+        ):
+            await interview_text(update, context)
+
+        sent_text = reply_text.await_args.args[0]
+        self.assertIn("Meal confirmation saved.", sent_text)
+        self.assertIn("Fix targets:", sent_text)
+        self.assertIn("1. entry-ne Dal (1 bowl)", sent_text)
+        self.assertNotIn("Older meal item", sent_text)
+        self.assertEqual(
+            context.bot_data["recent_entries"],
+            [
+                {
+                    "id": "entry-new",
+                    "short_id": "entry-ne",
+                    "food_name": "Dal",
+                    "quantity_display": "1 bowl",
+                    "meal_id": "meal-confirm-fix-targets",
+                }
+            ],
+        )
+
+    def test_recent_entries_from_confirmation_prefers_written_food_item_names_over_segment_names(self) -> None:
+        from bot.handlers import _recent_entries_from_confirmation
+
+        meal_entries = [
+            SimpleNamespace(
+                id="f6359c02-aaaa-bbbb-cccc-000000000001",
+                segment_id="seg-shared",
+                quantity_display=None,
+                food_item=SimpleNamespace(name="Homemade Basmati Rice"),
+            ),
+            SimpleNamespace(
+                id="9c87a427-aaaa-bbbb-cccc-000000000002",
+                segment_id="seg-shared",
+                quantity_display=None,
+                food_item=SimpleNamespace(name="Chicken Curry"),
+            ),
+            SimpleNamespace(
+                id="753d7b82-aaaa-bbbb-cccc-000000000003",
+                segment_id="seg-kebab",
+                quantity_display=None,
+                food_item=SimpleNamespace(name="Chicken Shami Kebab"),
+            ),
+        ]
+        confirmation_items = [
+            {
+                "group_id": "group-rice",
+                "segment_id": "seg-shared",
+                "name": "Chicken Curry",
+            },
+            {
+                "group_id": "group-curry",
+                "segment_id": "seg-shared",
+                "name": "Chicken Curry",
+            },
+            {
+                "group_id": "group-kebab",
+                "segment_id": "seg-kebab",
+                "name": "Chicken",
+            },
+        ]
+
+        recent_entries = _recent_entries_from_confirmation(
+            meal_id="meal-confirm-fix-targets",
+            meal_entries=meal_entries,
+            confirmation_items=confirmation_items,
+        )
+
+        self.assertEqual(
+            recent_entries,
+            [
+                {
+                    "id": "f6359c02-aaaa-bbbb-cccc-000000000001",
+                    "short_id": "f6359c02",
+                    "food_name": "Homemade Basmati Rice",
+                    "quantity_display": None,
+                    "meal_id": "meal-confirm-fix-targets",
+                },
+                {
+                    "id": "9c87a427-aaaa-bbbb-cccc-000000000002",
+                    "short_id": "9c87a427",
+                    "food_name": "Chicken Curry",
+                    "quantity_display": None,
+                    "meal_id": "meal-confirm-fix-targets",
+                },
+                {
+                    "id": "753d7b82-aaaa-bbbb-cccc-000000000003",
+                    "short_id": "753d7b82",
+                    "food_name": "Chicken Shami Kebab",
+                    "quantity_display": None,
+                    "meal_id": "meal-confirm-fix-targets",
+                },
+            ],
+        )
+
     async def test_interview_text_confirm_queues_grounding_handoff(self) -> None:
         from bot.handlers import interview_text
         from bot.messages import format_grounding_pending_message
@@ -1850,6 +2020,7 @@ class OpenRouterContractTests(unittest.IsolatedAsyncioTestCase):
             response_format=response_format,
             tools=None,
             extra_body=extra_body,
+            temperature=0.3,
         )
 
 
@@ -3002,7 +3173,17 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
 
         session_factory = Mock(return_value=SessionContext())
         bot = SimpleNamespace(send_message=AsyncMock())
-        bot_data: dict[str, object] = {}
+        bot_data: dict[str, object] = {
+            "recent_entries": [
+                {
+                    "id": "older-entry",
+                    "short_id": "older-en",
+                    "food_name": "Older meal item",
+                    "quantity_display": "1 bowl",
+                    "meal_id": "older-meal",
+                }
+            ]
+        }
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
             MATCHING_MODEL="google/gemini-embedding-2-preview",
@@ -3070,10 +3251,12 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01, bot_data=bot_data)
 
-        self.assertEqual(bot_data["recent_entries"][0]["id"], "entry-1")
+        self.assertEqual(bot_data["recent_entries"], [{"id": "entry-1", "short_id": "entry-1", "food_name": "Daal Chawal", "quantity_display": "1 bowl", "meal_id": "12345678-abcd-efgh"}])
         sent_text = bot.send_message.await_args.kwargs["text"]
         self.assertIn("Fix targets:", sent_text)
         self.assertIn("/fix 1", sent_text)
+        self.assertIn("1. entry-1 Daal Chawal (1 bowl)", sent_text)
+        self.assertNotIn("Older meal item", sent_text)
 
     def test_completion_items_use_written_diary_entry_food_item_when_match_result_has_no_visual(self) -> None:
         from bot import polling

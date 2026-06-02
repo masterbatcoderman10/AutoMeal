@@ -350,26 +350,49 @@ async def _finalize_interview_confirmation(*, session, interview: InterviewSessi
 
 
 def _recent_entries_from_confirmation(*, meal_id: str, meal_entries: list[DiaryEntry], confirmation_items: list[dict]) -> list[dict]:
+    finalized_items = [
+        dict(item)
+        for item in confirmation_items
+        if isinstance(item, Mapping)
+    ]
     names_by_segment = {
         str(item.get("segment_id") or ""): item.get("name")
-        for item in confirmation_items
+        for item in finalized_items
     }
-    return [
-        correction_service.build_recent_entry_record(
-            entry_id=entry.id,
-            food_name=names_by_segment.get(str(getattr(entry, "segment_id", "") or "")),
-            quantity_display=getattr(entry, "quantity_display", None),
-            meal_id=meal_id,
+    recent_entries: list[dict] = []
+    for index, entry in enumerate(meal_entries):
+        if not getattr(entry, "id", None):
+            continue
+        food_item = getattr(entry, "food_item", None)
+        food_name = getattr(food_item, "name", None)
+        if not food_name and index < len(finalized_items):
+            food_name = finalized_items[index].get("name")
+        if not food_name:
+            food_name = names_by_segment.get(str(getattr(entry, "segment_id", "") or ""))
+        recent_entries.append(
+            correction_service.build_recent_entry_record(
+                entry_id=entry.id,
+                food_name=food_name,
+                quantity_display=getattr(entry, "quantity_display", None),
+                meal_id=meal_id,
+            )
         )
-        for entry in meal_entries
-        if getattr(entry, "id", None)
-    ]
+    return recent_entries
 
 
-def _remember_recent_entry_context(bot_data: dict, new_entries: list[dict]) -> list[dict]:
-    recent_entries = correction_service.remember_recent_entries(
-        bot_data.get("recent_entries"),
-        new_entries,
+def _remember_recent_entry_context(
+    bot_data: dict,
+    new_entries: list[dict],
+    *,
+    merge: bool = True,
+) -> list[dict]:
+    recent_entries = (
+        correction_service.remember_recent_entries(
+            bot_data.get("recent_entries"),
+            new_entries,
+        )
+        if merge
+        else [dict(entry) for entry in list(new_entries or [])]
     )
     bot_data["recent_entries"] = recent_entries
     return recent_entries
@@ -754,6 +777,7 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         meal_entries=_finalized_meal_entries(finalized),
                         confirmation_items=list(finalized["confirmation_items"]),
                     ),
+                    merge=False,
                 )
                 reply = "Meal confirmation saved."
                 fix_targets = format_recent_fix_targets(recent_entries)
@@ -852,6 +876,7 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             meal_entries=_finalized_meal_entries(finalized),
                             confirmation_items=list(finalized["confirmation_items"]),
                         ),
+                        merge=False,
                     )
                     reply = "Meal confirmation saved."
                     fix_targets = format_recent_fix_targets(recent_entries)
@@ -1022,6 +1047,7 @@ async def _handle_meal_interview_turn(*, session, interview: InterviewSession, s
                 meal_entries=_finalized_meal_entries(finalized),
                 confirmation_items=list(finalized["confirmation_items"]),
             ),
+            merge=False,
         )
         reply = "Meal confirmation saved."
         fix_targets = format_recent_fix_targets(recent_entries)

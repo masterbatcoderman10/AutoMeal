@@ -1020,6 +1020,7 @@ async def poll_post_interview_grounding(
                                     match_results=match_results,
                                     meal_resolution=finalization.get("meal_resolution"),
                                 ),
+                                merge=False,
                             )
                             fix_targets = format_recent_fix_targets(recent_entries)
                             if fix_targets:
@@ -1434,12 +1435,21 @@ def _recent_entries_from_meal_resolution(
     return recent_entries
 
 
-def _remember_recent_entry_context(bot_data: dict | None, new_entries: list[dict]) -> list[dict]:
+def _remember_recent_entry_context(
+    bot_data: dict | None,
+    new_entries: list[dict],
+    *,
+    merge: bool = True,
+) -> list[dict]:
     if bot_data is None:
         return new_entries
-    recent_entries = correction_service.remember_recent_entries(
-        bot_data.get("recent_entries"),
-        new_entries,
+    recent_entries = (
+        correction_service.remember_recent_entries(
+            bot_data.get("recent_entries"),
+            new_entries,
+        )
+        if merge
+        else [dict(entry) for entry in list(new_entries or [])]
     )
     bot_data["recent_entries"] = recent_entries
     return recent_entries
@@ -1544,6 +1554,7 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                                     match_results=match_results,
                                     meal_resolution=finalization.get("meal_resolution"),
                                 ),
+                                merge=False,
                             )
                             text = format_match_completion_message(completion_items)
                             fix_targets = format_recent_fix_targets(recent_entries)

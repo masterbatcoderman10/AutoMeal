@@ -33,6 +33,7 @@ _INTERVIEW_STATES = {
 _INTERVIEW_STATE_FROM_OUTPUT = "PENDING_INTERVIEW"
 _CONFIDENCE_MARGIN = 0.05
 _NUTRITION_IMPACT_THRESHOLD = 0.40
+_REASONING_VECTOR_CANDIDATE_MIN_SIMILARITY = 0.92
 _SOURCE_ORIGIN_CHOICES = (
     "HOME_COOKED",
     "STORE_BOUGHT_PREPARED",
@@ -61,6 +62,71 @@ _SOURCE_ORIGIN_TOKENS = {
     "takeout",
 }
 
+_GROUP_ACTION_ORDER = (
+    _REVIEW_STATE,
+    _FAILED_UNCLEAR_STATE,
+    "IDENTITY_CLARIFICATION_REQUIRED",
+    "AFFIRMATION_REQUIRED",
+    "ASK_QUANTITY",
+    "ASK_SOURCE_ORIGIN",
+    "AUTO_CONFIRM_LEARNED",
+    "AUTO_CONFIRM_WITH_TRACE",
+    "AUTO_CONFIRM",
+)
+
+
+def _primary_group_action(group_actions: list[str]) -> str:
+    for action in _GROUP_ACTION_ORDER:
+        if action in group_actions:
+            return action
+    return _REVIEW_STATE
+
+
+def _group_actions_for_result(
+    *,
+    group: Mapping[str, Any],
+    group_action: str,
+    clarification_actions: list[dict[str, Any]],
+) -> list[str]:
+    raw_actions = group.get("group_actions")
+    actions = [
+        str(action).strip().upper()
+        for action in raw_actions
+        if isinstance(action, str) and str(action).strip()
+    ] if isinstance(raw_actions, list) else []
+    actions.append(group_action)
+    for action in clarification_actions:
+        action_type = (_coerce_str(action.get("type"), "type") or "").upper()
+        action_kind = (_coerce_str(action.get("kind"), "kind") or "").upper()
+        if action_type == "SOURCE_ORIGIN" or action_kind == "SOURCE_ORIGIN":
+            actions.append("ASK_SOURCE_ORIGIN")
+        elif action_type == "QUANTITY" or action_kind == "QUANTITY":
+            actions.append("ASK_QUANTITY")
+        elif action_type == "AFFIRMATION" or action_kind == "AFFIRMATION":
+            actions.append("AFFIRMATION_REQUIRED")
+        elif action_type in {"CHOICE", "FREE_TEXT"} or action_kind in {"IDENTITY", "DETAIL", "CHOICE", "FREE_TEXT"}:
+            actions.append("IDENTITY_CLARIFICATION_REQUIRED")
+
+    deduped: list[str] = []
+    for action in actions:
+        if action not in _GROUP_ACTION_ORDER or action in deduped:
+            continue
+        deduped.append(action)
+
+    if _FAILED_UNCLEAR_STATE in deduped:
+        return [_FAILED_UNCLEAR_STATE]
+    if _REVIEW_STATE in deduped:
+        return [_REVIEW_STATE]
+    if "IDENTITY_CLARIFICATION_REQUIRED" in deduped and "AFFIRMATION_REQUIRED" in deduped:
+        deduped = [action for action in deduped if action != "AFFIRMATION_REQUIRED"]
+    if any(action in {"IDENTITY_CLARIFICATION_REQUIRED", "AFFIRMATION_REQUIRED", "ASK_QUANTITY", "ASK_SOURCE_ORIGIN"} for action in deduped):
+        deduped = [
+            action
+            for action in deduped
+            if action not in {"AUTO_CONFIRM", "AUTO_CONFIRM_LEARNED", "AUTO_CONFIRM_WITH_TRACE"}
+        ]
+    return deduped or ["AUTO_CONFIRM"]
+
 
 def _coerce_float(value: object, *, default: float = 0.0) -> float:
     if value is None:
@@ -76,6 +142,26 @@ def _reasoning_match_threshold(default: float = 0.90) -> float:
     except Exception:
         return default
     return _coerce_float(value, default=default)
+
+
+def _reasoning_vector_candidate_min_similarity(
+    default: float = _REASONING_VECTOR_CANDIDATE_MIN_SIMILARITY,
+) -> float:
+    return default
+
+
+def _result_similarity(result: object) -> float | None:
+    raw_value = result.get("similarity") if isinstance(result, Mapping) else getattr(result, "similarity", None)
+    if raw_value is None or isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+        return None
+    return float(raw_value)
+
+
+def _vector_candidates_allowed_for_reasoning(result: object) -> bool:
+    similarity = _result_similarity(result)
+    if similarity is None:
+        return False
+    return similarity > _reasoning_vector_candidate_min_similarity()
 
 
 def _coerce_str(value: object, field: str) -> str | None:
@@ -190,6 +276,29 @@ def _candidate_score(candidate: Mapping[str, Any] | dict[str, Any] | Any) -> flo
     if not isinstance(candidate, Mapping):
         return 0.0
     return _coerce_float(candidate.get("identity_confidence"), default=0.0)
+
+
+def _is_placeholder_candidate(candidate: Mapping[str, Any]) -> bool:
+    label = (_coerce_str(candidate.get("label"), "label") or "").casefold()
+    if label != "unlabeled food":
+        return False
+    has_identity = bool(_coerce_str(candidate.get("food_item_id"), "food_item_id"))
+    has_evidence = bool(_coerce_string_list(candidate.get("visual_evidence"))) or bool(
+        _coerce_string_list(candidate.get("missing_evidence"))
+    )
+    score = _candidate_score(candidate)
+    return not has_identity and not has_evidence and score <= 0.0
+
+
+def _meaningful_top_candidates(group: Mapping[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for candidate in list(group.get("top_3", [])):
+        if not isinstance(candidate, Mapping):
+            continue
+        if _is_placeholder_candidate(candidate):
+            continue
+        candidates.append(dict(candidate))
+    return candidates[:3]
 
 
 def _candidate_ids(candidates: list[dict[str, Any]]) -> list[str]:
@@ -312,11 +421,7 @@ def _normalized_group_result(
     decision_rationale: str,
     clarification_actions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    top_three = [
-        dict(candidate)
-        for candidate in list(group.get("top_3", []))
-        if isinstance(candidate, Mapping)
-    ][:3]
+    top_three = _meaningful_top_candidates(group)
     selected_candidate_id = _coerce_str(group.get("selected_candidate_id"), "selected_candidate_id")
     if not selected_candidate_id and top_three:
         selected_candidate_id = str(top_three[0].get("candidate_id") or "")
@@ -330,12 +435,19 @@ def _normalized_group_result(
         )
     if normalized_actions and not question_focus:
         question_focus = _coerce_str(normalized_actions[0].get("question_focus"), "question_focus")
+    group_actions = _group_actions_for_result(
+        group=group,
+        group_action=group_action,
+        clarification_actions=normalized_actions,
+    )
+    group_action = _primary_group_action(group_actions)
     return {
         "group_id": _coerce_str(group.get("group_id"), "group_id") or "group-unknown",
         "group_label": _coerce_str(group.get("group_label"), "group_label")
         or _coerce_str(group.get("label"), "label")
         or "unlabeled food group",
         "group_action": group_action,
+        "group_actions": group_actions,
         "group_state": group_state,
         "primary_segment_id": _coerce_str(group.get("primary_segment_id"), "primary_segment_id")
         or _coerce_str(group.get("segment_id"), "segment_id")
@@ -353,7 +465,6 @@ def _normalized_group_result(
         "gate_reason": gate_reason,
         "clarification_needed": bool(normalized_actions),
         "clarification_actions": normalized_actions,
-        "clarification": normalized_actions[0] if normalized_actions else None,
         "question_kind": question_kind,
         "question_focus": question_focus,
         "question_examples": _coerce_string_list(group.get("question_examples")),
@@ -396,142 +507,6 @@ def _needs_source_origin_question(group: Mapping[str, Any]) -> bool:
     return False
 
 
-def _base_question_for_group(group: Mapping[str, Any]) -> dict[str, Any]:
-    group_id = _coerce_str(group.get("group_id"), "group_id") or "group-unknown"
-    primary_segment_id = (
-        _coerce_str(group.get("primary_segment_id"), "primary_segment_id") or "segment-unknown"
-    )
-    segment_ids = _coerce_segment_ids(
-        group.get("segment_ids"),
-        primary_segment_id=primary_segment_id,
-        fallback=primary_segment_id,
-    )
-    existing_actions = [
-        dict(action)
-        for action in list(group.get("clarification_actions", []))
-        if isinstance(action, Mapping)
-    ]
-    if existing_actions:
-        action = existing_actions[0]
-        return {
-            "question_id": _coerce_str(action.get("question_id"), "question_id")
-            or f"{group_id}:compat",
-            "group_id": group_id,
-            "group_label": _group_prompt_subject(group),
-            "question_kind": _action_question_kind(action),
-            "question_focus": (
-                _coerce_str(action.get("question_focus"), "question_focus")
-                or _coerce_str(group.get("question_focus"), "question_focus")
-                or action.get("user_prompt")
-                or ""
-            ),
-            "answer_type": _coerce_str(action.get("answer_type"), "answer_type") or "single_choice",
-            "required": True,
-            "segment_ids": segment_ids,
-            "primary_segment_id": primary_segment_id,
-            "choices": _choice_labels(action),
-            "validation_hints": dict(action.get("validation_hints") or {"required": True}),
-        }
-
-    question_focus = _coerce_str(group.get("question_focus"), "question_focus") or "best match"
-    return {
-        "question_id": f"{group_id}:compat",
-        "group_id": group_id,
-        "group_label": _group_prompt_subject(group),
-        "question_kind": "CHOICE",
-        "question_focus": question_focus,
-        "answer_type": "single_choice",
-        "required": True,
-        "segment_ids": segment_ids,
-        "primary_segment_id": primary_segment_id,
-        "choices": [choice["label"] for choice in _identity_choice_payloads(group) if choice["value"] != "OTHER"],
-        "validation_hints": {"required": True, "min_choices": 1, "max_choices": 1},
-    }
-
-
-def _derive_clarification_schema(food_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    questions: list[dict[str, Any]] = []
-    for group in sorted(
-        food_groups,
-        key=lambda item: (
-            _coerce_str(item.get("group_id"), "group_id") or "",
-            _coerce_str(item.get("primary_segment_id"), "primary_segment_id") or "",
-        ),
-    ):
-        if not group.get("clarification_needed") and not group.get("clarification_actions"):
-            continue
-        actions = [
-            dict(action)
-            for action in list(group.get("clarification_actions", []))
-            if isinstance(action, Mapping)
-        ]
-        if not actions:
-            actions = [{}]
-        for action in actions:
-            compatibility_group = dict(group)
-            compatibility_group["clarification_actions"] = [action] if action else []
-            questions.append(_base_question_for_group(compatibility_group))
-    return sorted(questions, key=lambda item: item["question_id"])
-
-
-def _clarification_schema_for_groups(
-    *,
-    food_groups: list[dict[str, Any]],
-    source_schema: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    derived_schema = _derive_clarification_schema(food_groups)
-    if not source_schema:
-        return derived_schema
-
-    merged: list[dict[str, Any]] = []
-    source_group_ids: set[str] = set()
-    groups_by_id = {
-        _coerce_str(group.get("group_id"), "group_id"): group
-        for group in food_groups
-        if isinstance(group, Mapping)
-    }
-    for question in source_schema:
-        if not isinstance(question, Mapping):
-            continue
-        source_group_id = _coerce_str(question.get("group_id"), "group_id")
-        if source_group_id:
-            source_group_ids.add(source_group_id)
-        source_group = dict(groups_by_id.get(source_group_id, {}))
-        source_group["clarification_actions"] = [dict(question)]
-        if source_group_id:
-            source_group["group_id"] = source_group_id
-        if _coerce_str(question.get("group_label"), "group_label"):
-            source_group["group_label"] = _coerce_str(question.get("group_label"), "group_label")
-        merged.append(_dedupe_question_choices(_base_question_for_group(source_group)))
-
-    for question in derived_schema:
-        group_id = _coerce_str(question.get("group_id"), "group_id")
-        if group_id and group_id in source_group_ids:
-            continue
-        merged.append(question)
-    return sorted(merged, key=lambda item: item["question_id"])
-
-
-def _dedupe_question_choices(question: dict[str, Any]) -> dict[str, Any]:
-    question["choices"] = _dedupe_string_choices(_coerce_string_list(question.get("choices")))
-    return question
-
-
-def _dedupe_string_choices(values: list[str]) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        normalized = value.strip()
-        if not normalized:
-            continue
-        key = normalized.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(normalized)
-    return deduped
-
-
 def _normalized_choice_payloads(choices: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -561,14 +536,15 @@ def _normalized_choice_payloads(choices: list[dict[str, Any]]) -> list[dict[str,
 def _identity_choice_payloads(group: Mapping[str, Any]) -> list[dict[str, Any]]:
     choices: list[dict[str, Any]] = []
     seen_candidate_ids: set[str] = set()
-    for candidate in list(group.get("top_3", [])):
-        if not isinstance(candidate, Mapping):
-            continue
+    seen_labels: set[str] = set()
+    for candidate in _meaningful_top_candidates(group):
         candidate_id = _coerce_str(candidate.get("candidate_id"), "candidate_id")
         label = _coerce_str(candidate.get("label"), "label")
-        if not candidate_id or not label or candidate_id in seen_candidate_ids:
+        label_key = label.casefold() if label else ""
+        if not candidate_id or not label or candidate_id in seen_candidate_ids or label_key in seen_labels:
             continue
         seen_candidate_ids.add(candidate_id)
+        seen_labels.add(label_key)
         choice = {
             "value": candidate_id,
             "label": label,
@@ -750,16 +726,22 @@ def _build_group_clarification_actions(
     source_origin_needed = _needs_source_origin_question(group)
     if group_action == "IDENTITY_CLARIFICATION_REQUIRED":
         actions = [_build_identity_action(group, reason=gate_reason)]
-        if source_origin_needed:
+        if source_origin_needed or "ASK_SOURCE_ORIGIN" in _raw_group_actions(group):
             actions.append(_build_source_origin_action(group, reason=gate_reason))
+        if "ASK_QUANTITY" in _raw_group_actions(group):
+            actions.append(_build_quantity_action(group, reason=gate_reason))
         return actions
     if group_action == "AFFIRMATION_REQUIRED":
         actions = [_build_affirmation_action(group, reason=gate_reason)]
-        if source_origin_needed:
+        if source_origin_needed or "ASK_SOURCE_ORIGIN" in _raw_group_actions(group):
             actions.append(_build_source_origin_action(group, reason=gate_reason))
+        if "ASK_QUANTITY" in _raw_group_actions(group):
+            actions.append(_build_quantity_action(group, reason=gate_reason))
         return actions
     if group_action == "ASK_QUANTITY":
         return [_build_quantity_action(group, reason=gate_reason)]
+    if group_action == "ASK_SOURCE_ORIGIN":
+        return [_build_source_origin_action(group, reason=gate_reason)]
     if group_action in {"ASK_CHOICE", "INTERVIEW"}:
         actions = [_build_identity_action(group, reason=gate_reason)]
         if source_origin_needed:
@@ -768,35 +750,67 @@ def _build_group_clarification_actions(
     return []
 
 
-def _action_question_kind(action: Mapping[str, Any]) -> str:
-    action_type = (_coerce_str(action.get("type"), "type") or "").upper()
-    if action_type == "CHOICE":
-        return "CHOICE"
-    return action_type or "DETAIL"
+def _raw_group_actions(group: Mapping[str, Any]) -> set[str]:
+    raw_actions = group.get("group_actions")
+    if not isinstance(raw_actions, list):
+        return set()
+    return {
+        str(action).strip().upper()
+        for action in raw_actions
+        if isinstance(action, str) and str(action).strip()
+    }
 
 
-def _choice_labels(action: Mapping[str, Any]) -> list[str]:
-    labels: list[str] = []
-    for choice in list(action.get("choices", [])):
-        if isinstance(choice, Mapping):
-            if (_coerce_str(choice.get("value"), "value") or "").upper() == "OTHER":
-                continue
-            label = _coerce_str(choice.get("label"), "label")
-            if label:
-                labels.append(label)
-        else:
-            label = _coerce_str(choice, "choice")
-            if label:
-                labels.append(label)
-    return _dedupe_string_choices(labels)
+def _existing_actions_for_group_action(
+    group: Mapping[str, Any],
+    *,
+    group_action: str,
+) -> list[dict[str, Any]]:
+    desired_by_action = {
+        "AFFIRMATION_REQUIRED": {"AFFIRMATION"},
+        "IDENTITY_CLARIFICATION_REQUIRED": {"CHOICE", "DETAIL", "FREE_TEXT", "IDENTITY"},
+        "ASK_QUANTITY": {"QUANTITY"},
+        "ASK_SOURCE_ORIGIN": {"SOURCE_ORIGIN"},
+    }
+    desired = set(desired_by_action.get(group_action, set()))
+    group_actions = _raw_group_actions(group)
+    if "ASK_SOURCE_ORIGIN" in group_actions:
+        desired.add("SOURCE_ORIGIN")
+    if "ASK_QUANTITY" in group_actions:
+        desired.add("QUANTITY")
+    if not desired:
+        return []
+    actions: list[dict[str, Any]] = []
+    for action in list(group.get("clarification_actions", [])):
+        if not isinstance(action, Mapping):
+            continue
+        action_type = (_coerce_str(action.get("type"), "type") or "").upper()
+        action_kind = (_coerce_str(action.get("kind"), "kind") or "").upper()
+        if action_type in desired or action_kind in desired:
+            actions.append(dict(action))
+    return actions
+
+
+def _clarification_actions_for_group_action(
+    group: Mapping[str, Any],
+    *,
+    group_action: str,
+    gate_reason: str,
+) -> list[dict[str, Any]]:
+    existing = _existing_actions_for_group_action(group, group_action=group_action)
+    if existing:
+        return existing
+    return _build_group_clarification_actions(
+        group,
+        group_action=group_action,
+        gate_reason=gate_reason,
+    )
 
 
 def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
-    top_three = [
-        dict(candidate)
-        for candidate in list(group.get("top_3", []))
-        if isinstance(candidate, Mapping)
-    ][:3]
+    group = dict(group)
+    top_three = _meaningful_top_candidates(group)
+    group["top_3"] = top_three
     top_one = top_three[0] if top_three else {}
     distinct_candidates = _distinct_identity_candidates(top_three)
     top_two = distinct_candidates[1] if len(distinct_candidates) > 1 else {}
@@ -815,8 +829,11 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
             decision_rationale=decision_rationale,
         )
 
-    if group_action in {"ASK_QUANTITY", "ASK_CHOICE", "INTERVIEW"}:
-        normalized_action = "ASK_QUANTITY" if group_action == "ASK_QUANTITY" else "IDENTITY_CLARIFICATION_REQUIRED"
+    if group_action in {"ASK_QUANTITY", "ASK_SOURCE_ORIGIN", "ASK_CHOICE", "INTERVIEW"}:
+        if group_action in {"ASK_QUANTITY", "ASK_SOURCE_ORIGIN"}:
+            normalized_action = group_action
+        else:
+            normalized_action = "IDENTITY_CLARIFICATION_REQUIRED"
         normalized_reason = gate_reason or "Interview required"
         return _normalized_group_result(
             group=group,
@@ -824,7 +841,7 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
             group_state=group_state if group_state in _INTERVIEW_STATES else _INTERVIEW_STATE_FROM_OUTPUT,
             gate_reason=normalized_reason,
             decision_rationale=decision_rationale,
-            clarification_actions=_build_group_clarification_actions(
+            clarification_actions=_clarification_actions_for_group_action(
                 group,
                 group_action=normalized_action,
                 gate_reason=normalized_reason,
@@ -833,6 +850,46 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
 
     if group_action == _READY_TO_WRITE_STATE:
         group_action = "AUTO_CONFIRM"
+
+    if group_action in {"AFFIRMATION_REQUIRED", "IDENTITY_CLARIFICATION_REQUIRED"}:
+        requested_reason = gate_reason or "Model requested clarification"
+        return _normalized_group_result(
+            group=group,
+            group_action=group_action,
+            group_state=_INTERVIEW_STATE_FROM_OUTPUT,
+            gate_reason=requested_reason,
+            decision_rationale=decision_rationale,
+            clarification_actions=_clarification_actions_for_group_action(
+                group,
+                group_action=group_action,
+                gate_reason=requested_reason,
+            ),
+        )
+
+    if not top_three:
+        fallback_action = (
+            group_action
+            if group_action in {
+                "AFFIRMATION_REQUIRED",
+                "IDENTITY_CLARIFICATION_REQUIRED",
+                "ASK_QUANTITY",
+                "ASK_SOURCE_ORIGIN",
+            }
+            else "AFFIRMATION_REQUIRED"
+        )
+        fallback_reason = gate_reason or "no usable candidate labels were available"
+        return _normalized_group_result(
+            group=group,
+            group_action=fallback_action,
+            group_state=_INTERVIEW_STATE_FROM_OUTPUT,
+            gate_reason=fallback_reason,
+            decision_rationale=decision_rationale,
+            clarification_actions=_clarification_actions_for_group_action(
+                group,
+                group_action=fallback_action,
+                gate_reason=fallback_reason,
+            ),
+        )
 
     reasons: list[str] = []
     threshold = _reasoning_match_threshold()
@@ -850,7 +907,7 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     ).lower() if isinstance(top_one, Mapping) else ""
     food_item_id = _coerce_str(top_one.get("food_item_id"), "food_item_id") if isinstance(top_one, Mapping) else None
 
-    visual_only_without_learned = candidate_source in {"visual_reasoning", "user_needed"} and not food_item_id
+    visual_only_without_learned = candidate_source in {"visual_reasoning", "user_needed"}
 
     if top_identity < threshold:
         reasons.append(f"best similarity {top_identity:.3f} is below threshold {threshold:.3f}")
@@ -872,7 +929,7 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
             group_state=_INTERVIEW_STATE_FROM_OUTPUT,
             gate_reason=followup_reason,
             decision_rationale=decision_rationale or "Needs user confirmation",
-            clarification_actions=_build_group_clarification_actions(
+            clarification_actions=_clarification_actions_for_group_action(
                 group,
                 group_action=followup_action,
                 gate_reason=followup_reason,
@@ -880,16 +937,21 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     if visual_only_without_learned:
+        visual_action = (
+            group_action
+            if group_action in {"IDENTITY_CLARIFICATION_REQUIRED", "AFFIRMATION_REQUIRED"}
+            else "AFFIRMATION_REQUIRED"
+        )
         affirmation_reason = "visual-only candidate lacks learned confirmation"
         return _normalized_group_result(
             group=group,
-            group_action="AFFIRMATION_REQUIRED",
+            group_action=visual_action,
             group_state=_INTERVIEW_STATE_FROM_OUTPUT,
             gate_reason=affirmation_reason,
             decision_rationale=decision_rationale or "Needs explicit user affirmation",
-            clarification_actions=_build_group_clarification_actions(
+            clarification_actions=_clarification_actions_for_group_action(
                 group,
-                group_action="AFFIRMATION_REQUIRED",
+                group_action=visual_action,
                 gate_reason=affirmation_reason,
             ),
         )
@@ -954,19 +1016,7 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
             "segment_count": segment_count,
             "food_group_count": 0,
             "food_groups": [],
-            "clarification_schema": [],
-            "top_3": [],
         }
-
-    source_clarification_schema = [
-        dict(question)
-        for question in list(normalized.get("clarification_schema", []))
-        if isinstance(question, Mapping)
-    ]
-    clarification_schema = _clarification_schema_for_groups(
-        food_groups=food_groups,
-        source_schema=source_clarification_schema,
-    )
 
     if any(group["group_state"] == _REVIEW_STATE for group in food_groups):
         meal_action = _REVIEW_STATE
@@ -1007,8 +1057,6 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
         "segment_count": segment_count,
         "food_group_count": len(food_groups),
         "food_groups": food_groups,
-        "clarification_schema": clarification_schema,
-        "top_3": list(food_groups[0].get("top_3", [])),
     }
 
 
@@ -1025,12 +1073,133 @@ def _normalize_top_three(result: object) -> list[dict[str, Any]]:
     return []
 
 
+def _segment_indexes_for_group(
+    group: Mapping[str, Any],
+    *,
+    ordinal: int,
+    match_results: list[tuple[MealSegment, Any]],
+) -> list[int]:
+    raw_indexes = group.get("segment_indexes")
+    indexes: list[int] = []
+    seen: set[int] = set()
+    if isinstance(raw_indexes, list):
+        for raw_index in raw_indexes:
+            if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                continue
+            if raw_index < 1 or raw_index > len(match_results) or raw_index in seen:
+                continue
+            seen.add(raw_index)
+            indexes.append(raw_index)
+    if indexes:
+        return indexes
+
+    segment_ids = {
+        str(segment_id).strip()
+        for segment_id in list(group.get("segment_ids", []))
+        if str(segment_id).strip()
+    }
+    primary_segment_id = _coerce_str(group.get("primary_segment_id"), "primary_segment_id")
+    if primary_segment_id:
+        segment_ids.add(primary_segment_id)
+    if segment_ids:
+        for index, (segment, _result) in enumerate(match_results, start=1):
+            if str(getattr(segment, "id", f"segment-{index}")) in segment_ids:
+                indexes.append(index)
+        if indexes:
+            return indexes
+
+    if match_results:
+        return [min(max(ordinal, 1), len(match_results))]
+    return []
+
+
+def _candidate_identity_key_for_snapshot(candidate: Mapping[str, Any]) -> str:
+    candidate_id = _coerce_str(candidate.get("candidate_id"), "candidate_id")
+    if candidate_id:
+        return f"id:{candidate_id}"
+    food_item_id = _coerce_str(candidate.get("food_item_id"), "food_item_id")
+    if food_item_id:
+        return f"food:{food_item_id}"
+    label = _coerce_str(candidate.get("label"), "label")
+    return f"label:{label.casefold()}" if label else ""
+
+
+def _deterministic_candidates_for_indexes(
+    indexes: list[int],
+    match_results: list[tuple[MealSegment, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for segment_index in indexes:
+        if segment_index < 1 or segment_index > len(match_results):
+            continue
+        _segment, result = match_results[segment_index - 1]
+        if not _vector_candidates_allowed_for_reasoning(result):
+            continue
+        for candidate in _normalize_top_three(result):
+            key = _candidate_identity_key_for_snapshot(candidate)
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            candidates.append(dict(candidate))
+            if len(candidates) >= 3:
+                return candidates
+    return candidates[:3]
+
+
+def _attach_deterministic_group_context(
+    payload: Mapping[str, Any] | dict[str, Any],
+    *,
+    match_results: list[tuple[MealSegment, Any]],
+) -> dict[str, Any]:
+    normalized_payload = dict(payload)
+    raw_groups = normalized_payload.get("food_groups")
+    if not isinstance(raw_groups, list):
+        return normalized_payload
+
+    groups: list[dict[str, Any]] = []
+    for ordinal, group in enumerate(raw_groups, start=1):
+        if not isinstance(group, Mapping):
+            continue
+        group_payload = dict(group)
+        segment_indexes = _segment_indexes_for_group(
+            group_payload,
+            ordinal=ordinal,
+            match_results=match_results,
+        )
+        segment_ids = [
+            str(getattr(match_results[index - 1][0], "id", f"segment-{index}"))
+            for index in segment_indexes
+            if 1 <= index <= len(match_results)
+        ]
+        if not segment_ids:
+            segment_ids = [f"segment-{ordinal}"]
+        top_three = _deterministic_candidates_for_indexes(segment_indexes, match_results)
+        group_payload["group_id"] = f"group-{ordinal}"
+        group_payload["primary_segment_id"] = segment_ids[0]
+        group_payload["segment_ids"] = segment_ids
+        group_payload["top_3"] = top_three
+        group_payload["selected_candidate_id"] = (
+            _coerce_str(top_three[0].get("candidate_id"), "candidate_id")
+            if top_three
+            else ""
+        )
+        group_payload.pop("segment_indexes", None)
+        groups.append(group_payload)
+
+    normalized_payload["food_groups"] = groups
+    normalized_payload["food_group_count"] = len(groups)
+    normalized_payload["segment_count"] = len(match_results)
+    return normalized_payload
+
+
 def _fallback_food_groups_from_match_results(
     match_results: list[tuple[MealSegment, Any]],
 ) -> list[dict[str, Any]]:
     fallback_groups: list[dict[str, Any]] = []
     for index, (segment, result) in enumerate(match_results, start=1):
-        top_three = _normalize_top_three(result)
+        top_three = _normalize_top_three(result) if _vector_candidates_allowed_for_reasoning(result) else []
         label = _coerce_str(getattr(segment, "label", None), "label")
         if not label and top_three:
             label = _coerce_str(top_three[0].get("label"), "label")
@@ -1139,100 +1308,105 @@ def _stable_json(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
 
 
+def _candidate_prompt_snapshot(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(candidate).items()
+        if key
+        not in {
+            "candidate_id",
+            "food_item_id",
+            "prior_food_visual_id",
+            "visual_id",
+            "food_visual_id",
+        }
+    }
+
+
 def _reasoning_system_prompt() -> str:
     taxonomy = load_reasoning_taxonomy().raw
-    return (
-        "<CRITICAL_RULES>\n"
-        "You are MealTracker's meal-level visual reasoning model. You must inspect the "
-        "whole_meal_image and every indexed segment crop before trusting vector candidates. "
-        "Base decisions only on the provided images, detector labels, boxes, and per-segment "
-        "top_3 candidate context. Food groups must be isolated foods/components, not compound "
-        "plate pairings. Do not group bread with curry, rice with curry, sauce with bread, or "
-        "multiple side-by-side foods unless they are physically integrated into one item "
-        "(for example a stuffed roll, sandwich, wrap, or mixed rice dish). First group each "
-        "distinct isolated food/component, then rank candidates inside each group only. Do not "
-        "compare unrelated foods as if they are alternatives. "
-        "Do not invent ingredients, brands, nutrition facts, or hidden details. Output strict "
-        "JSON only.\n"
-        "</CRITICAL_RULES>\n\n"
-        "<SPECIFICITY_POLICY>\n"
-        "Asian-cuisine specificity matters. For rice, noodles, breads, curries, wraps, "
-        "meat pieces, sauces, and mixed dishes, capture visible nutrition-relevant detail: "
-        "rice/prep type, noodle style, bread type, filling, protein or vegetable inside a "
-        "curry, meat cut, oiliness, sauce load, and whether visible components should stay "
-        "together or split. Bread scrutiny is mandatory because chapatti/chapati, parota/"
-        "paratha, khubz, pita, naan, and roti can change nutrition materially. If bread type "
-        "is ambiguous, ask a choice/detail question instead of collapsing it into generic "
-        "`bread` or grouping it with nearby curry. If a nutrition-relevant detail is not visible, mark it as "
-        "missing_evidence instead of guessing.\n"
-        "</SPECIFICITY_POLICY>\n\n"
-        "<TAXONOMY_POLICY>\n"
-        "Use this editable policy as guidance, not as a source of facts:\n"
-        f"{_stable_json(taxonomy)}\n\n"
-        "</TAXONOMY_POLICY>\n\n"
-        "<ACTION_POLICY>\n"
-        "- AUTO_CONFIRM only when every meaningful visible segment has image evidence "
-        "supporting the top candidate, the top candidate is clearly separated from "
-        "alternatives, and missing evidence would not materially change nutrition.\n"
-        "- ASK_CHOICE when there are plausible named alternatives and the user can pick "
-        "quickly from top candidates plus all-wrong.\n"
-        "- INTERVIEW when the missing identity/detail is open-ended, especially hidden "
-        "curry vegetables/proteins, sandwich or roll fillings, unclear meat cuts, or "
-        "mixed-dish components.\n"
-        "- ASK_QUANTITY only after identity/detail is good enough but visible portion "
-        "evidence is weak and likely nutrition impact is high.\n"
-        "- NEEDS_GROUNDING when packaged/restaurant nutrition data is needed; Phase 4 "
-        "does not use web tools.\n"
-        "- FAILED_UNCLEAR when the visual evidence is unusable even for a targeted "
-        "question. NEEDS_SCHEMA_REVIEW is only for schema/contract problems.\n\n"
-        "Ranking policy: return exactly three top_3 records inside every food group, ranked "
-        "by visual specificity, DB/vector match signal, whole-meal context, nutrition-impact "
-        "clarity, and uncertainty honesty. Generic fallback candidates are allowed only when "
-        "labeled as uncertainty candidates with low confidence and clear missing_evidence.\n\n"
-        "No-vector policy: when a segment payload says vector_match_status=NO_VECTOR_CANDIDATES, "
-        "there was no usable FoodVisual match. Do not describe candidates as vector hits, do not "
-        "trust detector labels as names, and set candidate source to visual_reasoning or "
-        "user_needed. Use image evidence plus targeted missing_evidence instead.\n\n"
-        "</ACTION_POLICY>\n\n"
-        "<EXAMPLES>\n"
-        "Example 1 - unclear curry detail: whole meal shows pita and a curry crop; "
-        "candidate labels include chicken curry and egg curry with vegetables. Create a "
-        "food_group for the curry and another for the bread. If the curry visibly contains "
-        "egg but the vegetable inside is unclear and changes nutrition, set that group's "
-        "group_action=INTERVIEW or ASK_CHOICE, group_state=PENDING_INTERVIEW, "
-        "top_3[0].missing_evidence includes `vegetable inside curry`, and do not "
-        "auto-confirm the curry group.\n"
-        "Example 2 - clear simple side: whole meal and crop clearly show pita bread; "
-        "the bread group's top-1 is pita bread with a strong margin, no hidden filling, "
-        "and no meaningful missing detail. group_action=AUTO_CONFIRM is acceptable; "
-        "visual_evidence should mention the crop and whole-meal support.\n"
-        "Example 3 - portion only: identity is clear as rice, but depth/amount is unclear "
-        "and likely changes calories. Use ASK_QUANTITY only if identity detail is already "
-        "good enough; missing_evidence should name portion_unit or serving_size.\n"
-        "Example 4 - bread ambiguity: crop could be chapatti, parota/paratha, khubz, or pita. "
-        "Keep it as its own food_group separate from curry, set group_action=ASK_CHOICE or "
-        "INTERVIEW unless the image clearly identifies the bread type, and include those bread "
-        "types in question_examples.\n"
-        "</EXAMPLES>\n\n"
-        "<OUTPUT_CONTRACT>\n"
-        "Return only strict JSON matching reasoning_contract_v1. All declared fields are "
-        "required, including trace_id, gate_reason, segment_count, food_group_count, and "
-        "food_groups. Every food_group must include group_id, group_label, group_action, "
-        "group_state, primary_segment_id, segment_ids, selected_candidate_id, visible "
-        "evidence, missing evidence, gate reason, decision rationale, question_kind, "
-        "question_focus, question_examples, clarification_needed, ordered clarification_actions, "
-        "the deprecated clarification alias, and exactly three top_3 records with nutrition_impact "
-        "on every candidate. clarification_actions are the renderer contract: each action must "
-        "already contain type, kind, user_prompt, answer_type, ordered choices, allow_other, "
-        "other_label, required, reason, and validation_hints. Use top_3 candidates in ranked order "
-        "for identity choice surfaces, append a contract-owned Other entry only for identity choice "
-        "actions, and emit SOURCE_ORIGIN only when it materially changes nutrition or grounding. "
-        "meal_state must be exactly one of READY_TO_WRITE, PENDING_CHOICE, PENDING_INTERVIEW, "
-        "PARTIAL_RESOLVED_WAITING, FAILED_UNCLEAR, or NEEDS_SCHEMA_REVIEW. Use READY_TO_WRITE only "
-        "when every group is AUTO_CONFIRM. Use trace_id=\"\" if no provider trace is supplied. "
-        "Do not expose hidden chain-of-thought.\n"
-        "</OUTPUT_CONTRACT>"
-    )
+    return f"""<role>
+You are a meal-level visual nutrition reasoner for a fitness and nutrition-awareness app focused on Indo-Pak and Middle-Eastern home cooking. You receive the whole-meal photo, one cropped image per detected segment, detector labels and boxes, and — when available — vector candidates from the user's learned history. Per food group you decide whether the evidence is sufficient to log nutrition or whether a short user clarification is required. Output only reasoning_contract_v1 JSON. Never expose chain-of-thought.
+</role>
+
+<taxonomy>
+{_stable_json(taxonomy)}
+</taxonomy>
+
+<objective>
+The downstream goal is an accurate per-group estimate of calories and macronutrients — carbohydrate, protein, fat and fiber. Resolve any uncertainty that would move those numbers; ignore uncertainty that would not. You are not naming dishes for their own sake — you are grounding nutrition. Carbohydrate and fat are the heaviest macro drivers: pin down whole-grain vs refined for any bread or rice, the identity of any starchy vegetable, and the oil/fat richness of cooked dishes, since these dominate the calorie and macro estimate.
+</objective>
+
+<cold_start_principle>
+NO_VECTOR_CANDIDATES — or only incompatible candidates (see candidate_relevance) — for a group means this food has no learned grounding. How much to ask then depends on what the food is:
+
+- Prepared, cooked or composite items (curries, gravies, mixed dishes, cooked meat, breads, rice): visual identity alone does not ground nutrition, because calories, fat and portion swing widely with who made it and how. Resolve the full set of nutrition axes below, not identity alone, and never AUTO_CONFIRM a visual-only, never-seen prepared dish. Expect these groups to carry an identity action PLUS a source question, plus a quantity question wherever portion is unclear. Under-asking here is worse than one extra targeted question.
+
+- Visually unambiguous whole foods (a whole fruit, a plain raw item): a "no vector" result does NOT require identity clarification. A single AFFIRMATION ("Is this orange segments?") is enough — never offer a CHOICE here, and over-asking on obvious whole foods is needless friction. The exception is a look-alike whose nutrition differs materially — then use IDENTITY_CLARIFICATION with the nutritionally-distinct options. Examples that DO warrant a choice: banana vs plantain (plantain is far starchier and higher-calorie), fresh vs canned/sweetened fruit, ripe vs unripe where it changes the macros. Differences that do NOT warrant a question: minor cultivar or size variants with near-identical nutrition, such as orange vs mandarin/clementine — affirm and move on.
+</cold_start_principle>
+
+<candidate_relevance>
+Vector candidates are suggestions, not ground truth — they can be stale, mismatched, or from an unrelated meal, and a high similarity score does not make an incompatible label correct. The runtime only passes vector candidates when the best similarity is strictly greater than 0.92; anything at or below 0.92 must be treated as absent learned grounding. Before using any candidate, check it is visually and categorically compatible with the crop. Discard any candidate that contradicts the visual evidence — e.g. a "Basmati Rice" or "Chicken Curry" candidate offered against orange segments or grapes. Never present an incompatible candidate as a CHOICE option, and never ask the user to affirm a food that plainly is not what is shown. If every candidate for a group is incompatible, treat the group as having NO usable match and reason from the image alone, applying the cold_start_principle. Any ranked-candidate list (e.g. top_3) must contain only genuinely plausible candidates; if none qualify, leave it empty rather than padding it with mismatches.
+</candidate_relevance>
+
+<reasoning_axes>
+Evaluate each group against these axes in order, and raise a clarification only for axes that are BOTH uncertain AND nutrition-moving:
+
+1. IDENTITY — What is it? If nutrition-relevant alternatives are plausible (flatbread: whole-wheat baladi vs refined pita vs naan; pale gourd: lauki vs tinda vs zucchini), use a CHOICE with regional names. If it is visually clear and only needs confirmation, use an AFFIRMATION.
+
+2. VARIETY / SUBTYPE — Once identity is known, resolve the within-item variety that changes density, macros or calories: rice grain type (long-grain basmati vs short-grain/sticky vs parboiled/sella vs brown); flour grade (whole-wheat vs refined/maida); meat cut and grade (lean vs fatty); dairy fat level (full-fat vs skimmed); oil/fat type when it clearly differs. Carry this under IDENTITY_CLARIFICATION_REQUIRED — there is no separate variety action — using type CHOICE / kind DETAIL. When the item's identity is obvious but its variety is the real macro driver (e.g. clearly plain white rice, but long-grain or short-grain?), the variety question takes the identity slot.
+
+3. SOURCE / ORIGIN — Homemade, restaurant/takeaway, bakery, or packaged. This is the single largest ungrounded nutrition factor (oil, ghee, sugar, portion). MANDATORY for any cooked dish or bread on a cold-start group.
+
+4. PREPARATION — Cooking method and richness. Method materially changes fat and calories, so distinguish across the full spectrum when it is not visually obvious: deep-fried vs shallow-fried vs air-fried vs grilled vs baked/roasted vs steamed/boiled vs braised/stewed. Also capture dry vs gravy and light vs heavy oil/tarka. For any meat or chicken, always resolve cut and cooking method. Treat visible pooled oil or a ghee sheen as a strong fat signal — let it raise a preparation or quantity question, never ignore it. A distinctly coloured masala (e.g. green/hara vs red/tomato) is both an identity and a richness signal.
+
+5. COMPOSITION — For mixed dishes (curries, gravies, mixed-veg, egg curries) name the distinct components and flag any starchy or high-fat component (potato, extra oil, cream), since its proportion shifts the calorie and macro balance. Split a composite only when components are clearly distinguishable in the image.
+
+6. QUANTITY / COUNT — Countable items (eggs, breads, pieces of meat) must have a count confirmed. Amorphous items (curry, gravy, rice) need a portion estimate; ask only when the visible portion or scale is ambiguous.
+</reasoning_axes>
+
+<grouping>
+Split distinct foods and components. Never merge bread+curry, rice+curry, sauce+bread, eggs+curry, or side-by-side dishes unless they are physically one integrated dish. Collapse multiple identical items (e.g. two of the same bread) into a single group and confirm the count there.
+</grouping>
+
+<frame_and_focus>
+Log only the foods that are the subject of the shot — the items the user is presenting as this meal. The detector over-produces: it returns segments for things merely caught in frame (background clutter, a vessel from a different setting, leftovers, packaging, condiments). A detected segment is NOT a mandate to log it. Rejecting scenery is part of your job, and dropping such a segment is the correct, expected outcome — not a deviation you need to justify with a question.
+
+Use focus and framing to decide membership. Treat a segment as out-of-scope when it is out of focus while the subject is sharp, sits at the extreme edge or is cut off by the frame, sits in a separate vessel pushed to a corner, or plainly belongs to a separate context.
+
+Critical rule: NEVER emit a clarification question whose purpose is to find out whether an item belongs to the meal or to identify a peripheral item you cannot place. Uncertainty about membership resolves to EXCLUDE, not to ASK — asking the user "what is in that bowl in the corner?" is exactly the wrong move. If you find yourself unsure whether a segment is part of the meal, that doubt is itself the signal to drop it. To drop a segment, simply omit it from food_groups entirely: create no group, no clarification_action, and no question for it. Reserve questions for items you are confident are part of the meal.
+
+If a peripheral segment looks like more of a dish you are already logging (e.g. a side bowl of the same curry), do not create a second mystery group for it and do not double-count — fold it into the existing dish or drop it.
+
+Be conservative in both directions. A side dish that is fully in frame and in reasonable focus — even on a separate plate or in its own bowl — IS part of the meal; keep it. Sharpness and central framing decide membership, not plate count. If nothing is cleanly in focus, fall back to the most central, fully-framed item as the subject rather than returning no groups.
+</frame_and_focus>
+
+<decision_logic>
+Per group, set group_actions from:
+- AUTO_CONFIRM_LEARNED — only with a genuine learned vector/food match and no material missing evidence.
+- AFFIRMATION_REQUIRED — identity visually clear, needs only Yes/No.
+- IDENTITY_CLARIFICATION_REQUIRED — nutrition-relevant identity or variety/subtype alternatives exist; offer bounded label-only CHOICEs, or FREE_TEXT when open. Variety/subtype refinements ride under this action — they do not get their own action.
+- AFFIRMATION_REQUIRED and IDENTITY_CLARIFICATION_REQUIRED are mutually exclusive.
+- ASK_SOURCE_ORIGIN and ASK_QUANTITY are additive; pair either with the identity action whenever source or portion is ungrounded per the axes above.
+- FAILED_UNCLEAR — crop too poor to reason about.
+</decision_logic>
+
+<question_construction>
+Each clarification_action carries the final user-facing Telegram copy. Make it one decision per question, short, plain, jargon-free, with regional names in the choices ("Lauki / bottle gourd", "Aish baladi / whole-wheat pita"). Set allow_other with a sensible other_label when the list may not be exhaustive. Give a one-line reason tied to nutrition. Order questions identity/variety -> source -> preparation -> quantity.
+Map axis to schema fields: identity choice = type CHOICE / kind IDENTITY; variety/subtype = type CHOICE / kind DETAIL; yes-no = type AFFIRMATION / kind AFFIRMATION; source = type SOURCE_ORIGIN / kind SOURCE_ORIGIN; portion or count = type QUANTITY / kind QUANTITY; open answer = type FREE_TEXT / kind FREE_TEXT.
+</question_construction>
+
+<portion_defaults>
+Use these as priors when estimating amorphous portions (ask only if the visible amount conflicts or scale is unclear): curry 220-340 g; thin liquid 150-300 ml; cooked rice 90-160 g. Countable items (eggs, breads, meat pieces) use discrete units (piece, slice, serving).
+</portion_defaults>
+
+<budget>
+Up to 8 questions per meal, max 2 per group. Use the budget to close real nutrition gaps; never pad with low-impact questions. Identity is the priority: any group whose identity is uncertain must always get its identity question first — never drop or defer it to fit in source or quantity. Only once identity is settled or visually clear should the second slot go to source, then quantity. If all three apply, keep identity + source and let quantity follow on a later turn.
+</budget>
+
+<output>
+Return only reasoning_contract_v1 JSON matching the provided schema. Root fields only: action, meal_state, decision_rationale, gate_reason, segment_count, food_group_count, food_groups. Use the allowed action / state / type / kind enums exactly. No IDs, no fields outside the schema, no chain-of-thought.
+</output>"""
 
 
 def _build_reasoning_prompt(
@@ -1249,10 +1423,10 @@ def _build_reasoning_prompt(
         {
             "type": "text",
             "text": (
-                f"Meal {meal.id}: perform one meal-level reasoning pass. "
+                "Perform one meal-level reasoning pass. "
                 f"segment_count={len(match_results)}. "
                 "The whole_meal_image follows first, then each indexed segment crop with "
-                "its detector hint, bounding_box, and top_3_candidates. Return the "
+                "its detector hint, bounding_box, and label-only top_3_candidates. Return "
                 "strict reasoning_contract_v1 JSON only."
             ),
         },
@@ -1276,38 +1450,76 @@ def _build_reasoning_prompt(
             for payload in list(getattr(match_result, "top_candidates", []) or [])
             if isinstance(payload, Mapping)
         ]
-        if raw_candidates:
+        similarity = _result_similarity(match_result)
+        allow_vector_candidates = _vector_candidates_allowed_for_reasoning(match_result)
+        if raw_candidates and allow_vector_candidates:
             coerced_snapshot = coerce_reasoning_response(
                 {
                     "action": "AUTO_CONFIRM",
                     "meal_state": "READY_TO_WRITE",
-                    "top_3": raw_candidates,
                     "decision_rationale": "",
                     "gate_reason": "",
                     "segment_count": 1,
+                    "food_group_count": 1,
                     "trace_id": "",
+                    "food_groups": [
+                        {
+                            "group_id": f"segment-{index}-candidates",
+                            "group_label": getattr(segment, "label", None) or "food",
+                            "group_action": "AUTO_CONFIRM_LEARNED",
+                            "group_state": "READY_TO_WRITE",
+                            "primary_segment_id": str(getattr(segment, "id", f"segment-{index}")),
+                            "segment_ids": [str(getattr(segment, "id", f"segment-{index}"))],
+                            "selected_candidate_id": "",
+                            "visual_evidence": [],
+                            "missing_evidence": [],
+                            "decision_rationale": "",
+                            "gate_reason": "",
+                            "clarification_needed": False,
+                            "clarification_actions": [],
+                            "question_kind": "",
+                            "question_focus": "",
+                            "question_examples": [],
+                            "top_3": raw_candidates,
+                        }
+                    ],
                 }
-            ).get("top_3", [])
+            ).get("food_groups", [{}])[0].get("top_3", [])
         else:
             coerced_snapshot = []
         segment_snapshot = [
-            dict(candidate)
+            _candidate_prompt_snapshot(candidate)
             for candidate in coerced_snapshot
             if isinstance(candidate, Mapping)
         ][:3]
-        vector_match_status = "HAS_VECTOR_CANDIDATES" if segment_snapshot else "NO_VECTOR_CANDIDATES"
+        if segment_snapshot:
+            vector_match_status = "HAS_VECTOR_CANDIDATES"
+            vector_match_note = "Vector candidates are available; weigh them against the image evidence."
+        elif raw_candidates:
+            vector_match_status = "LOW_CONFIDENCE_VECTOR_CANDIDATES_OMITTED"
+            if similarity is None:
+                vector_match_note = (
+                    "Vector candidates existed but did not have a usable similarity score; "
+                    "ignore them and reason from visual evidence."
+                )
+            else:
+                vector_match_note = (
+                    f"Vector candidates existed but best similarity {similarity:.3f} did not clear the "
+                    f"reasoning gate {_reasoning_vector_candidate_min_similarity():.3f}; ignore them and "
+                    "reason from visual evidence."
+                )
+        else:
+            vector_match_status = "NO_VECTOR_CANDIDATES"
+            vector_match_note = (
+                "No vector candidates were available for this segment; name from visual reasoning or ask the user."
+            )
         segment_payload = {
             "segment_index": f"segment_{index}",
-            "segment_id": getattr(segment, "id", "unknown"),
             "detector_label": getattr(segment, "label", None),
             "bounding_box": getattr(segment, "bounding_box", None),
             "vector_match_status": vector_match_status,
-            "vector_match_note": (
-                "Vector candidates are available; weigh them against the image evidence."
-                if segment_snapshot
-                else "No vector candidates were available for this segment; name from visual reasoning or ask the user."
-            ),
-            "similarity": getattr(match_result, "similarity", None),
+            "vector_match_note": vector_match_note,
+            "similarity": similarity,
             "is_match": getattr(match_result, "is_match", None),
             "is_below_threshold": getattr(match_result, "is_below_threshold", None),
             "top_3_candidates": segment_snapshot,
@@ -1349,52 +1561,6 @@ async def _maybe_async(value: Any) -> Any:
     return result
 
 
-async def _run_reasoning_parser_retry(
-    *,
-    llm_client,
-    app_settings,
-    response_payload: Mapping[str, Any] | dict[str, Any],
-) -> dict[str, Any] | None:
-    parser_model = getattr(app_settings, "REASONING_PARSER_MODEL", "google/gemini-3.1-flash-lite")
-    fallback_model = getattr(app_settings, "REASONING_PARSER_FALLBACK_MODEL", parser_model)
-    repair_messages = [
-        {
-            "role": "system",
-            "content": (
-                "Repair this model output into strict JSON matching the reasoning contract. "
-                "The contract requires fields: action, meal_state, trace_id, decision_rationale, "
-                "gate_reason, segment_count, food_group_count, and food_groups with exactly "
-                "three top_3 candidates per group. Return only JSON."
-            ),
-        },
-        {
-            "role": "assistant",
-            "content": json.dumps(response_payload),
-        },
-    ]
-
-    models_to_try = [parser_model]
-    if fallback_model and fallback_model != parser_model:
-        models_to_try.append(fallback_model)
-
-    for index, model in enumerate(models_to_try):
-        try:
-            repaired = await llm_client.chat_completion(
-                model=model,
-                messages=repair_messages,
-                response_format=reasoning_response_format(),
-                max_tokens=2200,
-            )
-        except Exception:
-            if index == len(models_to_try) - 1:
-                raise
-            continue
-        parsed = _parse_reasoning_message(repaired)
-        if parsed is not None:
-            return parsed
-    return None
-
-
 async def _run_reasoning_model(
     *,
     llm_client,
@@ -1413,8 +1579,7 @@ async def _run_reasoning_model(
     extra_body = {
         "parallel_tool_calls": False,
         "reasoning": {
-            "max_tokens": 512,
-            "exclude": True,
+            "exclude": False,
         },
     }
     trace_input = {
@@ -1441,7 +1606,6 @@ async def _run_reasoning_model(
                     messages=messages,
                     response_format=response_format,
                     extra_body=extra_body,
-                    max_tokens=4096,
                 )
                 break
             except Exception as exc:
@@ -1458,7 +1622,11 @@ async def _run_reasoning_model(
 
         parsed = _parse_reasoning_message(response)
         if isinstance(parsed, Mapping):
-            normalized = coerce_reasoning_response(parsed)
+            deterministic_payload = _attach_deterministic_group_context(
+                parsed,
+                match_results=match_results,
+            )
+            normalized = coerce_reasoning_response(deterministic_payload)
             normalized["trace_id"] = _normalize_trace_id_from_payload(
                 normalized,
                 trace_metadata,
@@ -1471,34 +1639,6 @@ async def _run_reasoning_model(
                 }
             )
             return normalized, trace_metadata
-
-        parsed_for_retry = _safe_parse_json(json.dumps(response, default=str))
-        if parsed_for_retry is not None:
-            repaired_payload = await _run_reasoning_parser_retry(
-                llm_client=llm_client,
-                app_settings=app_settings,
-                response_payload=parsed_for_retry,
-            )
-            if isinstance(repaired_payload, Mapping):
-                trace_id_from_repair, repair_cached_tokens = _extract_trace_metadata(repaired_payload)
-                if trace_id_from_repair and not trace_metadata["trace_id"]:
-                    trace_metadata["trace_id"] = trace_id_from_repair
-                if repair_cached_tokens is not None and not trace_metadata["cached_tokens"]:
-                    trace_metadata["cached_tokens"] = repair_cached_tokens
-                normalized = coerce_reasoning_response(repaired_payload)
-                normalized["trace_id"] = _normalize_trace_id_from_payload(
-                    normalized,
-                    trace_metadata,
-                )
-                _end_trace(
-                    trace,
-                    output={
-                        "raw_response": response,
-                        "repair_response": repaired_payload,
-                        "parsed_response": normalized,
-                    }
-                )
-                return normalized, trace_metadata
 
     failed_payload = {
         "action": _FAILED_UNCLEAR_STATE,
@@ -1573,8 +1713,6 @@ async def persist_reasoning_results(
         for group in list(normalized.get("food_groups", []))
         if isinstance(group, Mapping)
     ]
-    top_three = list(food_groups[0].get("top_3", [])) if food_groups else []
-    clarification_schema = list(normalized.get("clarification_schema", []))
 
     meal_state = str(normalized.get("meal_state") or "")
     reason_state = (
@@ -1615,7 +1753,7 @@ async def persist_reasoning_results(
                 ),
                 None,
             )
-            candidate_snapshot = list(owning_group.get("top_3", [])) if isinstance(owning_group, Mapping) else top_three
+            candidate_snapshot = list(owning_group.get("top_3", [])) if isinstance(owning_group, Mapping) else []
             segment.match_candidates_json = {
                 "top_3": candidate_snapshot,
                 "match_threshold": float(getattr(segment, "match_threshold", _reasoning_match_threshold())),
@@ -1656,8 +1794,6 @@ async def persist_reasoning_results(
         "segment_reasoning": segment_reasoning,
         "ready_for_final_write": ready_for_final_write,
         "food_groups": food_groups,
-        "clarification_schema": clarification_schema,
-        "top_3": top_three,
     }
 
 

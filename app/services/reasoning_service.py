@@ -61,6 +61,13 @@ _SOURCE_ORIGIN_TOKENS = {
     "burger",
     "takeout",
 }
+_SOURCE_POLICY_NONE = ""
+_SOURCE_POLICY_ASK_GENERIC = "ask_generic"
+_SOURCE_POLICY_ASK_AFFIRMATION = "ask_affirmation"
+_SOURCE_POLICY_DEFER_UNTIL_IDENTITY = "defer_until_identity"
+_MIN_LEARNED_MATCHES_FOR_SOURCE_CONSENSUS = 5
+_SOURCE_DOMINANCE_MIN_SHARE = 0.8
+_SOURCE_DOMINANCE_MIN_GAP = 0.4
 
 _GROUP_ACTION_ORDER = (
     _REVIEW_STATE,
@@ -199,6 +206,12 @@ def _coerce_segment_ids(value: object, *, primary_segment_id: str, fallback: str
     if deduped:
         return deduped
     return [primary_segment_id or fallback]
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _coerce_quantity_payload(payload: object) -> dict[str, Any]:
@@ -420,6 +433,10 @@ def _normalized_group_result(
     gate_reason: str,
     decision_rationale: str,
     clarification_actions: list[dict[str, Any]] | None = None,
+    source_question_policy: str | None = None,
+    source_trigger_reason: str | None = None,
+    learned_source_distribution: list[dict[str, Any]] | None = None,
+    selected_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     top_three = _meaningful_top_candidates(group)
     selected_candidate_id = _coerce_str(group.get("selected_candidate_id"), "selected_candidate_id")
@@ -441,6 +458,13 @@ def _normalized_group_result(
         clarification_actions=normalized_actions,
     )
     group_action = _primary_group_action(group_actions)
+    normalized_distribution = learned_source_distribution
+    if normalized_distribution is None:
+        normalized_distribution = _coerce_learned_source_distribution(group.get("learned_source_distribution"))
+    normalized_selected_identity = _selected_identity_metadata(
+        selected_identity if isinstance(selected_identity, Mapping) else group.get("selected_identity"),
+        top_three[0] if top_three else {},
+    )
     return {
         "group_id": _coerce_str(group.get("group_id"), "group_id") or "group-unknown",
         "group_label": _coerce_str(group.get("group_label"), "group_label")
@@ -468,8 +492,103 @@ def _normalized_group_result(
         "question_kind": question_kind,
         "question_focus": question_focus,
         "question_examples": _coerce_string_list(group.get("question_examples")),
+        "source_question_policy": source_question_policy
+        if source_question_policy is not None
+        else _coerce_str(group.get("source_question_policy"), "source_question_policy"),
+        "source_trigger_reason": source_trigger_reason
+        if source_trigger_reason is not None
+        else _coerce_str(group.get("source_trigger_reason"), "source_trigger_reason"),
+        "learned_source_distribution": normalized_distribution,
+        "selected_identity": normalized_selected_identity,
         "top_3": top_three,
     }
+
+
+def _coerce_learned_source_distribution(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    distribution: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        candidate_id = _coerce_str(item.get("candidate_id"), "candidate_id")
+        source = _coerce_str(item.get("source"), "source")
+        count = _coerce_int(item.get("count"))
+        share = _coerce_float(item.get("share"), default=-1.0)
+        if not candidate_id or not source or count is None or count < 0 or share < 0.0:
+            continue
+        distribution.append(
+            {
+                "candidate_id": candidate_id,
+                "source": source,
+                "count": count,
+                "share": max(0.0, min(share, 1.0)),
+            }
+        )
+    return distribution
+
+
+def _selected_identity_metadata(value: object, top_candidate: object) -> dict[str, str]:
+    source = value if isinstance(value, Mapping) else {}
+    fallback = top_candidate if isinstance(top_candidate, Mapping) else {}
+    candidate_id = _coerce_str(source.get("candidate_id"), "candidate_id") or _coerce_str(
+        fallback.get("candidate_id"),
+        "candidate_id",
+    )
+    label = _coerce_str(source.get("label"), "label") or _coerce_str(fallback.get("label"), "label")
+    food_item_id = _coerce_str(source.get("food_item_id"), "food_item_id") or _coerce_str(
+        fallback.get("food_item_id"),
+        "food_item_id",
+    )
+    return {
+        "candidate_id": candidate_id,
+        "label": label,
+        "food_item_id": food_item_id,
+    }
+
+
+def _dominant_source_for_selected_identity(
+    distribution: list[dict[str, Any]],
+    *,
+    candidate_id: str,
+) -> dict[str, Any] | None:
+    if not candidate_id:
+        return None
+    candidate_distribution = [
+        entry
+        for entry in distribution
+        if _coerce_str(entry.get("candidate_id"), "candidate_id") == candidate_id
+    ]
+    if not candidate_distribution:
+        return None
+    ordered = sorted(
+        candidate_distribution,
+        key=lambda entry: (
+            _coerce_float(entry.get("share"), default=0.0),
+            _coerce_int(entry.get("count")) or 0,
+        ),
+        reverse=True,
+    )
+    top_entry = ordered[0]
+    top_share = _coerce_float(top_entry.get("share"), default=0.0)
+    top_count = _coerce_int(top_entry.get("count")) or 0
+    next_share = _coerce_float(ordered[1].get("share"), default=0.0) if len(ordered) > 1 else 0.0
+    if (
+        top_count >= _MIN_LEARNED_MATCHES_FOR_SOURCE_CONSENSUS
+        and top_share >= _SOURCE_DOMINANCE_MIN_SHARE
+        and (top_share - next_share) >= _SOURCE_DOMINANCE_MIN_GAP
+    ):
+        return top_entry
+    return None
+
+
+def _learned_match_count(*, group: Mapping[str, Any], visual_only_without_learned: bool) -> int | None:
+    explicit = _coerce_int(group.get("learned_match_count"))
+    if explicit is not None:
+        return max(0, explicit)
+    if visual_only_without_learned:
+        return 0
+    return None
 
 
 def _contains_source_origin_token(*values: object) -> bool:
@@ -482,6 +601,8 @@ def _contains_source_origin_token(*values: object) -> bool:
 
 
 def _needs_source_origin_question(group: Mapping[str, Any]) -> bool:
+    if _coerce_str(group.get("source_question_policy"), "source_question_policy") == _SOURCE_POLICY_ASK_GENERIC:
+        return True
     if (_coerce_str(group.get("question_kind"), "question_kind") or "").upper() == "SOURCE_ORIGIN":
         return True
     if _contains_source_origin_token(
@@ -906,8 +1027,18 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
         or ""
     ).lower() if isinstance(top_one, Mapping) else ""
     food_item_id = _coerce_str(top_one.get("food_item_id"), "food_item_id") if isinstance(top_one, Mapping) else None
+    learned_source_distribution = _coerce_learned_source_distribution(group.get("learned_source_distribution"))
+    selected_identity = _selected_identity_metadata(group.get("selected_identity"), top_one)
 
     visual_only_without_learned = candidate_source in {"visual_reasoning", "user_needed"}
+    learned_match_count = _learned_match_count(
+        group=group,
+        visual_only_without_learned=visual_only_without_learned,
+    )
+    dominant_source = _dominant_source_for_selected_identity(
+        learned_source_distribution,
+        candidate_id=selected_identity["candidate_id"],
+    )
 
     if top_identity < threshold:
         reasons.append(f"best similarity {top_identity:.3f} is below threshold {threshold:.3f}")
@@ -923,6 +1054,11 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     if reasons:
         followup_action = "ASK_QUANTITY" if _should_ask_quantity(missing_evidence) else "IDENTITY_CLARIFICATION_REQUIRED"
         followup_reason = "; ".join(reasons)
+        source_question_policy = _SOURCE_POLICY_NONE
+        source_trigger_reason = ""
+        if followup_action == "IDENTITY_CLARIFICATION_REQUIRED" and dominant_source is not None:
+            source_question_policy = _SOURCE_POLICY_DEFER_UNTIL_IDENTITY
+            source_trigger_reason = "Identity clarification must complete before applying learned source consensus"
         return _normalized_group_result(
             group=group,
             group_action=followup_action,
@@ -930,10 +1066,17 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
             gate_reason=followup_reason,
             decision_rationale=decision_rationale or "Needs user confirmation",
             clarification_actions=_clarification_actions_for_group_action(
-                group,
+                {
+                    **group,
+                    "source_question_policy": source_question_policy,
+                },
                 group_action=followup_action,
                 gate_reason=followup_reason,
             ),
+            source_question_policy=source_question_policy,
+            source_trigger_reason=source_trigger_reason,
+            learned_source_distribution=learned_source_distribution,
+            selected_identity=selected_identity,
         )
 
     if visual_only_without_learned:
@@ -942,6 +1085,14 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
             if group_action in {"IDENTITY_CLARIFICATION_REQUIRED", "AFFIRMATION_REQUIRED"}
             else "AFFIRMATION_REQUIRED"
         )
+        if learned_match_count is not None and learned_match_count < _MIN_LEARNED_MATCHES_FOR_SOURCE_CONSENSUS:
+            source_trigger_reason = (
+                "No usable learned matches are available"
+                if learned_match_count == 0
+                else f"Fewer than 5 learned matches are available ({learned_match_count})"
+            )
+        else:
+            source_trigger_reason = "visual-only candidate lacks learned confirmation"
         affirmation_reason = "visual-only candidate lacks learned confirmation"
         return _normalized_group_result(
             group=group,
@@ -950,10 +1101,63 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
             gate_reason=affirmation_reason,
             decision_rationale=decision_rationale or "Needs explicit user affirmation",
             clarification_actions=_clarification_actions_for_group_action(
-                group,
+                {
+                    **group,
+                    "source_question_policy": _SOURCE_POLICY_ASK_GENERIC,
+                },
                 group_action=visual_action,
                 gate_reason=affirmation_reason,
             ),
+            source_question_policy=_SOURCE_POLICY_ASK_GENERIC,
+            source_trigger_reason=source_trigger_reason,
+            learned_source_distribution=learned_source_distribution,
+            selected_identity=selected_identity,
+        )
+
+    if learned_match_count is not None and learned_match_count < _MIN_LEARNED_MATCHES_FOR_SOURCE_CONSENSUS:
+        source_reason = (
+            "No usable learned matches are available"
+            if learned_match_count == 0
+            else f"Fewer than 5 learned matches are available ({learned_match_count})"
+        )
+        return _normalized_group_result(
+            group=group,
+            group_action="ASK_SOURCE_ORIGIN",
+            group_state=_INTERVIEW_STATE_FROM_OUTPUT,
+            gate_reason=source_reason,
+            decision_rationale=decision_rationale or "Needs source clarification before final write",
+            clarification_actions=_clarification_actions_for_group_action(
+                {
+                    **group,
+                    "source_question_policy": _SOURCE_POLICY_ASK_GENERIC,
+                },
+                group_action="ASK_SOURCE_ORIGIN",
+                gate_reason=source_reason,
+            ),
+            source_question_policy=_SOURCE_POLICY_ASK_GENERIC,
+            source_trigger_reason=source_reason,
+            learned_source_distribution=learned_source_distribution,
+            selected_identity=selected_identity,
+        )
+
+    if dominant_source is not None:
+        source_reason = (
+            f"Dominant learned source for {selected_identity['label'] or _group_prompt_subject(group)} "
+            f"is {str(dominant_source.get('source') or '').lower()} "
+            f"({int(dominant_source.get('count') or 0)} of {learned_match_count or int(dominant_source.get('count') or 0)} matches)"
+        )
+        return _normalized_group_result(
+            group=group,
+            group_action="AUTO_CONFIRM_LEARNED" if food_item_id else "AUTO_CONFIRM",
+            group_state=_READY_TO_WRITE_STATE,
+            gate_reason=gate_reason,
+            decision_rationale=decision_rationale
+            if "auto-confirm" in decision_rationale.lower()
+            else f"Auto-confirm pass: {decision_rationale}",
+            source_question_policy=_SOURCE_POLICY_ASK_AFFIRMATION,
+            source_trigger_reason=source_reason,
+            learned_source_distribution=learned_source_distribution,
+            selected_identity=selected_identity,
         )
 
     resolved_action = "AUTO_CONFIRM_LEARNED" if food_item_id else (
@@ -970,6 +1174,8 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
         group_state=_READY_TO_WRITE_STATE,
         gate_reason=gate_reason,
         decision_rationale=resolved_rationale,
+        learned_source_distribution=learned_source_distribution,
+        selected_identity=selected_identity,
     )
 
 

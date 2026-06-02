@@ -103,6 +103,275 @@ def _choice_labels(action: dict[str, Any]) -> list[str]:
 
 
 class ReasoningGateTests(unittest.TestCase):
+    def test_no_match_group_forces_generic_source_policy_without_model_authored_source_action(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-no-match-source-policy",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "visual reasoning can name the bread but there is no learned history yet",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-flatbread",
+                    "group_label": "flatbread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-flatbread",
+                    "segment_ids": ["segment-flatbread"],
+                    "selected_candidate_id": "candidate-flatbread",
+                    "visual_evidence": ["round flatbread"],
+                    "missing_evidence": [],
+                    "decision_rationale": "visual-only identity looks plausible",
+                    "gate_reason": "",
+                    "question_kind": "NONE",
+                    "question_focus": "",
+                    "question_examples": [],
+                    "learned_match_count": 0,
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="candidate-flatbread",
+                            similarity=0.97,
+                            label="White Bread (Khubz)",
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-pita",
+                            similarity=0.76,
+                            label="Pita Bread",
+                            source="visual_reasoning",
+                        ),
+                        _candidate_payload(
+                            candidate_id="candidate-wrap",
+                            similarity=0.61,
+                            label="Wrap Flatbread",
+                            source="visual_reasoning",
+                        ),
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+        group = result["food_groups"][0]
+
+        self.assertEqual(group["source_question_policy"], "ask_generic")
+        self.assertIn("no usable learned", group["source_trigger_reason"].lower())
+        self.assertEqual(
+            [action["type"] for action in group["clarification_actions"]],
+            ["AFFIRMATION", "SOURCE_ORIGIN"],
+        )
+
+    def test_few_match_group_forces_generic_source_question_even_when_identity_is_clear(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-few-match-source-policy",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "learned match is clear but still shallow",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-rice",
+                    "group_label": "rice",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-rice",
+                    "segment_ids": ["segment-rice"],
+                    "selected_candidate_id": "candidate-rice",
+                    "visual_evidence": ["plain rice mound"],
+                    "missing_evidence": [],
+                    "decision_rationale": "dominant rice match",
+                    "gate_reason": "",
+                    "question_kind": "NONE",
+                    "question_focus": "",
+                    "question_examples": [],
+                    "learned_match_count": 3,
+                    "top_3": [
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-rice",
+                                similarity=0.99,
+                                label="Plain Rice",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-rice",
+                        },
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-jeera-rice",
+                                similarity=0.72,
+                                label="Jeera Rice",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-jeera-rice",
+                        },
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-pulao",
+                                similarity=0.63,
+                                label="Vegetable Pulao",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-pulao",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+        group = result["food_groups"][0]
+
+        self.assertEqual(group["group_action"], "ASK_SOURCE_ORIGIN")
+        self.assertEqual(group["source_question_policy"], "ask_generic")
+        self.assertIn("fewer than 5", group["source_trigger_reason"].lower())
+        self.assertEqual([action["type"] for action in group["clarification_actions"]], ["SOURCE_ORIGIN"])
+
+    def test_ambiguous_group_keeps_identity_first_when_source_consensus_exists(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-identity-first-source-consensus",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "the bread identity is ambiguous even though khubz history is mostly homemade",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "flatbread",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "candidate-khubz",
+                    "visual_evidence": ["flatbread"],
+                    "missing_evidence": [],
+                    "decision_rationale": "khubz and pita are visually close",
+                    "gate_reason": "",
+                    "question_kind": "NONE",
+                    "question_focus": "",
+                    "question_examples": [],
+                    "learned_match_count": 9,
+                    "learned_source_distribution": [
+                        {"candidate_id": "candidate-khubz", "source": "HOME_COOKED", "count": 8, "share": 0.89},
+                        {"candidate_id": "candidate-khubz", "source": "PACKAGED_BRANDED", "count": 1, "share": 0.11},
+                    ],
+                    "top_3": [
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-khubz",
+                                similarity=0.95,
+                                label="White Bread (Khubz)",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-khubz",
+                        },
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-pita",
+                                similarity=0.93,
+                                label="Whole Wheat Pita Bread",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-pita",
+                        },
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-roti",
+                                similarity=0.74,
+                                label="Tandoori Roti",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-roti",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+        group = result["food_groups"][0]
+
+        self.assertEqual(group["group_action"], "IDENTITY_CLARIFICATION_REQUIRED")
+        self.assertEqual(group["source_question_policy"], "defer_until_identity")
+        self.assertIn("identity", group["source_trigger_reason"].lower())
+        self.assertEqual([action["type"] for action in group["clarification_actions"]], ["CHOICE"])
+
+    def test_selected_identity_with_strong_source_dominance_marks_affirmation_policy(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-source-affirmation-policy",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "rice identity is clear and source history is overwhelmingly homemade",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-rice",
+                    "group_label": "rice",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-rice",
+                    "segment_ids": ["segment-rice"],
+                    "selected_candidate_id": "candidate-rice",
+                    "visual_evidence": ["plain rice mound"],
+                    "missing_evidence": [],
+                    "decision_rationale": "identity is stable",
+                    "gate_reason": "",
+                    "question_kind": "NONE",
+                    "question_focus": "",
+                    "question_examples": [],
+                    "learned_match_count": 10,
+                    "learned_source_distribution": [
+                        {"candidate_id": "candidate-rice", "source": "HOME_COOKED", "count": 9, "share": 0.9},
+                        {"candidate_id": "candidate-rice", "source": "RESTAURANT", "count": 1, "share": 0.1},
+                    ],
+                    "top_3": [
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-rice",
+                                similarity=0.99,
+                                label="Plain Rice",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-rice",
+                        },
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-jeera-rice",
+                                similarity=0.72,
+                                label="Jeera Rice",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-jeera-rice",
+                        },
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-pulao",
+                                similarity=0.63,
+                                label="Vegetable Pulao",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-pulao",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+        group = result["food_groups"][0]
+
+        self.assertEqual(group["source_question_policy"], "ask_affirmation")
+        self.assertIn("dominant", group["source_trigger_reason"].lower())
+        self.assertEqual(group["selected_identity"]["candidate_id"], "candidate-rice")
+        self.assertNotIn("SOURCE_ORIGIN", [action["type"] for action in group["clarification_actions"]])
+
     def test_disagreeing_signals_escalate_to_interview(self) -> None:
         payload = {
             "action": "AUTO_CONFIRM",
@@ -973,8 +1242,9 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertEqual(groups["group-bread"]["group_action"], "AFFIRMATION_REQUIRED")
         self.assertEqual(
             [action["type"] for action in groups["group-bread"]["clarification_actions"]],
-            ["AFFIRMATION"],
+            ["AFFIRMATION", "SOURCE_ORIGIN"],
         )
+        self.assertEqual(groups["group-bread"]["source_question_policy"], "ask_generic")
         self.assertEqual(groups["group-curry"]["group_action"], "AUTO_CONFIRM_LEARNED")
         self.assertFalse(groups["group-curry"]["clarification_needed"])
         self.assertEqual(groups["group-curry"]["clarification_actions"], [])

@@ -42,10 +42,15 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertNotIn("trace_id", schema["properties"])
         self.assertNotIn("group_id", group_schema["properties"])
         self.assertNotIn("primary_segment_id", group_schema["properties"])
-        self.assertNotIn("segment_ids", group_schema["properties"])
         self.assertNotIn("selected_candidate_id", group_schema["properties"])
         self.assertNotIn("top_3", group_schema["properties"])
         self.assertIn("segment_indexes", group_schema["required"])
+        self.assertIn("segment_ids", group_schema["properties"])
+        self.assertIn("segment_ids", group_schema["required"])
+        self.assertIn("source_question_policy", group_schema["properties"])
+        self.assertIn("source_trigger_reason", group_schema["properties"])
+        self.assertIn("learned_source_distribution", group_schema["properties"])
+        self.assertIn("selected_identity", group_schema["properties"])
 
         action_schema = schema["properties"]["action"]
         self.assertEqual(action_schema["type"], "string")
@@ -106,10 +111,15 @@ class ReasoningContractTests(unittest.TestCase):
             "group_actions",
             "group_state",
             "segment_indexes",
+            "segment_ids",
             "visual_evidence",
             "missing_evidence",
             "decision_rationale",
             "gate_reason",
+            "source_question_policy",
+            "source_trigger_reason",
+            "learned_source_distribution",
+            "selected_identity",
         }
         for field in expected_fields:
             self.assertIn(field, required_fields)
@@ -303,6 +313,58 @@ class ReasoningContractTests(unittest.TestCase):
             group["group_actions"],
             ["IDENTITY_CLARIFICATION_REQUIRED", "ASK_SOURCE_ORIGIN"],
         )
+
+    def test_grouped_reasoning_contract_preserves_source_policy_metadata(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "IDENTITY_CLARIFICATION_REQUIRED",
+                "meal_state": "PENDING_INTERVIEW",
+                "decision_rationale": "identity must be picked before source is confirmed",
+                "gate_reason": "top candidates are close",
+                "segment_count": 2,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_id": "group-flatbread",
+                        "group_label": "flatbread",
+                        "group_actions": ["IDENTITY_CLARIFICATION_REQUIRED"],
+                        "group_state": "PENDING_INTERVIEW",
+                        "primary_segment_id": "seg-bread-1",
+                        "segment_indexes": [0, 1],
+                        "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                        "visual_evidence": ["two flatbread pieces"],
+                        "missing_evidence": ["bread subtype"],
+                        "decision_rationale": "identity is still ambiguous",
+                        "gate_reason": "choose the flatbread type first",
+                        "clarification_needed": True,
+                        "clarification_actions": [],
+                        "question_kind": "IDENTITY",
+                        "question_focus": "bread subtype",
+                        "question_examples": ["khubz", "pita bread"],
+                        "source_question_policy": "defer_until_identity",
+                        "source_trigger_reason": "strong learned source history exists but identity is unresolved",
+                        "learned_source_distribution": [
+                            {"candidate_id": "candidate-khubz", "source": "HOME_COOKED", "count": 8, "share": 0.89},
+                            {"candidate_id": "candidate-khubz", "source": "PACKAGED_BRANDED", "count": 1, "share": 0.11},
+                        ],
+                        "selected_identity": {
+                            "candidate_id": "",
+                            "label": "",
+                            "food_item_id": "",
+                        },
+                    }
+                ],
+            }
+        )
+
+        group = grouped["food_groups"][0]
+        self.assertEqual(group["segment_ids"], ["seg-bread-1", "seg-bread-2"])
+        self.assertEqual(group["source_question_policy"], "defer_until_identity")
+        self.assertIn("identity", group["source_trigger_reason"].lower())
+        self.assertEqual(group["learned_source_distribution"][0]["candidate_id"], "candidate-khubz")
+        self.assertEqual(group["selected_identity"]["candidate_id"], "")
 
     def test_reasoning_response_format_contains_group_owned_clarification_actions_only(self) -> None:
         from app.services.reasoning_schema import reasoning_response_format

@@ -13,6 +13,7 @@ Eight phases transform a blank repo into a fully operational personal meal track
 - [x] **Phase 4.1: Grouped Reasoning & Human Interview Correction** - Correct the Phase 4 UAT gap where whole-meal top-3 candidates and raw segment prompts produce confusing interviews; reasoning must group distinct foods first, produce per-food top-3 candidates, and ask one human question per unresolved food group (completed 2026-05-29)
 - [x] **Phase 4.2: LLM-Threaded Interview Orchestration** - Replace deterministic interview continuation with an LLM interview agent that receives grouped reasoning context, conversation history, pending unclear targets, and clear auto-proposed items for approval; it asks natural follow-ups, decides when enough information is collected, and hands structured confirmed items back to final write-back/grounding. (completed 2026-05-30)
 - [x] **Phase 4.3: Deterministic Clarification Schema & Interview UI** - Replace freeform LLM interview turns with a reasoning-produced clarification schema, deterministic Telegram MCQ/open-field rendering, structured answer capture, and a compact final resolver that feeds the existing authoritative FoodItem/DiaryEntry/FoodVisual write path. (completed 2026-06-01)
+- [ ] **Phase 4.4: Parallel Group Finalization & Lite Detect Swap** - After deterministic clarification completes, run one structured post-processing/finalization call per food group in parallel using `google/gemini-3.1-flash-lite` so final save-ready metadata comes from each group's reasoning outcome plus its own clarifications; also swap the detect/classification model from Gemma to the same Lite model.
 - [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
@@ -192,6 +193,30 @@ Eight phases transform a blank repo into a fully operational personal meal track
 - [ ] `04.3-04-PLAN.md` - repeatable warm-state partial-match/no-match UAT harness for `IMG_4583.HEIC` and `IMG_4641.HEIC`, including disposable DB activation, evidence dump, and runbook updates.
 
 **Phase note**: This is an interview architecture cleanup before Phase 5 grounding, not a nutrition-grounding expansion. Keep SearXNG/Firecrawl tool loops out of scope except preserving handoff fields for Phase 5. Preserve the existing LLM finalizer only as a compact resolver if needed; it should not ask user-facing interview questions.
+
+---
+
+### Phase 4.4: Parallel Group Finalization & Lite Detect Swap
+
+**Goal**: Keep the deterministic clarification UI from Phase 4.3, but stop saving raw confirmation fragments directly. After all required clarification answers are collected, each food group should run through its own bounded structured post-processing call using `google/gemini-3.1-flash-lite`, in parallel, so the final authoritative write path receives save-ready per-group metadata such as proper dish naming, source, quantity, and learned-label context. This phase also swaps the detect/classification model from `google/gemma-4-31b-it` to `google/gemini-3.1-flash-lite`.
+**Mode:** mvp
+**Depends on**: Phase 4.3
+**Requirements**: VISION-01, REASON-01, REASON-04, INTERVIEW-03, INTERVIEW-04, MATCH-04
+**Success Criteria** (what must be TRUE):
+
+  1. Once deterministic clarification answers are complete, the pipeline fans out one structured finalization call per food group in parallel with bounded concurrency using `google/gemini-3.1-flash-lite`, rather than persisting `confirmation_items` directly as the final save payload.
+  2. Each per-group finalizer call receives only that group's reasoning outcome, candidate evidence, clarification answers, and group/segment refs; it does not re-open whole-meal reasoning or depend on sibling-group answers except where explicit shared quantity context is already encoded.
+  3. The per-group finalizer emits strict save-ready metadata for the authoritative write path, including at minimum the final food name, source type, quantity payload/display when available, portion bucket, and any metadata needed to create the associated FoodVisual/FoodItem learning record.
+  4. Clarification answers that materially affect the saved record, such as bread count, source/origin, and corrected identity, persist into the final `DiaryEntry` / `FoodItem` surfaces instead of being dropped during finalization.
+  5. A clarified meal like the live `IMG_4646.HEIC` flow no longer saves fragment names such as `Bran and whole wheat`, `Green masala`, or `Lauki` when the resolved dish identity should be a fuller per-group food name.
+  6. The detect stage uses `google/gemini-3.1-flash-lite` by default instead of `google/gemma-4-31b-it`, and the existing food-vs-not-food contract continues to pass its structured-output smoke tests.
+
+**Plans**: 2 plans
+
+- [ ] `04.4-01-PLAN.md` - Wave 1 - Lite detect default plus strict per-group finalizer schema and config contract
+- [ ] `04.4-02-PLAN.md` - Wave 2 - group-scoped finalizer fan-out, explicit degraded fallback, and authoritative final write mapping
+
+**Phase note**: This is still not Phase 5 grounding. No SearXNG, Firecrawl, restaurant lookup, or nutrition-web enrichment loop should be added here. The Phase 4.4 model pass is a compact per-group final metadata composer that sits between deterministic clarification capture and the existing authoritative save transaction.
 
 ---
 

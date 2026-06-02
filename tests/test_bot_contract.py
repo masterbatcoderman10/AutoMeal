@@ -1863,6 +1863,39 @@ class SettingsContractTests(unittest.TestCase):
         self.assertIn("COPY config/ ./config/", api_dockerfile)
         self.assertIn("COPY config/ ./config/", bot_dockerfile)
 
+    def test_settings_expose_explicit_finalizer_config(self) -> None:
+        from app.config import Settings
+
+        fields = Settings.model_fields
+
+        self.assertIn("FINALIZER_MODEL", fields)
+        self.assertIn("FINALIZER_GROUP_PARALLELISM", fields)
+        self.assertEqual(fields["FINALIZER_MODEL"].default, "google/gemini-3.1-flash-lite")
+        self.assertEqual(fields["FINALIZER_GROUP_PARALLELISM"].default, 4)
+
+    def test_finalizer_group_parallelism_must_be_positive(self) -> None:
+        from pydantic import ValidationError
+
+        from app.config import Settings
+
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql+asyncpg://meal:pw@db:5432/meal",
+                "INGEST_SECRET": "secret",
+                "TELEGRAM_BOT_TOKEN": "token",
+                "TELEGRAM_CHAT_ID": "999",
+                "OPENROUTER_API_KEY": "router-key",
+                "LANGFUSE_PUBLIC_KEY": "pk-lf-test",
+                "LANGFUSE_SECRET_KEY": "sk-lf-test",
+                "LANGFUSE_BASE_URL": "https://cloud.langfuse.com",
+                "FINALIZER_GROUP_PARALLELISM": "0",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(ValidationError):
+                Settings(_env_file=None)
+
     def test_settings_ignore_unrelated_env_keys(self) -> None:
         from app.config import Settings
 

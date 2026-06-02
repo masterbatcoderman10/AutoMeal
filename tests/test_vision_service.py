@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from app.services.vision_service import (
     _coerce_detect_decision,
@@ -51,6 +53,67 @@ class DetectPromptTests(unittest.TestCase):
         json_schema = schema["json_schema"]["schema"]
         self.assertTrue(json_schema["additionalProperties"] is False)
         self.assertIn("is_food", json_schema["required"])
+
+
+class DetectConfigContractTests(unittest.TestCase):
+    def test_settings_default_detect_model_uses_flash_lite(self) -> None:
+        from app.config import Settings
+
+        self.assertEqual(
+            Settings.model_fields["DETECT_MODEL"].default,
+            "google/gemini-3.1-flash-lite",
+        )
+
+
+class VisionSmokeContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_detect_prefers_explicit_detect_model_override(self) -> None:
+        from scripts import vision_smoke
+
+        client = SimpleNamespace()
+        with (
+            patch.object(
+                vision_smoke,
+                "get_settings",
+                return_value=SimpleNamespace(DETECT_MODEL="google/gemma-4-31b-it"),
+            ),
+            patch.object(vision_smoke, "get_llm_client", return_value=client),
+            patch.object(
+                vision_smoke,
+                "detect_food_photo",
+                AsyncMock(return_value={"next_action": "segment", "is_food": True, "confidence": 0.91}),
+            ) as detect_food_photo,
+        ):
+            payload = await vision_smoke._run_detect(
+                Path("sample_images/IMG_4583.HEIC"),
+                detect_model="google/gemini-3.1-flash-lite",
+            )
+
+        detect_food_photo.assert_awaited_once_with(
+            "sample_images/IMG_4583.HEIC",
+            llm_client=client,
+            model="google/gemini-3.1-flash-lite",
+        )
+        self.assertEqual(payload["mode"], "detect")
+
+    def test_parse_args_accepts_explicit_detect_model(self) -> None:
+        from scripts import vision_smoke
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "vision_smoke.py",
+                "--mode",
+                "detect",
+                "--sample",
+                "sample_images/IMG_4583.HEIC",
+                "--detect-model",
+                "google/gemini-3.1-flash-lite",
+            ],
+        ):
+            args = vision_smoke.parse_args()
+
+        self.assertEqual(args.detect_model, "google/gemini-3.1-flash-lite")
 
 
 class DetectPayloadTests(unittest.TestCase):

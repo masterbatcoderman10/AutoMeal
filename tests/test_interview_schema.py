@@ -28,6 +28,16 @@ class InterviewConfigContractTests(unittest.TestCase):
         self.assertEqual(fields["INTERVIEW_MODEL"].default, "google/gemini-3.1-flash-lite")
         self.assertEqual(fields["INTERVIEW_FALLBACK_MODEL"].default, "google/gemini-3-flash-preview")
 
+    def test_settings_expose_explicit_finalizer_model_defaults(self) -> None:
+        from app.config import Settings
+
+        fields = Settings.model_fields
+
+        self.assertIn("FINALIZER_MODEL", fields)
+        self.assertIn("FINALIZER_GROUP_PARALLELISM", fields)
+        self.assertEqual(fields["FINALIZER_MODEL"].default, "google/gemini-3.1-flash-lite")
+        self.assertEqual(fields["FINALIZER_GROUP_PARALLELISM"].default, 4)
+
 
 class InterviewSchemaContractTests(unittest.TestCase):
     def test_schema_module_exposes_strict_contract_and_response_format(self) -> None:
@@ -116,6 +126,140 @@ class InterviewSchemaContractTests(unittest.TestCase):
                     "source_type": "HOME",
                     "portion_bucket": "STANDARD",
                 }
+            )
+
+    def test_group_finalizer_schema_exposes_strict_save_ready_contract(self) -> None:
+        schema_module = _load_module_or_fail(self, "app.services.interview_schema")
+        if schema_module is None:
+            return
+
+        finalizer_model = getattr(schema_module, "FinalizedGroupResult", None)
+        response_format_helper = getattr(schema_module, "group_finalizer_response_format", None)
+        parser = getattr(schema_module, "parse_group_finalizer_result", None)
+
+        self.assertIsNotNone(finalizer_model)
+        self.assertTrue(callable(response_format_helper))
+        self.assertTrue(callable(parser))
+
+        response_format = response_format_helper()
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertTrue(response_format["json_schema"]["strict"])
+
+        schema = response_format["json_schema"]["schema"]
+        self.assertFalse(schema["additionalProperties"])
+        self.assertTrue(
+            {
+                "group_id",
+                "primary_segment_id",
+                "segment_ids",
+                "final_name",
+                "aliases",
+                "source_type",
+                "portion_bucket",
+                "quantity_display",
+                "quantity_json",
+                "food_item_id",
+                "brand_name",
+                "restaurant_name",
+                "correction_note",
+                "supporting_details",
+            }.issubset(set(schema["required"]))
+        )
+        self.assertNotIn("top_3", schema["properties"])
+        self.assertNotIn("other_groups", schema["properties"])
+
+        quantity_schema = schema["properties"]["quantity_json"]["anyOf"][0]
+        self.assertFalse(quantity_schema["additionalProperties"])
+        self.assertIn("portion_bucket", quantity_schema["required"])
+
+    def test_group_finalizer_parser_requires_save_ready_fields(self) -> None:
+        schema_module = _load_module_or_fail(self, "app.services.interview_schema")
+        if schema_module is None:
+            return
+
+        parsed = schema_module.parse_group_finalizer_result(
+            {
+                "group_id": "group-chicken",
+                "primary_segment_id": "seg-chicken-1",
+                "segment_ids": ["seg-chicken-2", "seg-chicken-1", "seg-chicken-2"],
+                "final_name": "Chicken curry (green masala)",
+                "aliases": ["Green masala chicken curry"],
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "quantity_display": "2 pieces",
+                "quantity_json": {
+                    "quantity": 2,
+                    "unit": "pieces",
+                    "portion_bucket": "STANDARD",
+                },
+                "food_item_id": None,
+                "brand_name": None,
+                "restaurant_name": None,
+                "correction_note": "User clarified the bread quantity.",
+                "supporting_details": ["User confirmed green masala chicken curry."],
+            },
+            expected_group_id="group-chicken",
+        )
+
+        self.assertEqual(parsed.segment_ids, ["seg-chicken-2", "seg-chicken-1"])
+        self.assertEqual(parsed.quantity_json.quantity, 2.0)
+        self.assertEqual(parsed.final_name, "Chicken curry (green masala)")
+
+    def test_group_finalizer_parser_rejects_missing_fields_extra_keys_and_bad_json(self) -> None:
+        schema_module = _load_module_or_fail(self, "app.services.interview_schema")
+        if schema_module is None:
+            return
+
+        valid_payload = {
+            "group_id": "group-chicken",
+            "primary_segment_id": "seg-chicken-1",
+            "segment_ids": ["seg-chicken-1"],
+            "final_name": "Chicken curry (green masala)",
+            "aliases": ["Green masala chicken curry"],
+            "source_type": "HOME",
+            "portion_bucket": "STANDARD",
+            "quantity_display": "2 pieces",
+            "quantity_json": {
+                "quantity": 2,
+                "unit": "pieces",
+                "portion_bucket": "STANDARD",
+            },
+            "food_item_id": None,
+            "brand_name": None,
+            "restaurant_name": None,
+            "correction_note": None,
+            "supporting_details": [],
+        }
+
+        with self.assertRaises(schema_module.InterviewTurnValidationError):
+            schema_module.parse_group_finalizer_result(
+                {key: value for key, value in valid_payload.items() if key != "quantity_json"},
+                expected_group_id="group-chicken",
+            )
+
+        with self.assertRaises(schema_module.InterviewTurnValidationError):
+            schema_module.parse_group_finalizer_result(
+                {
+                    **valid_payload,
+                    "quantity_json": {
+                        "quantity": "2",
+                        "unit": "pieces",
+                        "portion_bucket": "STANDARD",
+                    },
+                },
+                expected_group_id="group-chicken",
+            )
+
+        with self.assertRaises(schema_module.InterviewTurnValidationError):
+            schema_module.parse_group_finalizer_result(
+                {**valid_payload, "top_3": []},
+                expected_group_id="group-chicken",
+            )
+
+        with self.assertRaises(schema_module.InterviewTurnValidationError):
+            schema_module.parse_group_finalizer_result(
+                "{\"group_id\":\"group-chicken\"",
+                expected_group_id="group-chicken",
             )
 
 
@@ -353,6 +497,96 @@ class InterviewTurnManagerContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.turn_action, "continue_interview")
         self.assertIn("chicken", result.assistant_prompt.lower())
         self.assertEqual(llm_client.chat_completion.await_count, 2)
+
+    async def test_ready_to_confirm_accepts_completed_structured_answers(self) -> None:
+        manager_module = _load_module_or_fail(self, "app.services.interview_turn_manager")
+        if manager_module is None:
+            return
+
+        run_interview_turn = getattr(manager_module, "run_interview_turn", None)
+        self.assertTrue(callable(run_interview_turn))
+        if not callable(run_interview_turn):
+            return
+
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"turn_action":"ready_to_confirm","assistant_prompt":"Ready to save.",'
+                                    '"clarification_reason":null,"conversation_summary":"Resolved structured answers.",'
+                                    '"confirmation_items":[{"group_id":"group-bread","primary_segment_id":"seg-bread",'
+                                    '"segment_id":"seg-bread","name":"white khubz","source_type":"HOME",'
+                                    '"portion_bucket":"STANDARD","approval_status":"CORRECTED"},'
+                                    '{"group_id":"group-chicken","primary_segment_id":"seg-chicken","segment_id":"seg-chicken",'
+                                    '"name":"chicken curry","source_type":"HOME","portion_bucket":"STANDARD",'
+                                    '"approval_status":"APPROVED"},'
+                                    '{"group_id":"group-egg","primary_segment_id":"seg-egg","segment_id":"seg-egg",'
+                                    '"name":"egg and bottle gourd curry","source_type":"HOME","portion_bucket":"STANDARD",'
+                                    '"approval_status":"CORRECTED"}]}'
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
+        )
+
+        authoritative_state = {
+            "meal_id": "meal-structured",
+            "question_order": ["group-bread:identity", "group-chicken:affirmation", "group-egg:identity"],
+            "questions_by_id": {
+                "group-bread:identity": {"group_id": "group-bread"},
+                "group-chicken:affirmation": {"group_id": "group-chicken"},
+                "group-egg:identity": {"group_id": "group-egg"},
+            },
+            "remaining_required_question_ids": [],
+            "answers_by_question_id": {
+                "group-bread:identity": {
+                    "group_id": "group-bread",
+                    "name": "White khubz",
+                    "question_kind": "IDENTITY",
+                },
+                "group-chicken:affirmation": {
+                    "group_id": "group-chicken",
+                    "label": "Chicken curry",
+                    "choice_id": "approve",
+                    "approval_status": "APPROVED",
+                    "question_kind": "AFFIRMATION",
+                },
+                "group-egg:identity": {
+                    "group_id": "group-egg",
+                    "name": "Bottle gourd",
+                    "question_kind": "IDENTITY",
+                },
+            },
+            "unresolved_targets": [
+                {"group_id": "group-bread", "label": "Khubz bread"},
+                {"group_id": "group-egg", "label": "Egg and vegetable curry"},
+            ],
+            "approval_candidates": [
+                {"group_id": "group-chicken", "label": "Chicken curry", "proposed_name": "Chicken curry"}
+            ],
+        }
+
+        with (
+            patch.object(manager_module, "get_llm_client", return_value=llm_client),
+            patch.object(manager_module.tracing_service, "maybe_start_trace"),
+        ):
+            result = await run_interview_turn(
+                authoritative_state=authoritative_state,
+                transcript=[],
+                latest_user_text="White khubz, chicken curry is correct, and bottle gourd.",
+            )
+
+        self.assertEqual(result.turn_action, "ready_to_confirm")
+        self.assertEqual(
+            [item.name for item in result.confirmation_items],
+            ["white khubz", "chicken curry", "egg and bottle gourd curry"],
+        )
+        self.assertEqual(llm_client.chat_completion.await_count, 1)
 
     async def test_ready_to_confirm_accepts_prior_thread_confirmation_for_approval_candidates(self) -> None:
         manager_module = _load_module_or_fail(self, "app.services.interview_turn_manager")

@@ -165,3 +165,137 @@ class ParallelPipelineTests(unittest.IsolatedAsyncioTestCase):
             siblings_started_while_slow,
             "fast sibling segment processing must start while slow segment is in-flight",
         )
+
+    async def test_slow_group_finalizer_does_not_block_sibling_groups(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-finalizer-parallel",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "food_groups": [
+                        {
+                            "group_id": "group-slow",
+                            "group_label": "slow curry",
+                            "primary_segment_id": "seg-slow",
+                            "segment_ids": ["seg-slow"],
+                        },
+                        {
+                            "group_id": "group-fast-1",
+                            "group_label": "fast one",
+                            "primary_segment_id": "seg-fast-1",
+                            "segment_ids": ["seg-fast-1"],
+                        },
+                        {
+                            "group_id": "group-fast-2",
+                            "group_label": "fast two",
+                            "primary_segment_id": "seg-fast-2",
+                            "segment_ids": ["seg-fast-2"],
+                        },
+                    ]
+                }
+            },
+            last_stage_started_at=None,
+        )
+        confirmation_items = [
+            {
+                "group_id": "group-slow",
+                "primary_segment_id": "seg-slow",
+                "segment_id": "seg-slow",
+                "segment_ids": ["seg-slow"],
+                "name": "slow curry",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "APPROVED",
+            },
+            {
+                "group_id": "group-fast-1",
+                "primary_segment_id": "seg-fast-1",
+                "segment_id": "seg-fast-1",
+                "segment_ids": ["seg-fast-1"],
+                "name": "fast one",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "APPROVED",
+            },
+            {
+                "group_id": "group-fast-2",
+                "primary_segment_id": "seg-fast-2",
+                "segment_id": "seg-fast-2",
+                "segment_ids": ["seg-fast-2"],
+                "name": "fast two",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "APPROVED",
+            },
+        ]
+        segments = [
+            SimpleNamespace(id="seg-slow", cropped_image_url="/data/uploads/crops/seg-slow.jpg", embedding=[0.1, 0.2, 0.3]),
+            SimpleNamespace(id="seg-fast-1", cropped_image_url="/data/uploads/crops/seg-fast-1.jpg", embedding=[0.1, 0.2, 0.3]),
+            SimpleNamespace(id="seg-fast-2", cropped_image_url="/data/uploads/crops/seg-fast-2.jpg", embedding=[0.1, 0.2, 0.3]),
+        ]
+        session = AsyncMock()
+        session.add = Mock()
+
+        active_groups = 0
+        max_active = 0
+        slow_started = asyncio.Event()
+        slow_done = asyncio.Event()
+        siblings_started_while_slow = False
+
+        async def _slow_aware_finalize(*, group_input, **_kwargs):
+            nonlocal active_groups, max_active, siblings_started_while_slow
+            active_groups += 1
+            max_active = max(max_active, active_groups)
+            if group_input.group_id == "group-slow":
+                slow_started.set()
+                await asyncio.sleep(0.02)
+                slow_done.set()
+            else:
+                if slow_started.is_set() and not slow_done.is_set():
+                    siblings_started_while_slow = True
+                await asyncio.sleep(0.002)
+            active_groups -= 1
+            return interview_service.GroupFinalizerOutcome(
+                group_id=group_input.group_id,
+                final_resolution=interview_service.final_resolution_from_confirmation(
+                    item=group_input.confirmation_item,
+                    segment=group_input.segment,
+                ),
+                finalized_confirmation_item=dict(group_input.confirmation_item),
+                audit_state={"group_id": group_input.group_id, "status": "SUCCEEDED"},
+            )
+
+        with (
+            unittest.mock.patch.object(
+                interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=2,
+                    FINALIZER_MODEL="google/gemini-3.1-flash-lite",
+                ),
+                create=True,
+            ),
+            unittest.mock.patch.object(
+                interview_service,
+                "_finalize_group_input",
+                side_effect=_slow_aware_finalize,
+                create=True,
+            ),
+            unittest.mock.patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(return_value={"meal_entries": [], "food_visuals": [], "correction_events": []}),
+            ),
+        ):
+            await interview_service.finalize_confirmed_interview(
+                session=session,
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=segments,
+            )
+
+        self.assertGreater(max_active, 1)
+        self.assertLessEqual(max_active, 2)
+        self.assertTrue(siblings_started_while_slow)

@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from app.models import MealProcessingStatus
+
 
 class InterviewRoadmapTests(unittest.TestCase):
     def test_interview_roadmap_is_pinned_and_hybrid(self) -> None:
@@ -529,6 +531,21 @@ class InterviewConfirmationEditTests(unittest.TestCase):
         self.assertEqual(parsed["updates"][0]["segment_id"], "seg-1")
         self.assertEqual(parsed["updates"][1]["segment_id"], "seg-2")
 
+    def test_plain_confirmation_text_does_not_edit_first_item(self) -> None:
+        from bot import handlers
+
+        parsed = handlers.parse_confirmation_bulk_text(
+            text="Bottle gourd",
+            confirmation_items=[
+                {"segment_id": "seg-bread", "name": "White khubz"},
+                {"segment_id": "seg-chicken", "name": "Chicken curry"},
+                {"segment_id": "seg-egg", "name": "Egg and vegetable curry"},
+            ],
+        )
+
+        self.assertFalse(parsed["applied_bulk"])
+        self.assertEqual(parsed["updates"], [])
+
     def test_confirmation_is_replayed_after_edit(self) -> None:
         from bot import handlers
 
@@ -562,7 +579,7 @@ class InterviewConfirmationEditTests(unittest.TestCase):
         self.assertIn("grilled chicken chunks", prompt)
 
 
-class InterviewPersistencePrepTests(unittest.TestCase):
+class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
     def test_build_interview_turn_state_includes_unresolved_and_approval_groups(self) -> None:
         from app.services import interview_service
 
@@ -835,7 +852,7 @@ class InterviewPersistencePrepTests(unittest.TestCase):
         self.assertEqual(target["label"], "egg curry")
         self.assertEqual(target["question_focus"], "vegetable inside egg curry")
 
-    def test_prepare_interview_session_seeds_question_indexed_state_from_clarification_schema(self) -> None:
+    def test_prepare_interview_session_seeds_question_indexed_state_from_group_actions(self) -> None:
         import asyncio
 
         from app.services import interview_service
@@ -855,36 +872,43 @@ class InterviewPersistencePrepTests(unittest.TestCase):
             id="meal-schema-state",
             reasoning_state_json={
                 "meal_reasoning": {
-                    "clarification_schema": {
-                        "questions": [
-                            {
-                                "question_id": "q-confirm-pita",
-                                "group_id": "group-pita",
-                                "primary_segment_id": "seg-pita-1",
-                                "segment_ids": ["seg-pita-1"],
-                                "question_kind": "APPROVAL",
-                                "answer_type": "confirm",
-                                "required": False,
-                                "label": "pita bread",
-                                "choices": [
-                                    {"choice_id": "approve", "label": "Yes"},
-                                    {"choice_id": "correct", "label": "No"},
-                                ],
-                            },
-                            {
-                                "question_id": "q-detail-curry",
-                                "group_id": "group-egg",
-                                "primary_segment_id": "seg-egg-1",
-                                "segment_ids": ["seg-egg-1", "seg-egg-2"],
-                                "question_kind": "DETAIL",
-                                "answer_type": "free_text",
-                                "required": True,
-                                "label": "egg curry",
-                                "question_focus": "vegetable inside egg curry",
-                                "question_examples": ["egg curry with bottle gourd"],
-                            },
-                        ]
-                    }
+                    "food_groups": [
+                        {
+                            "group_id": "group-pita",
+                            "group_label": "pita bread",
+                            "primary_segment_id": "seg-pita-1",
+                            "segment_ids": ["seg-pita-1"],
+                            "clarification_actions": [
+                                {
+                                    "question_id": "q-confirm-pita",
+                                    "type": "AFFIRMATION",
+                                    "kind": "APPROVAL",
+                                    "answer_type": "confirm",
+                                    "required": False,
+                                    "choices": [
+                                        {"choice_id": "approve", "label": "Yes"},
+                                        {"choice_id": "correct", "label": "No"},
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "group_id": "group-egg",
+                            "group_label": "egg curry",
+                            "primary_segment_id": "seg-egg-1",
+                            "segment_ids": ["seg-egg-1", "seg-egg-2"],
+                            "clarification_actions": [
+                                {
+                                    "question_id": "q-detail-curry",
+                                    "type": "FREE_TEXT",
+                                    "kind": "DETAIL",
+                                    "answer_type": "free_text",
+                                    "required": True,
+                                    "question_focus": "vegetable inside egg curry",
+                                }
+                            ],
+                        },
+                    ]
                 }
             },
         )
@@ -908,6 +932,149 @@ class InterviewPersistencePrepTests(unittest.TestCase):
         questions_by_id = payload.get("questions_by_id") or {}
         self.assertIn("q-detail-curry", questions_by_id)
         self.assertEqual(questions_by_id.get("q-detail-curry", {}).get("answer_type"), "free_text")
+
+    def test_affirmation_required_stays_required_and_renders_before_source_origin(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-affirm-first",
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "decision_rationale": "Need explicit confirmation for a new visual-only item.",
+                    "food_groups": [
+                        {
+                            "group_id": "group-chicken",
+                            "group_label": "Chicken curry",
+                            "group_action": "AFFIRMATION_REQUIRED",
+                            "group_state": "PENDING_INTERVIEW",
+                            "primary_segment_id": "seg-chicken-1",
+                            "segment_ids": ["seg-chicken-1"],
+                            "clarification_actions": [
+                                {
+                                    "question_id": "q-affirm-chicken",
+                                    "type": "AFFIRMATION",
+                                    "kind": "AFFIRMATION",
+                                    "answer_type": "confirm",
+                                    "required": True,
+                                    "user_prompt": "I think this is Chicken curry. Is that right?",
+                                    "choices": [
+                                        {"label": "Yes", "quick_prompt": "Yes"},
+                                        {"label": "No", "quick_prompt": "No"},
+                                    ],
+                                },
+                                {
+                                    "question_id": "q-source-chicken",
+                                    "type": "SOURCE_ORIGIN",
+                                    "kind": "SOURCE_ORIGIN",
+                                    "answer_type": "single_choice",
+                                    "required": True,
+                                    "user_prompt": "Was this homemade, packaged, or restaurant?",
+                                    "choices": [
+                                        {"label": "homemade", "quick_prompt": "homemade"},
+                                        {"label": "restaurant", "quick_prompt": "restaurant"},
+                                    ],
+                                },
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+
+        state = interview_service.build_interview_turn_state(
+            meal=meal,
+            segments=[SimpleNamespace(id="seg-chicken-1", label="chicken curry")],
+        )
+
+        self.assertEqual(state["question_order"], ["q-affirm-chicken", "q-source-chicken"])
+        self.assertEqual(state["remaining_required_question_ids"][0], "q-affirm-chicken")
+        self.assertEqual(state["current_question"]["question_id"], "q-affirm-chicken")
+        self.assertTrue(state["questions_by_id"]["q-affirm-chicken"]["required"])
+        self.assertEqual(
+            [choice["choice_id"] for choice in state["questions_by_id"]["q-affirm-chicken"]["choices"]],
+            ["approve", "correct"],
+        )
+
+    def test_identity_quantity_and_source_actions_render_for_one_group(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-composed-actions",
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "decision_rationale": "One item needs identity, quantity, and source before logging.",
+                    "food_groups": [
+                        {
+                            "group_id": "group-flatbread",
+                            "group_label": "Flatbread",
+                            "group_actions": [
+                                "IDENTITY_CLARIFICATION_REQUIRED",
+                                "ASK_QUANTITY",
+                                "ASK_SOURCE_ORIGIN",
+                            ],
+                            "group_state": "PENDING_INTERVIEW",
+                            "primary_segment_id": "seg-flatbread-1",
+                            "segment_ids": ["seg-flatbread-1"],
+                            "clarification_actions": [
+                                {
+                                    "question_id": "q-flatbread-identity",
+                                    "type": "CHOICE",
+                                    "kind": "IDENTITY",
+                                    "answer_type": "single_choice",
+                                    "required": True,
+                                    "user_prompt": "Which bread is this?",
+                                    "choices": [
+                                        {"label": "Khubz", "quick_prompt": "Khubz"},
+                                        {"label": "Pita", "quick_prompt": "Pita"},
+                                        {"label": "Roti", "quick_prompt": "Roti"},
+                                    ],
+                                },
+                                {
+                                    "question_id": "q-flatbread-quantity",
+                                    "type": "QUANTITY",
+                                    "kind": "QUANTITY",
+                                    "answer_type": "free_text",
+                                    "required": True,
+                                    "user_prompt": "How many pieces of flatbread are there?",
+                                    "choices": [],
+                                },
+                                {
+                                    "question_id": "q-flatbread-source",
+                                    "type": "SOURCE_ORIGIN",
+                                    "kind": "SOURCE_ORIGIN",
+                                    "answer_type": "single_choice",
+                                    "required": True,
+                                    "user_prompt": "Was this homemade, packaged, or restaurant?",
+                                    "choices": [
+                                        {"label": "homemade", "quick_prompt": "homemade"},
+                                        {"label": "restaurant", "quick_prompt": "restaurant"},
+                                    ],
+                                },
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+
+        state = interview_service.build_interview_turn_state(
+            meal=meal,
+            segments=[SimpleNamespace(id="seg-flatbread-1", label="flatbread")],
+        )
+
+        self.assertEqual(
+            state["question_order"],
+            ["q-flatbread-identity", "q-flatbread-quantity", "q-flatbread-source"],
+        )
+        self.assertEqual(
+            state["remaining_required_question_ids"],
+            ["q-flatbread-identity", "q-flatbread-quantity", "q-flatbread-source"],
+        )
+        self.assertEqual(state["current_question"]["question_id"], "q-flatbread-identity")
+        self.assertEqual(
+            [state["questions_by_id"][question_id]["question_kind"] for question_id in state["question_order"]],
+            ["IDENTITY", "QUANTITY", "SOURCE_ORIGIN"],
+        )
 
     def test_confirmation_items_are_built_from_structured_answers(self) -> None:
         from app.services import interview_service
@@ -1029,6 +1196,194 @@ class InterviewPersistencePrepTests(unittest.TestCase):
         self.assertTrue(resolution.food.needs_grounding)
         self.assertEqual(resolution.food.llm_reasoning, "NEEDS_GROUNDING")
         self.assertEqual(resolution.quantity_json["grounding_prep"]["status"], "NEEDS_GROUNDING")
+
+    async def test_finalize_confirmed_interview_keeps_packaged_grounding_handoff_with_finalized_metadata(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-packaged-handoff",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "food_groups": [
+                        {
+                            "group_id": "group-bar",
+                            "group_label": "protein bar",
+                            "question_kind": "IDENTITY",
+                            "group_actions": ["ASK_SOURCE_ORIGIN"],
+                            "primary_segment_id": "seg-bar-1",
+                            "segment_ids": ["seg-bar-1"],
+                            "top_3": [
+                                {
+                                    "candidate_id": "candidate-bar",
+                                    "label": "Protein Bar",
+                                    "source_type": "PACKAGED",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "answers_by_question_id": {
+                    "q-brand": {
+                        "question_id": "q-brand",
+                        "group_id": "group-bar",
+                        "question_kind": "SOURCE_ORIGIN",
+                        "value": "Acme",
+                    }
+                },
+            },
+            last_stage_started_at=None,
+        )
+        segment = SimpleNamespace(
+            id="seg-bar-1",
+            cropped_image_url="/data/uploads/crops/seg-bar-1.jpg",
+            embedding=[0.5, 0.6, 0.7],
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        confirmation_items = [
+            {
+                "group_id": "group-bar",
+                "primary_segment_id": "seg-bar-1",
+                "segment_id": "seg-bar-1",
+                "segment_ids": ["seg-bar-1"],
+                "name": "Acme",
+                "source_type": "PACKAGED",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "brand_name": "Acme",
+                "quantity_display": "1 bar",
+            }
+        ]
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "group_id": "group-bar",
+                                        "primary_segment_id": "seg-bar-1",
+                                        "segment_ids": ["seg-bar-1"],
+                                        "final_name": "Acme Protein Bar",
+                                        "aliases": ["Protein Bar"],
+                                        "source_type": "PACKAGED",
+                                        "portion_bucket": "STANDARD",
+                                        "quantity_display": "1 bar",
+                                        "quantity_json": {
+                                            "quantity": 1,
+                                            "unit": "bar",
+                                            "portion_bucket": "STANDARD",
+                                        },
+                                        "food_item_id": None,
+                                        "brand_name": "Acme",
+                                        "restaurant_name": None,
+                                        "correction_note": None,
+                                        "supporting_details": ["store-bought packaged item"],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
+        )
+
+        with patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True):
+            result = await interview_service.finalize_confirmed_interview(
+                session=session,
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=[segment],
+            )
+
+        self.assertTrue(result["grounding_required"])
+        self.assertEqual(meal.processing_status, MealProcessingStatus.INTERVIEWING)
+        self.assertTrue(meal.reasoning_state_json["grounding_required"])
+        self.assertTrue(meal.reasoning_state_json["post_interview_grounding"])
+        self.assertEqual(meal.reasoning_state_json["handoff_target"], "poll_post_interview_grounding")
+        self.assertEqual(
+            meal.reasoning_state_json["confirmation_items"][0]["name"],
+            "Acme Protein Bar",
+        )
+        self.assertEqual(meal.reasoning_state_json["confirmation_items"][0]["brand_name"], "Acme")
+        self.assertEqual(meal.reasoning_state_json["finalizer_groups"][0]["status"], "SUCCEEDED")
+
+    async def test_finalize_confirmed_interview_degrades_malformed_finalizer_json_to_best_effort_save(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-finalizer-degraded",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "food_groups": [
+                        {
+                            "group_id": "group-curry",
+                            "group_label": "chicken curry",
+                            "question_kind": "DETAIL",
+                            "question_focus": "style of the curry",
+                            "group_actions": ["IDENTITY_CLARIFICATION_REQUIRED"],
+                            "primary_segment_id": "seg-curry-1",
+                            "segment_ids": ["seg-curry-1"],
+                        }
+                    ]
+                }
+            },
+            last_stage_started_at=None,
+        )
+        segment = SimpleNamespace(
+            id="seg-curry-1",
+            cropped_image_url="/data/uploads/crops/seg-curry-1.jpg",
+            embedding=[0.11, 0.22, 0.33],
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        confirmation_items = [
+            {
+                "group_id": "group-curry",
+                "primary_segment_id": "seg-curry-1",
+                "segment_id": "seg-curry-1",
+                "segment_ids": ["seg-curry-1"],
+                "name": "Green masala",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "quantity_display": "1 bowl",
+            }
+        ]
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={"choices": [{"message": {"content": "{\"bad\":true}"}}]}
+            )
+        )
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
+        ):
+            await interview_service.finalize_confirmed_interview(
+                session=session,
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=[segment],
+            )
+
+        final_segment = captured["final_segments"][0]
+        self.assertEqual(final_segment.identification_method, "INTERVIEW_BEST_EFFORT")
+        self.assertEqual(final_segment.food.canonical_name, "chicken curry (Green masala)")
+        self.assertTrue(final_segment.create_food_visual)
+        self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "DEGRADED")
 
     def test_source_origin_store_bought_preserves_state_and_requires_grounding(self) -> None:
         from app.services import interview_service

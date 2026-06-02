@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -733,12 +734,21 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             id="meal-finalize",
             processing_status=MealProcessingStatus.INTERVIEWING,
             reasoning_state_json={
-                "clarification_schema": {
-                    "questions": [
+                "meal_reasoning": {
+                    "food_groups": [
                         {
-                            "question_id": "q-detail-curry",
                             "group_id": "group-egg",
-                            "required": True,
+                            "group_label": "egg curry",
+                            "primary_segment_id": "seg-egg-1",
+                            "segment_ids": ["seg-egg-1"],
+                            "clarification_actions": [
+                                {
+                                    "question_id": "q-detail-curry",
+                                    "type": "FREE_TEXT",
+                                    "kind": "DETAIL",
+                                    "required": True,
+                                }
+                            ],
                         }
                     ]
                 },
@@ -801,6 +811,144 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             "egg curry with bottle gourd",
         )
 
+    async def test_finalize_confirmed_interview_maps_group_finalizer_output_to_authoritative_write(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-finalizer-home",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "trace_id": "trace-finalizer-home",
+                    "food_groups": [
+                        {
+                            "group_id": "group-chicken",
+                            "group_label": "chicken curry",
+                            "question_kind": "DETAIL",
+                            "question_focus": "style of the curry",
+                            "group_actions": ["IDENTITY_CLARIFICATION_REQUIRED"],
+                            "primary_segment_id": "seg-chicken-1",
+                            "segment_ids": ["seg-chicken-1"],
+                            "top_3": [
+                                {
+                                    "candidate_id": "candidate-chicken",
+                                    "label": "Chicken curry",
+                                    "source_type": "HOME",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "answers_by_question_id": {
+                    "q-style": {
+                        "question_id": "q-style",
+                        "group_id": "group-chicken",
+                        "question_kind": "DETAIL",
+                        "value": "Green masala",
+                    }
+                },
+            },
+        )
+        segment = SimpleNamespace(
+            id="seg-chicken-1",
+            cropped_image_url="/data/uploads/crops/seg-chicken-1.jpg",
+            embedding=[0.44] * EMBEDDING_DIMENSION,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        confirmation_items = [
+            {
+                "group_id": "group-chicken",
+                "primary_segment_id": "seg-chicken-1",
+                "segment_id": "seg-chicken-1",
+                "segment_ids": ["seg-chicken-1"],
+                "name": "Green masala",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "quantity_display": "2 pieces",
+            }
+        ]
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "group_id": "group-chicken",
+                                        "primary_segment_id": "seg-chicken-1",
+                                        "segment_ids": ["seg-chicken-1"],
+                                        "final_name": "Chicken curry (green masala)",
+                                        "aliases": ["Green masala chicken curry"],
+                                        "source_type": "HOME",
+                                        "portion_bucket": "STANDARD",
+                                        "quantity_display": "2 pieces",
+                                        "quantity_json": {
+                                            "quantity": 2,
+                                            "unit": "pieces",
+                                            "portion_bucket": "STANDARD",
+                                        },
+                                        "food_item_id": None,
+                                        "brand_name": None,
+                                        "restaurant_name": None,
+                                        "correction_note": "Preserve clarified curry style.",
+                                        "supporting_details": ["style clarified from interview"],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
+        )
+
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
+        ):
+            await interview_service.finalize_confirmed_interview(
+                session=session,
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=[segment],
+            )
+
+        final_segments = captured["final_segments"]
+        self.assertEqual(len(final_segments), 1)
+        self.assertEqual(final_segments[0].food.canonical_name, "Chicken curry (green masala)")
+        self.assertEqual(final_segments[0].food.aliases, ["Green masala chicken curry"])
+        self.assertEqual(final_segments[0].food.source_type, "HOME")
+        self.assertEqual(final_segments[0].quantity_display, "2 pieces")
+        self.assertEqual(
+            final_segments[0].quantity_json,
+            {
+                "quantity": 2,
+                "unit": "pieces",
+                "portion_bucket": "STANDARD",
+            },
+        )
+        self.assertEqual(final_segments[0].portion_bucket, "STANDARD")
+        self.assertTrue(final_segments[0].create_food_visual)
+        self.assertTrue(final_segments[0].visual_learning_eligible)
+        reasoning_state_json = captured["reasoning_state_json"]
+        self.assertEqual(reasoning_state_json["finalizer_groups"][0]["status"], "SUCCEEDED")
+        self.assertEqual(
+            reasoning_state_json["confirmation_items"][0]["name"],
+            "Chicken curry (green masala)",
+        )
+
     def test_best_effort_grounding_resolution_preserves_visual_learning_inputs(self) -> None:
         from app.services import interview_service
 
@@ -833,6 +981,83 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             "/data/uploads/crops/seg-grounding-fallback.jpg",
         )
         self.assertEqual(len(resolution.segment_embedding or []), EMBEDDING_DIMENSION)
+
+    async def test_apply_final_meal_resolution_preserves_finalizer_write_metadata(self) -> None:
+        from app.services import meal_resolution_service
+
+        meal = SimpleNamespace(
+            id="meal-write-preserve",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={"existing": "keep"},
+            last_stage_started_at=None,
+        )
+        from app.models import FoodItem
+
+        resolved_food = FoodItem(
+            id="food-packaged-1",
+            name="Protein Bar Deluxe",
+            source_type="PACKAGED",
+            brand_name="Acme",
+            is_verified=False,
+            times_confirmed=1,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        session.add_all = Mock()
+
+        final_segment = meal_resolution_service.FinalSegmentResolution(
+            food=meal_resolution_service.ResolvedFoodInput(
+                canonical_name="Protein Bar Deluxe",
+                aliases=["Acme Protein Bar Deluxe"],
+                source_type="PACKAGED",
+                brand_name="Acme",
+                is_verified=False,
+                needs_grounding=True,
+            ),
+            segment_id="seg-packaged-1",
+            segment_cropped_image_url="/data/uploads/crops/seg-packaged-1.jpg",
+            segment_embedding=[0.2] * EMBEDDING_DIMENSION,
+            portion_bucket="LARGE",
+            identification_method="INTERVIEW",
+            quantity_json={
+                "quantity": 1,
+                "unit": "bar",
+                "portion_bucket": "LARGE",
+                "grounding_prep": {
+                    "status": "NEEDS_GROUNDING",
+                    "source_type": "PACKAGED",
+                    "canonical_name": "Protein Bar Deluxe",
+                    "brand_name": "Acme",
+                },
+            },
+            quantity_display="1 bar",
+            create_food_visual=True,
+            visual_learning_eligible=True,
+        )
+
+        with patch.object(
+            meal_resolution_service,
+            "resolve_or_create_food_item",
+            new=AsyncMock(return_value=resolved_food),
+        ) as resolve_food:
+            result = await meal_resolution_service.apply_final_meal_resolution(
+                session=session,
+                meal=meal,
+                final_segments=[final_segment],
+                reasoning_state_json={"completed_by": "interview_service"},
+            )
+
+        resolve_food.assert_awaited_once()
+        handoff = resolve_food.await_args.kwargs["food"]
+        self.assertEqual(handoff.canonical_name, "Protein Bar Deluxe")
+        self.assertEqual(handoff.source_type, "PACKAGED")
+        self.assertEqual(handoff.brand_name, "Acme")
+        entry = next(call.args[0] for call in session.add.call_args_list if hasattr(call.args[0], "meal_log_id"))
+        self.assertEqual(entry.portion_bucket, "LARGE")
+        self.assertEqual(entry.quantity_display, "1 bar")
+        self.assertEqual(entry.quantity_json["quantity"], 1)
+        self.assertEqual(entry.quantity_json["unit"], "bar")
+        self.assertEqual(result.food_visuals[0].cropped_image_url, "/data/uploads/crops/seg-packaged-1.jpg")
 
 
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):

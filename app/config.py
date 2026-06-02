@@ -12,16 +12,16 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str
     OPENROUTER_API_KEY: str
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
-    DETECT_MODEL: str = "google/gemma-4-31b-it"
+    DETECT_MODEL: str = "google/gemini-3.1-flash-lite"
     SEGMENT_MODEL: str = "google/gemini-3-flash-preview"
     SEGMENT_RETRY_MODEL: str = "google/gemini-3.5-flash"
     LABEL_MODEL: str = "google/gemini-3-flash-preview"
     REASONING_MODEL: str = "google/gemini-3.5-flash"
     REASONING_FALLBACK_MODEL: str = "google/gemini-3-flash-preview"
-    REASONING_PARSER_MODEL: str = "google/gemini-3.1-flash-lite"
-    REASONING_PARSER_FALLBACK_MODEL: str = "google/gemini-3.5-flash"
     INTERVIEW_MODEL: str = "google/gemini-3.1-flash-lite"
     INTERVIEW_FALLBACK_MODEL: str = "google/gemini-3-flash-preview"
+    FINALIZER_MODEL: str = "google/gemini-3.1-flash-lite"
+    FINALIZER_GROUP_PARALLELISM: int = 4
     REASONING_MATCH_THRESHOLD: float = 0.90
     REASONING_TOP_CANDIDATE_FLOOR: float = 0.65
     REASONING_SEGMENT_PARALLELISM: int = 4
@@ -46,6 +46,13 @@ class Settings(BaseSettings):
         if not stripped:
             raise ValueError("Langfuse configuration is mandatory")
         return stripped
+
+    @field_validator("FINALIZER_GROUP_PARALLELISM")
+    @classmethod
+    def _validate_finalizer_group_parallelism(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("FINALIZER_GROUP_PARALLELISM must be at least 1")
+        return value
 
     model_config = ConfigDict(
         env_file=".env",

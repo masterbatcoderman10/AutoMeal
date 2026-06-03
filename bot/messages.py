@@ -37,6 +37,13 @@ def format_grounding_pending_message(meal_id: str) -> str:
     )
 
 
+def format_grounding_in_progress_message(meal_id: str) -> str:
+    return (
+        f"Meal {meal_id[:8]} is still finishing packaged or restaurant grounding. "
+        "I'll send the final entries when it completes."
+    )
+
+
 def format_grounding_blocker_message(
     meal_id: str,
     *,

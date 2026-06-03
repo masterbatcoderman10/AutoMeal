@@ -77,7 +77,7 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
                 segment=segment,
                 session=session,
                 llm_client=llm_client,
-                embedding_model="google/gemini-embedding-2-preview",
+                embedding_model="google/gemini-embedding-2",
             )
 
         self.assertIsNotNone(result)
@@ -88,7 +88,7 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.match_threshold, matching_service.MATCH_THRESHOLD)
         llm_client.embed_multimodal.assert_awaited_once()
         kwargs = llm_client.embed_multimodal.await_args.kwargs
-        self.assertEqual(kwargs["model"], "google/gemini-embedding-2-preview")
+        self.assertEqual(kwargs["model"], "google/gemini-embedding-2")
         self.assertEqual(kwargs["task_type"], RETRIEVAL_QUERY)
 
     async def test_match_segment_accepts_similarity_exactly_at_threshold(self) -> None:
@@ -110,7 +110,7 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
                 segment=segment,
                 session=session,
                 llm_client=llm_client,
-                embedding_model="google/gemini-embedding-2-preview",
+                embedding_model="google/gemini-embedding-2",
             )
 
         self.assertTrue(result.is_match)
@@ -138,7 +138,7 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
                 segment=segment,
                 session=session,
                 llm_client=llm_client,
-                embedding_model="google/gemini-embedding-2-preview",
+                embedding_model="google/gemini-embedding-2",
             )
 
         self.assertFalse(result.is_match)
@@ -165,7 +165,7 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
                 segment=segment,
                 session=session,
                 llm_client=llm_client,
-                embedding_model="google/gemini-embedding-2-preview",
+                embedding_model="google/gemini-embedding-2",
             )
 
         self.assertFalse(result.is_match)
@@ -192,7 +192,7 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
 
         result = await matching_service._embed_with_retry(
             llm_client=llm_client,
-            model="google/gemini-embedding-2-preview",
+            model="google/gemini-embedding-2",
             content=[{"type": "text", "text": "segment"}],
             task_type="RETRIEVAL_QUERY",
         )
@@ -210,7 +210,7 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(matching_service.MatchingError):
             await matching_service._embed_with_retry(
                 llm_client=llm_client,
-                model="google/gemini-embedding-2-preview",
+                model="google/gemini-embedding-2",
                 content=[{"type": "text", "text": "segment"}],
                 task_type="RETRIEVAL_QUERY",
             )
@@ -1092,6 +1092,85 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.quantity_json["unit"], "bar")
         self.assertEqual(result.food_visuals[0].cropped_image_url, "/data/uploads/crops/seg-packaged-1.jpg")
 
+    def test_group_finalizer_inputs_keep_bread_other_detail_and_source_answers_together(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-bread-detail-source",
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "trace_id": "trace-bread-detail-source",
+                    "food_groups": [
+                        {
+                            "group_id": "group-bread",
+                            "group_label": "flatbread",
+                            "question_kind": "DETAIL",
+                            "group_actions": ["ASK_SOURCE_ORIGIN"],
+                            "primary_segment_id": "seg-bread-1",
+                            "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                        }
+                    ]
+                }
+            },
+        )
+        confirmation_items = [
+            {
+                "group_id": "group-bread",
+                "primary_segment_id": "seg-bread-1",
+                "segment_id": "seg-bread-1",
+                "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                "name": "Bran and whole wheat",
+                "source_type": "HOME",
+                "source_origin_state": "HOME_COOKED",
+                "portion_bucket": "STANDARD",
+                "quantity_display": "2 pieces",
+            }
+        ]
+        interview_state = {
+            "answers_by_question_id": {
+                "group-bread:detail": {
+                    "question_id": "group-bread:detail",
+                    "group_id": "group-bread",
+                    "primary_segment_id": "seg-bread-1",
+                    "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                    "question_kind": "DETAIL",
+                    "name": "Bran and whole wheat",
+                },
+                "group-bread:source_origin": {
+                    "question_id": "group-bread:source_origin",
+                    "group_id": "group-bread",
+                    "primary_segment_id": "seg-bread-1",
+                    "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                    "question_kind": "SOURCE_ORIGIN",
+                    "source_type": "HOME",
+                    "source_origin_state": "HOME_COOKED",
+                },
+                "group-bread:quantity": {
+                    "question_id": "group-bread:quantity",
+                    "group_id": "group-bread",
+                    "primary_segment_id": "seg-bread-1",
+                    "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                    "question_kind": "QUANTITY",
+                    "quantity_display": "2 pieces",
+                },
+            }
+        }
+
+        group_inputs = interview_service._build_group_finalizer_inputs(  # noqa: SLF001
+            meal=meal,
+            confirmation_items=confirmation_items,
+            interview_state=interview_state,
+            segments=[],
+        )
+
+        self.assertEqual(len(group_inputs), 1)
+        group_input = group_inputs[0]
+        self.assertEqual(group_input.segment_ids, ["seg-bread-1", "seg-bread-2"])
+        self.assertEqual(
+            [answer["question_kind"] for answer in group_input.clarification_answers],
+            ["DETAIL", "SOURCE_ORIGIN", "QUANTITY"],
+        )
+
     async def test_finalize_confirmed_interview_preserves_source_detail_fields_in_authoritative_write(self) -> None:
         from app.services import interview_service
 
@@ -1193,9 +1272,7 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_post_interview_grounding_quota_failure_surfaces_blocker_and_degraded_save(self) -> None:
-        import httpx
-
+    async def test_post_interview_grounding_write_failure_surfaces_blocker_and_degraded_save(self) -> None:
         from bot import polling
 
         interview = SimpleNamespace(
@@ -1269,30 +1346,24 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
-        quota_error = RateLimitError(
-            "Error code: 403 - Key limit exceeded (total limit)",
-            response=httpx.Response(
-                429,
-                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
-            ),
-            body={"error": {"message": "Key limit exceeded"}},
-        )
         bot = SimpleNamespace(send_message=AsyncMock())
 
         async def _capture_degraded_finalize(**_kwargs):
             meal.processing_status = MealProcessingStatus.COMPLETED
             meal.reasoning_state_json = {
                 "grounding_status": "DEGRADED_SAVED",
-                "grounding_failure": {"category": "provider_quota"},
+                "grounding_failure": {"category": "tool_execution"},
             }
             return {"meal_entries": [], "food_visuals": [], "correction_events": []}
 
-        reasoning_mock = AsyncMock(side_effect=quota_error)
         with (
             patch.object(polling, "create_async_engine", return_value=engine),
             patch.object(polling, "async_sessionmaker", return_value=session_factory),
-            patch.object(polling, "get_llm_client", return_value=object()),
-            patch.object(polling.reasoning_service, "run_reasoning_request", reasoning_mock),
+            patch.object(
+                polling.meal_resolution_service,
+                "apply_final_meal_resolution",
+                AsyncMock(side_effect=RuntimeError("confirmed grounding write failed")),
+            ) as apply_final_meal_resolution,
             patch.object(polling.interview_service, "finalize_confirmed_interview", AsyncMock(side_effect=_capture_degraded_finalize)),
             patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
         ):
@@ -1306,14 +1377,11 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
         self.assertEqual(meal.reasoning_state_json["grounding_status"], "DEGRADED_SAVED")
-        self.assertEqual(meal.reasoning_state_json["grounding_failure"]["category"], "provider_quota")
+        self.assertEqual(meal.reasoning_state_json["grounding_failure"]["category"], "tool_execution")
         self.assertFalse(interview.is_active)
         self.assertEqual(interview.current_prompt_payload["grounding_status"], "DEGRADED_SAVED")
-        self.assertIn("quota", bot.send_message.await_args.kwargs["text"].lower())
-        reasoning_mock.assert_awaited_once()
-        self.assertTrue(
-            reasoning_mock.await_args.kwargs["propagate_errors"],
-        )
+        self.assertIn("failed", bot.send_message.await_args.kwargs["text"].lower())
+        apply_final_meal_resolution.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
     async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:
@@ -1360,7 +1428,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(send_message=AsyncMock())
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
-            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            MATCHING_MODEL="google/gemini-embedding-2",
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
@@ -1504,7 +1572,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(send_message=AsyncMock())
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
-            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            MATCHING_MODEL="google/gemini-embedding-2",
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )
@@ -1636,7 +1704,7 @@ class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(send_message=AsyncMock())
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
-            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            MATCHING_MODEL="google/gemini-embedding-2",
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,
         )

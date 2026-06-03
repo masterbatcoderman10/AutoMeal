@@ -111,7 +111,7 @@ class ParallelPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         settings = SimpleNamespace(
             DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
-            MATCHING_MODEL="google/gemini-embedding-2-preview",
+            MATCHING_MODEL="google/gemini-embedding-2",
             SEGMENT_MATCH_PARALLELISM=2,
             TELEGRAM_CHAT_ID="999",
             BOT_POLL_INTERVAL=3.0,

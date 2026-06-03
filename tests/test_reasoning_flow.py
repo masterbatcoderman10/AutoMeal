@@ -174,6 +174,87 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meal.reasoning_state_json["meal_reasoning"]["trace_id"], "trace-flow-1")
         self.assertTrue(meal.reasoning_state_json["ready_for_final_write"])
 
+    async def test_final_write_waits_for_pending_source_affirmation_policy(self) -> None:
+        from app.services import reasoning_service
+
+        meal = type(
+            "Meal",
+            (),
+            {"id": "meal-source-affirmation", "processing_status": "REASONING", "reasoning_state_json": None},
+        )()
+        segments = [
+            type(
+                "MealSegment",
+                (),
+                {"id": "segment-1", "cropped_image_url": "/tmp/seg1.jpg", "ai_reasoning": None},
+            )(),
+        ]
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-source-affirmation",
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-1",
+                    "group_label": "plain rice",
+                    "group_action": "AUTO_CONFIRM_LEARNED",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-1",
+                    "segment_ids": ["segment-1"],
+                    "selected_candidate_id": "candidate-rice",
+                    "visual_evidence": ["plain rice"],
+                    "missing_evidence": [],
+                    "decision_rationale": "matched and ready after source affirmation",
+                    "gate_reason": "",
+                    "clarification_needed": False,
+                    "clarification_actions": [],
+                    "question_kind": "",
+                    "question_focus": "",
+                    "question_examples": [],
+                    "source_question_policy": "ask_affirmation",
+                    "source_trigger_reason": "Dominant learned source for plain rice is home_cooked",
+                    "learned_source_distribution": [
+                        {"candidate_id": "candidate-rice", "source": "HOME_COOKED", "count": 9, "share": 0.9}
+                    ],
+                    "selected_identity": {
+                        "candidate_id": "candidate-rice",
+                        "label": "plain rice",
+                        "food_item_id": "food-rice",
+                    },
+                    "top_3": [
+                        {
+                            **_candidate_payload(),
+                            "candidate_id": "candidate-rice",
+                            "label": "plain rice",
+                            "food_item_id": "food-rice",
+                        }
+                    ],
+                }
+            ],
+            "decision_rationale": "matched and ready after source affirmation",
+            "gate_reason": "",
+            "segment_count": 1,
+        }
+        write_session = type("Session", (), {})()
+        write_session.add = lambda _obj: None  # type: ignore[method-assign]
+        write_session.flush = lambda: None  # type: ignore[method-assign]
+        write_session.commit = lambda: None  # type: ignore[method-assign]
+
+        _name, writer = _resolve_reasoning_entrypoint(reasoning_service)
+        result = _invoke_reasoning_writer(
+            writer,
+            session=write_session,
+            meal=meal,
+            segments=segments,
+            reasoning_payload=payload,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+
+        self.assertFalse(result["ready_for_final_write"])
+        self.assertFalse(meal.reasoning_state_json["ready_for_final_write"])
+
     async def test_final_write_waits_for_all_segment_reasoning_records(self) -> None:
         from app.services import reasoning_service
 
@@ -761,14 +842,17 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("curry", system_text)
         self.assertIn("rice", system_text)
         self.assertIn("AFFIRMATION_REQUIRED", system_text)
+        self.assertIn("A seasoned, coloured or moist staple is itself ambiguous in composition", system_text)
+        self.assertIn("Do not skip the count just because two pieces happen to be in frame", system_text)
         self.assertIn("No IDs", system_text)
         self.assertIn("Output only reasoning_contract_v1 JSON", system_text)
         self.assertIn("whole_meal_image", text_blocks)
         self.assertIn("segment_1", text_blocks)
         self.assertNotIn("seg-egg-curry", text_blocks)
-        self.assertIn("egg curry", text_blocks)
+        self.assertNotIn("egg curry", text_blocks)
         self.assertIn("egg and bottle gourd curry", text_blocks)
-        self.assertIn("bounding_box", text_blocks)
+        self.assertNotIn("bounding_box", text_blocks)
+        self.assertNotIn("detector_label", text_blocks)
         self.assertIn("top_3_candidates", text_blocks)
         self.assertNotIn("candidate_id", text_blocks)
         self.assertNotIn("food_item_id", text_blocks)

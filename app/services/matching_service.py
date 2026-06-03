@@ -18,7 +18,7 @@ from app.services import embedding_service, image_service
 from app.services.llm_client import OpenRouterClient
 
 MATCH_THRESHOLD: float = 0.90
-MATCHING_EMBEDDING_MODEL: str = "google/gemini-embedding-2-preview"
+MATCHING_EMBEDDING_MODEL: str = "google/gemini-embedding-2"
 MAX_MATCHING_RETRIES: int = 3
 EMBEDDING_DIMENSION: int = 1536
 TOP_CANDIDATE_COUNT: int = 3

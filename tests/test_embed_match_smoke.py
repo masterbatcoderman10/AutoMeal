@@ -193,7 +193,12 @@ class SmokeUatHarnessContractTests(unittest.TestCase):
                 "reasoning_state_json": {
                     "meal_reasoning": {
                         "trace_id": "trace-reasoning",
-                        "clarification_schema": [{"question_id": "group_1:identity"}],
+                        "food_groups": [
+                            {
+                                "group_id": "group_1",
+                                "clarification_actions": [{"question_id": "group_1:identity"}],
+                            }
+                        ],
                     }
                 },
             },
@@ -217,7 +222,7 @@ class SmokeUatHarnessContractTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            report["reasoning"]["clarification_schema"],
+            report["reasoning"]["clarification_actions"],
             [{"question_id": "group_1:identity"}],
         )
         self.assertEqual(
@@ -277,7 +282,12 @@ class SmokeUatHarnessLiveTests(unittest.IsolatedAsyncioTestCase):
                     "processing_status": "INTERVIEWING",
                     "reasoning_state_json": {
                         "meal_reasoning": {
-                            "clarification_schema": [{"question_id": "group_1:identity"}]
+                            "food_groups": [
+                                {
+                                    "group_id": "group_1",
+                                    "clarification_actions": [{"question_id": "group_1:identity"}],
+                                }
+                            ]
                         }
                     },
                 },
@@ -317,7 +327,7 @@ class SmokeUatHarnessLiveTests(unittest.IsolatedAsyncioTestCase):
         post_sample.assert_awaited_once()
         snapshot_state.assert_called_once()
         self.assertEqual(report["status"], "interview")
-        self.assertEqual(report["reasoning"]["clarification_schema"], [{"question_id": "group_1:identity"}])
+        self.assertEqual(report["reasoning"]["clarification_actions"], [{"question_id": "group_1:identity"}])
 
 
 class SmokeCalibrationTests(unittest.IsolatedAsyncioTestCase):

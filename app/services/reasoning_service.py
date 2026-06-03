@@ -18,7 +18,11 @@ from app.services.meal_resolution_service import (
     apply_final_meal_resolution,
     build_grouped_final_segment_resolutions,
 )
-from app.services.reasoning_schema import coerce_reasoning_response, reasoning_response_format
+from app.services.reasoning_schema import (
+    coerce_reasoning_response,
+    normalize_source_question_policy,
+    reasoning_response_format,
+)
 from app.services.taxonomy_service import load_reasoning_taxonomy
 
 _REVIEW_STATE = "NEEDS_SCHEMA_REVIEW"
@@ -492,9 +496,11 @@ def _normalized_group_result(
         "question_kind": question_kind,
         "question_focus": question_focus,
         "question_examples": _coerce_string_list(group.get("question_examples")),
-        "source_question_policy": source_question_policy
-        if source_question_policy is not None
-        else _coerce_str(group.get("source_question_policy"), "source_question_policy"),
+        "source_question_policy": (
+            normalize_source_question_policy(source_question_policy)
+            if source_question_policy is not None
+            else normalize_source_question_policy(group.get("source_question_policy"))
+        ),
         "source_trigger_reason": source_trigger_reason
         if source_trigger_reason is not None
         else _coerce_str(group.get("source_trigger_reason"), "source_trigger_reason"),
@@ -586,6 +592,9 @@ def _learned_match_count(*, group: Mapping[str, Any], visual_only_without_learne
     explicit = _coerce_int(group.get("learned_match_count"))
     if explicit is not None:
         return max(0, explicit)
+    top_candidates = group.get("top_3")
+    if isinstance(top_candidates, list) and not top_candidates:
+        return 0
     if visual_only_without_learned:
         return 0
     return None
@@ -601,7 +610,7 @@ def _contains_source_origin_token(*values: object) -> bool:
 
 
 def _needs_source_origin_question(group: Mapping[str, Any]) -> bool:
-    if _coerce_str(group.get("source_question_policy"), "source_question_policy") == _SOURCE_POLICY_ASK_GENERIC:
+    if normalize_source_question_policy(group.get("source_question_policy")) == _SOURCE_POLICY_ASK_GENERIC:
         return True
     if (_coerce_str(group.get("question_kind"), "question_kind") or "").upper() == "SOURCE_ORIGIN":
         return True
@@ -860,7 +869,11 @@ def _build_group_clarification_actions(
             actions.append(_build_quantity_action(group, reason=gate_reason))
         return actions
     if group_action == "ASK_QUANTITY":
-        return [_build_quantity_action(group, reason=gate_reason)]
+        actions: list[dict[str, Any]] = []
+        if source_origin_needed:
+            actions.append(_build_source_origin_action(group, reason=gate_reason))
+        actions.append(_build_quantity_action(group, reason=gate_reason))
+        return actions
     if group_action == "ASK_SOURCE_ORIGIN":
         return [_build_source_origin_action(group, reason=gate_reason)]
     if group_action in {"ASK_CHOICE", "INTERVIEW"}:
@@ -886,6 +899,7 @@ def _existing_actions_for_group_action(
     group: Mapping[str, Any],
     *,
     group_action: str,
+    gate_reason: str,
 ) -> list[dict[str, Any]]:
     desired_by_action = {
         "AFFIRMATION_REQUIRED": {"AFFIRMATION"},
@@ -908,7 +922,10 @@ def _existing_actions_for_group_action(
         action_type = (_coerce_str(action.get("type"), "type") or "").upper()
         action_kind = (_coerce_str(action.get("kind"), "kind") or "").upper()
         if action_type in desired or action_kind in desired:
-            actions.append(dict(action))
+            if action_type == "SOURCE_ORIGIN" or action_kind == "SOURCE_ORIGIN":
+                actions.append(_build_source_origin_action(group, reason=gate_reason))
+            else:
+                actions.append(dict(action))
     return actions
 
 
@@ -918,8 +935,21 @@ def _clarification_actions_for_group_action(
     group_action: str,
     gate_reason: str,
 ) -> list[dict[str, Any]]:
-    existing = _existing_actions_for_group_action(group, group_action=group_action)
+    existing = _existing_actions_for_group_action(
+        group,
+        group_action=group_action,
+        gate_reason=gate_reason,
+    )
     if existing:
+        existing_types = {
+            (_coerce_str(action.get("type"), "type") or _coerce_str(action.get("kind"), "kind") or "").upper()
+            for action in existing
+            if isinstance(action, Mapping)
+        }
+        if _needs_source_origin_question(group) and "SOURCE_ORIGIN" not in existing_types:
+            existing.append(_build_source_origin_action(group, reason=gate_reason))
+        if "ASK_QUANTITY" in _raw_group_actions(group) and "QUANTITY" not in existing_types:
+            existing.append(_build_quantity_action(group, reason=gate_reason))
         return existing
     return _build_group_clarification_actions(
         group,
@@ -932,6 +962,10 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     group = dict(group)
     top_three = _meaningful_top_candidates(group)
     group["top_3"] = top_three
+    if not top_three:
+        group["source_question_policy"] = _SOURCE_POLICY_ASK_GENERIC
+        if not _coerce_str(group.get("source_trigger_reason"), "source_trigger_reason"):
+            group["source_trigger_reason"] = "No embedding matches are available"
     top_one = top_three[0] if top_three else {}
     distinct_candidates = _distinct_identity_candidates(top_three)
     top_two = distinct_candidates[1] if len(distinct_candidates) > 1 else {}
@@ -1040,6 +1074,43 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
         candidate_id=selected_identity["candidate_id"],
     )
 
+    def deterministic_source_policy(for_action: str) -> tuple[str, str]:
+        if learned_match_count is not None and learned_match_count < _MIN_LEARNED_MATCHES_FOR_SOURCE_CONSENSUS:
+            reason = (
+                "No usable learned matches are available"
+                if learned_match_count == 0
+                else f"Fewer than 5 learned matches are available ({learned_match_count})"
+            )
+            return _SOURCE_POLICY_ASK_GENERIC, reason
+        if dominant_source is not None:
+            if for_action in {"IDENTITY_CLARIFICATION_REQUIRED", "ASK_CHOICE", "INTERVIEW"}:
+                return (
+                    _SOURCE_POLICY_DEFER_UNTIL_IDENTITY,
+                    "Identity clarification must complete before applying learned source consensus",
+                )
+            if for_action in {"AFFIRMATION_REQUIRED", "ASK_QUANTITY"}:
+                label = selected_identity["label"] or _group_prompt_subject(group)
+                reason = (
+                    f"Dominant learned source for {label} is "
+                    f"{str(dominant_source.get('source') or '').lower()} "
+                    f"({int(dominant_source.get('count') or 0)} of "
+                    f"{learned_match_count or int(dominant_source.get('count') or 0)} matches)"
+                )
+                return _SOURCE_POLICY_ASK_AFFIRMATION, reason
+        if (
+            learned_match_count is not None
+            and learned_match_count >= _MIN_LEARNED_MATCHES_FOR_SOURCE_CONSENSUS
+            and learned_source_distribution
+        ):
+            return (
+                _SOURCE_POLICY_ASK_GENERIC,
+                f"Learned source history is ambiguous across {learned_match_count} matches",
+            )
+        return normalize_source_question_policy(group.get("source_question_policy")), _coerce_str(
+            group.get("source_trigger_reason"),
+            "source_trigger_reason",
+        )
+
     if top_identity < threshold:
         reasons.append(f"best similarity {top_identity:.3f} is below threshold {threshold:.3f}")
     if margin < _CONFIDENCE_MARGIN:
@@ -1054,11 +1125,7 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
     if reasons:
         followup_action = "ASK_QUANTITY" if _should_ask_quantity(missing_evidence) else "IDENTITY_CLARIFICATION_REQUIRED"
         followup_reason = "; ".join(reasons)
-        source_question_policy = _SOURCE_POLICY_NONE
-        source_trigger_reason = ""
-        if followup_action == "IDENTITY_CLARIFICATION_REQUIRED" and dominant_source is not None:
-            source_question_policy = _SOURCE_POLICY_DEFER_UNTIL_IDENTITY
-            source_trigger_reason = "Identity clarification must complete before applying learned source consensus"
+        source_question_policy, source_trigger_reason = deterministic_source_policy(followup_action)
         return _normalized_group_result(
             group=group,
             group_action=followup_action,
@@ -1120,6 +1187,33 @@ def _evaluate_group_gate(group: Mapping[str, Any]) -> dict[str, Any]:
             if learned_match_count == 0
             else f"Fewer than 5 learned matches are available ({learned_match_count})"
         )
+        return _normalized_group_result(
+            group=group,
+            group_action="ASK_SOURCE_ORIGIN",
+            group_state=_INTERVIEW_STATE_FROM_OUTPUT,
+            gate_reason=source_reason,
+            decision_rationale=decision_rationale or "Needs source clarification before final write",
+            clarification_actions=_clarification_actions_for_group_action(
+                {
+                    **group,
+                    "source_question_policy": _SOURCE_POLICY_ASK_GENERIC,
+                },
+                group_action="ASK_SOURCE_ORIGIN",
+                gate_reason=source_reason,
+            ),
+            source_question_policy=_SOURCE_POLICY_ASK_GENERIC,
+            source_trigger_reason=source_reason,
+            learned_source_distribution=learned_source_distribution,
+            selected_identity=selected_identity,
+        )
+
+    if (
+        learned_match_count is not None
+        and learned_match_count >= _MIN_LEARNED_MATCHES_FOR_SOURCE_CONSENSUS
+        and learned_source_distribution
+        and dominant_source is None
+    ):
+        source_reason = f"Learned source history is ambiguous across {learned_match_count} matches"
         return _normalized_group_result(
             group=group,
             group_action="ASK_SOURCE_ORIGIN",
@@ -1532,7 +1626,7 @@ def _candidate_prompt_snapshot(candidate: Mapping[str, Any]) -> dict[str, Any]:
 def _reasoning_system_prompt() -> str:
     taxonomy = load_reasoning_taxonomy().raw
     return f"""<role>
-You are a meal-level visual nutrition reasoner for a fitness and nutrition-awareness app focused on Indo-Pak and Middle-Eastern home cooking. You receive the whole-meal photo, one cropped image per detected segment, detector labels and boxes, and — when available — vector candidates from the user's learned history. Per food group you decide whether the evidence is sufficient to log nutrition or whether a short user clarification is required. Output only reasoning_contract_v1 JSON. Never expose chain-of-thought.
+You are a meal-level visual nutrition reasoner for a fitness and nutrition-awareness app focused on Indo-Pak and Middle-Eastern home cooking. You receive the whole-meal photo, one cropped image per detected segment, and — when available — vector candidates from the user's learned history. Per food group you decide whether the evidence is sufficient to log nutrition or whether a short user clarification is required. Output only reasoning_contract_v1 JSON. Never expose chain-of-thought.
 </role>
 
 <taxonomy>
@@ -1540,35 +1634,33 @@ You are a meal-level visual nutrition reasoner for a fitness and nutrition-aware
 </taxonomy>
 
 <objective>
-The downstream goal is an accurate per-group estimate of calories and macronutrients — carbohydrate, protein, fat and fiber. Resolve any uncertainty that would move those numbers; ignore uncertainty that would not. You are not naming dishes for their own sake — you are grounding nutrition. Carbohydrate and fat are the heaviest macro drivers: pin down whole-grain vs refined for any bread or rice, the identity of any starchy vegetable, and the oil/fat richness of cooked dishes, since these dominate the calorie and macro estimate.
+The downstream goal is an accurate per-group estimate of calories and macronutrients — carbohydrate, protein, fat and fiber. Resolve any uncertainty that would move those numbers; ignore uncertainty that would not. You are not naming dishes for their own sake — you are grounding nutrition. Carbohydrate and fat are the heaviest macro drivers: pin down the grain or flour grade of any staple, the identity of any starchy or look-alike vegetable, and the oil/fat richness of cooked dishes, since these dominate the calorie and macro estimate.
 </objective>
 
 <cold_start_principle>
 NO_VECTOR_CANDIDATES — or only incompatible candidates (see candidate_relevance) — for a group means this food has no learned grounding. How much to ask then depends on what the food is:
 
-- Prepared, cooked or composite items (curries, gravies, mixed dishes, cooked meat, breads, rice): visual identity alone does not ground nutrition, because calories, fat and portion swing widely with who made it and how. Resolve the full set of nutrition axes below, not identity alone, and never AUTO_CONFIRM a visual-only, never-seen prepared dish. Expect these groups to carry an identity action PLUS a source question, plus a quantity question wherever portion is unclear. Under-asking here is worse than one extra targeted question.
+- Prepared, cooked or composite items (curries, gravies, mixed dishes, cooked meat, breads, rice): visual identity alone does not ground nutrition, because calories, fat and portion swing widely with preparation. Resolve the nutrition axes below — identity and variety first, then composition and quantity wherever they are uncertain and nutrition-moving — and never AUTO_CONFIRM a visual-only, never-seen prepared dish. Under-asking on these is worse than one extra targeted question.
 
-- Visually unambiguous whole foods (a whole fruit, a plain raw item): a "no vector" result does NOT require identity clarification. A single AFFIRMATION ("Is this orange segments?") is enough — never offer a CHOICE here, and over-asking on obvious whole foods is needless friction. The exception is a look-alike whose nutrition differs materially — then use IDENTITY_CLARIFICATION with the nutritionally-distinct options. Examples that DO warrant a choice: banana vs plantain (plantain is far starchier and higher-calorie), fresh vs canned/sweetened fruit, ripe vs unripe where it changes the macros. Differences that do NOT warrant a question: minor cultivar or size variants with near-identical nutrition, such as orange vs mandarin/clementine — affirm and move on.
+- Visually unambiguous whole foods (a whole fruit, a plain raw item): a "no vector" result does NOT require identity clarification. A single AFFIRMATION is enough — never offer a CHOICE here, and over-asking on obvious whole foods is needless friction. The exception is a look-alike whose nutrition differs materially — then use IDENTITY_CLARIFICATION with the nutritionally-distinct options. A choice is warranted when the alternatives differ enough in macros to matter (e.g. a starchy staple fruit vs a sugary dessert fruit, fresh vs canned/sweetened, ripe vs unripe where it shifts the sugar/starch balance). A choice is NOT warranted for minor cultivar, colour or size variants with near-identical nutrition — affirm and move on.
 </cold_start_principle>
 
 <candidate_relevance>
-Vector candidates are suggestions, not ground truth — they can be stale, mismatched, or from an unrelated meal, and a high similarity score does not make an incompatible label correct. The runtime only passes vector candidates when the best similarity is strictly greater than 0.92; anything at or below 0.92 must be treated as absent learned grounding. Before using any candidate, check it is visually and categorically compatible with the crop. Discard any candidate that contradicts the visual evidence — e.g. a "Basmati Rice" or "Chicken Curry" candidate offered against orange segments or grapes. Never present an incompatible candidate as a CHOICE option, and never ask the user to affirm a food that plainly is not what is shown. If every candidate for a group is incompatible, treat the group as having NO usable match and reason from the image alone, applying the cold_start_principle. Any ranked-candidate list (e.g. top_3) must contain only genuinely plausible candidates; if none qualify, leave it empty rather than padding it with mismatches.
+Vector candidates are suggestions, not ground truth — they can be stale, mismatched, or from an unrelated meal, and a high similarity score does not make an incompatible label correct. The runtime only passes vector candidates when the best similarity is strictly greater than 0.92; anything at or below 0.92 must be treated as absent learned grounding. Before using any candidate, check it is visually and categorically compatible with the crop. Discard any candidate that contradicts the visual evidence — a candidate label naming a different food category than what the crop shows is incompatible. Never present an incompatible candidate as a CHOICE option, and never ask the user to affirm a food that plainly is not what is shown. If every candidate for a group is incompatible, treat the group as having NO usable match and reason from the image alone, applying the cold_start_principle. Any ranked-candidate list (e.g. top_3) must contain only genuinely plausible candidates; if none qualify, leave it empty rather than padding it with mismatches.
 </candidate_relevance>
 
 <reasoning_axes>
 Evaluate each group against these axes in order, and raise a clarification only for axes that are BOTH uncertain AND nutrition-moving:
 
-1. IDENTITY — What is it? If nutrition-relevant alternatives are plausible (flatbread: whole-wheat baladi vs refined pita vs naan; pale gourd: lauki vs tinda vs zucchini), use a CHOICE with regional names. If it is visually clear and only needs confirmation, use an AFFIRMATION.
+1. IDENTITY — What is it? When two or more nutritionally-distinct foods are visually plausible for the same crop, use a CHOICE listing them by their common regional names. Typical ambiguities in this cuisine include look-alike vegetables that differ in starch and fiber, breads that differ in flour grade, and similar-looking dishes whose base or main ingredient differs. When the plausible identities span a large macro gap — for example a starchy item versus a watery low-carb one — never silently resolve to the higher-impact guess; guessing wrong here is costly, so raise the choice and keep that item as its own group rather than folding it into an adjacent staple where its identity can no longer be questioned. When the food is visually clear and only needs a yes/no, use an AFFIRMATION instead.
 
-2. VARIETY / SUBTYPE — Once identity is known, resolve the within-item variety that changes density, macros or calories: rice grain type (long-grain basmati vs short-grain/sticky vs parboiled/sella vs brown); flour grade (whole-wheat vs refined/maida); meat cut and grade (lean vs fatty); dairy fat level (full-fat vs skimmed); oil/fat type when it clearly differs. Carry this under IDENTITY_CLARIFICATION_REQUIRED — there is no separate variety action — using type CHOICE / kind DETAIL. When the item's identity is obvious but its variety is the real macro driver (e.g. clearly plain white rice, but long-grain or short-grain?), the variety question takes the identity slot.
+2. VARIETY / SUBTYPE — Once identity is known, resolve the within-item variety that changes density, macros or calories: grain type for a staple (long-grain vs short-grain vs parboiled vs wholegrain); flour grade for a bread (wholegrain vs refined); cut and leanness for a meat; fat level for a dairy item; oil or fat type when it clearly differs. Carry this under IDENTITY_CLARIFICATION_REQUIRED — there is no separate variety action — using type CHOICE / kind DETAIL. When the item's identity is obvious but its variety is the real macro driver, the variety question takes the identity slot.
 
-3. SOURCE / ORIGIN — Homemade, restaurant/takeaway, bakery, or packaged. This is the single largest ungrounded nutrition factor (oil, ghee, sugar, portion). MANDATORY for any cooked dish or bread on a cold-start group.
+3. PREPARATION — Cooking method and richness. Method materially changes fat and calories, so distinguish across the full spectrum when it is not visually obvious: deep-fried vs shallow-fried vs air-fried vs grilled vs baked/roasted vs steamed/boiled vs braised/stewed. Also capture dry vs gravy and light vs heavy oil. For any meat, always resolve cut and cooking method when they are unclear. Treat visible pooled oil or a fat sheen as a strong richness signal — let it raise a preparation or quantity question, never ignore it. A distinctly coloured or styled masala can be both an identity and a richness signal.
 
-4. PREPARATION — Cooking method and richness. Method materially changes fat and calories, so distinguish across the full spectrum when it is not visually obvious: deep-fried vs shallow-fried vs air-fried vs grilled vs baked/roasted vs steamed/boiled vs braised/stewed. Also capture dry vs gravy and light vs heavy oil/tarka. For any meat or chicken, always resolve cut and cooking method. Treat visible pooled oil or a ghee sheen as a strong fat signal — let it raise a preparation or quantity question, never ignore it. A distinctly coloured masala (e.g. green/hara vs red/tomato) is both an identity and a richness signal.
+4. COMPOSITION — For mixed dishes (curries, gravies, mixed-veg, combination dishes) name the distinct components and flag any starchy or high-fat component, since its proportion shifts the calorie and macro balance. A seasoned, coloured or moist staple is itself ambiguous in composition: the colour and moisture may come from the staple cooked as a flavoured dish (oil and spices cooked in, e.g. a pulao or biryani style) OR from a plain staple combined at the plate with a separate curry, daal or gravy (e.g. daal-chawal or curry-rice). These differ nutritionally — the combined case hides an extra legume/curry/sauce component carrying its own oil and macros — so do not assume a single dry preparation; resolve which it is and account for any mixed-in component. Split a composite only when components are clearly distinguishable in the image.
 
-5. COMPOSITION — For mixed dishes (curries, gravies, mixed-veg, egg curries) name the distinct components and flag any starchy or high-fat component (potato, extra oil, cream), since its proportion shifts the calorie and macro balance. Split a composite only when components are clearly distinguishable in the image.
-
-6. QUANTITY / COUNT — Countable items (eggs, breads, pieces of meat) must have a count confirmed. Amorphous items (curry, gravy, rice) need a portion estimate; ask only when the visible portion or scale is ambiguous.
+5. QUANTITY / COUNT — Countable items (eggs, breads, fried patties, kababs or cutlets, pieces of meat, discrete portions) should have their count confirmed, and for calorie-dense items confirm it even when a count looks visible: one piece more or fewer is a large macro swing, and the photo may not show everything the user will eat. Do not skip the count just because two pieces happen to be in frame. Amorphous items (curry, gravy, rice) need a portion estimate; ask when the visible portion or scale is ambiguous. Quantity is additive (ASK_QUANTITY) and pairs with the identity action — it never replaces it.
 </reasoning_axes>
 
 <grouping>
@@ -1593,22 +1685,19 @@ Per group, set group_actions from:
 - AFFIRMATION_REQUIRED — identity visually clear, needs only Yes/No.
 - IDENTITY_CLARIFICATION_REQUIRED — nutrition-relevant identity or variety/subtype alternatives exist; offer bounded label-only CHOICEs, or FREE_TEXT when open. Variety/subtype refinements ride under this action — they do not get their own action.
 - AFFIRMATION_REQUIRED and IDENTITY_CLARIFICATION_REQUIRED are mutually exclusive.
-- ASK_SOURCE_ORIGIN and ASK_QUANTITY are additive; pair either with the identity action whenever source or portion is ungrounded per the axes above.
+- ASK_QUANTITY is additive; pair it with the identity action whenever portion or count is ungrounded per the axes above.
 - FAILED_UNCLEAR — crop too poor to reason about.
 </decision_logic>
 
 <question_construction>
-Each clarification_action carries the final user-facing Telegram copy. Make it one decision per question, short, plain, jargon-free, with regional names in the choices ("Lauki / bottle gourd", "Aish baladi / whole-wheat pita"). Set allow_other with a sensible other_label when the list may not be exhaustive. Give a one-line reason tied to nutrition. Order questions identity/variety -> source -> preparation -> quantity.
-Map axis to schema fields: identity choice = type CHOICE / kind IDENTITY; variety/subtype = type CHOICE / kind DETAIL; yes-no = type AFFIRMATION / kind AFFIRMATION; source = type SOURCE_ORIGIN / kind SOURCE_ORIGIN; portion or count = type QUANTITY / kind QUANTITY; open answer = type FREE_TEXT / kind FREE_TEXT.
+Each clarification_action carries the final user-facing Telegram copy. Make it one decision per question, short, plain, jargon-free, with common regional names in the choices. Set allow_other with a sensible other_label when the list may not be exhaustive. Give a one-line reason tied to nutrition.
+Identity is the priority: any group whose identity is uncertain must always get its identity (or identity-equivalent variety) question first; only once identity is settled or visually clear should a quantity question follow. Order questions identity/variety -> preparation -> quantity.
+Map axis to schema fields: identity choice = type CHOICE / kind IDENTITY; variety/subtype = type CHOICE / kind DETAIL; yes-no = type AFFIRMATION / kind AFFIRMATION; portion or count = type QUANTITY / kind QUANTITY; open answer = type FREE_TEXT / kind FREE_TEXT.
 </question_construction>
 
 <portion_defaults>
-Use these as priors when estimating amorphous portions (ask only if the visible amount conflicts or scale is unclear): curry 220-340 g; thin liquid 150-300 ml; cooked rice 90-160 g. Countable items (eggs, breads, meat pieces) use discrete units (piece, slice, serving).
+When a portion must be estimated, prefer the unit that fits the item: discrete units (piece, slice, serving, bowl) for countable or served items, and weight or volume for amorphous dishes. Anchor estimates to a typical home-served portion for the item type, and only raise a QUANTITY question when the visible amount or scale is genuinely ambiguous rather than inferable from the image. The taxonomy default_ranges give baseline portion priors per category.
 </portion_defaults>
-
-<budget>
-Up to 8 questions per meal, max 2 per group. Use the budget to close real nutrition gaps; never pad with low-impact questions. Identity is the priority: any group whose identity is uncertain must always get its identity question first — never drop or defer it to fit in source or quantity. Only once identity is settled or visually clear should the second slot go to source, then quantity. If all three apply, keep identity + source and let quantity follow on a later turn.
-</budget>
 
 <output>
 Return only reasoning_contract_v1 JSON matching the provided schema. Root fields only: action, meal_state, decision_rationale, gate_reason, segment_count, food_group_count, food_groups. Use the allowed action / state / type / kind enums exactly. No IDs, no fields outside the schema, no chain-of-thought.
@@ -1632,7 +1721,7 @@ def _build_reasoning_prompt(
                 "Perform one meal-level reasoning pass. "
                 f"segment_count={len(match_results)}. "
                 "The whole_meal_image follows first, then each indexed segment crop with "
-                "its detector hint, bounding_box, and label-only top_3_candidates. Return "
+                "its indexed vector-match context and label-only top_3_candidates. Return "
                 "strict reasoning_contract_v1 JSON only."
             ),
         },
@@ -1721,8 +1810,6 @@ def _build_reasoning_prompt(
             )
         segment_payload = {
             "segment_index": f"segment_{index}",
-            "detector_label": getattr(segment, "label", None),
-            "bounding_box": getattr(segment, "bounding_box", None),
             "vector_match_status": vector_match_status,
             "vector_match_note": vector_match_note,
             "similarity": similarity,
@@ -1777,7 +1864,7 @@ async def _run_reasoning_model(
     response_format = reasoning_response_format()
     messages = _build_reasoning_prompt(meal=meal, match_results=match_results)
     trace_metadata: dict[str, int | str | None] = {"trace_id": None, "cached_tokens": None}
-    reasoning_model = getattr(app_settings, "REASONING_MODEL", "google/gemini-3.5-flash")
+    reasoning_model = getattr(app_settings, "REASONING_MODEL", "google/gemini-3-flash-preview")
     fallback_model = getattr(app_settings, "REASONING_FALLBACK_MODEL", reasoning_model)
     models_to_try = [reasoning_model]
     if fallback_model and fallback_model != reasoning_model:
@@ -1976,6 +2063,7 @@ async def persist_reasoning_results(
         reason_state == _READY_TO_WRITE_STATE
         and normalized.get("action") in {"AUTO_CONFIRM", "AUTO_CONFIRM_WITH_TRACE", "AUTO_CONFIRM_LEARNED"}
         and all(group.get("group_state") == _READY_TO_WRITE_STATE for group in food_groups)
+        and not any(normalize_source_question_policy(group.get("source_question_policy")) for group in food_groups)
     )
     if hasattr(meal, "reasoning_state_json"):
         meal.reasoning_state_json = {

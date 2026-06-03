@@ -36,7 +36,7 @@ from app.services.vision_service import (  # noqa: E402
     segment_debug_label,
 )
 
-EMBEDDING_MODEL = "google/gemini-embedding-2-preview"
+EMBEDDING_MODEL = "google/gemini-embedding-2"
 EMBEDDING_TASK_MARGIN = 0.001
 SMOKE_ID_MAX_LENGTH = 36
 ALLOWED_CROP_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
@@ -423,6 +423,20 @@ def _mapping_or_empty(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _clarification_actions_from_reasoning(reasoning: Mapping[str, Any]) -> list[dict[str, Any]]:
+    groups = reasoning.get("food_groups")
+    if not isinstance(groups, Sequence) or isinstance(groups, (str, bytes, bytearray)):
+        return []
+    actions: list[dict[str, Any]] = []
+    for group in groups:
+        if not isinstance(group, Mapping):
+            continue
+        for action in group.get("clarification_actions") or []:
+            if isinstance(action, Mapping):
+                actions.append(dict(action))
+    return actions
+
+
 def _first_present_mapping(*values: object) -> Mapping[str, Any] | None:
     for value in values:
         if isinstance(value, Mapping):
@@ -476,11 +490,7 @@ def _build_uat_harness_report(
     reasoning_state = dict(meal_data.get("reasoning_state_json") or {})
     meal_reasoning = _mapping_or_empty(reasoning_state.get("meal_reasoning"))
     prompt_payload = dict(interview_data.get("current_prompt_payload") or {})
-    clarification_schema = (
-        reasoning_state.get("clarification_schema")
-        if reasoning_state.get("clarification_schema") is not None
-        else meal_reasoning.get("clarification_schema")
-    )
+    clarification_actions = _clarification_actions_from_reasoning(meal_reasoning)
     answers_by_question_id = _first_present_mapping(
         prompt_payload.get("answers_by_question_id"),
         reasoning_state.get("answers_by_question_id"),
@@ -522,7 +532,7 @@ def _build_uat_harness_report(
         },
         "reasoning": {
             "summary": _summarize_uat_reasoning(reasoning_state),
-            "clarification_schema": _sanitize_report_value(clarification_schema),
+            "clarification_actions": _sanitize_report_value(clarification_actions),
             "answers_by_question_id": _sanitize_report_value(answers_by_question_id),
             "resolver_payload": _sanitize_report_value(resolver_payload),
         },
@@ -931,7 +941,7 @@ async def _run_reasoning_probe(args: argparse.Namespace, llm_client) -> dict[str
             "candidate_count": len(match_result.top_candidates),
             "snapshot": segment.match_candidates_json,
         },
-        "top_3": reasoning_result.get("top_3", []),
+        "food_groups": reasoning_result.get("food_groups", []),
     }
 
 

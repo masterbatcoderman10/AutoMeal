@@ -777,6 +777,69 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pita bread", state["current_question"]["prompt"].lower())
         self.assertIn("chicken curry", state["current_question"]["prompt"].lower())
 
+    def test_build_interview_turn_state_synthesizes_source_affirmation_for_approval_candidate(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-approval-source",
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "trace_id": "trace-approval-source",
+                    "decision_rationale": "The wrap is learned, but source should still be confirmed deterministically.",
+                    "food_groups": [
+                        {
+                            "group_id": "group-wrap",
+                            "group_label": "Chicken Wrap",
+                            "group_action": "AUTO_CONFIRM_LEARNED",
+                            "group_state": "READY_TO_WRITE",
+                            "primary_segment_id": "seg-wrap-1",
+                            "segment_ids": ["seg-wrap-1"],
+                            "selected_candidate_id": "candidate-wrap",
+                            "missing_evidence": [],
+                            "decision_rationale": "high-confidence learned wrap match",
+                            "source_question_policy": "ask_affirmation",
+                            "source_trigger_reason": "Dominant learned source for Chicken Wrap is packaged.",
+                            "learned_source_distribution": [
+                                {
+                                    "candidate_id": "candidate-wrap",
+                                    "source": "PACKAGED_BRANDED",
+                                    "count": 9,
+                                    "share": 0.9,
+                                },
+                                {
+                                    "candidate_id": "candidate-wrap",
+                                    "source": "RESTAURANT",
+                                    "count": 1,
+                                    "share": 0.1,
+                                },
+                            ],
+                            "selected_identity": {
+                                "candidate_id": "candidate-wrap",
+                                "label": "Chicken Wrap",
+                                "food_item_id": "food-wrap",
+                            },
+                            "top_3": [
+                                {
+                                    "candidate_id": "candidate-wrap",
+                                    "label": "Chicken Wrap",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+
+        state = interview_service.build_interview_turn_state(
+            meal=meal,
+            segments=[SimpleNamespace(id="seg-wrap-1", label="wrap", cropped_image_url="/tmp/wrap.jpg")],
+        )
+
+        self.assertEqual(state["question_order"], ["group-wrap:source_affirmation"])
+        self.assertEqual(state["current_question"]["question_id"], "group-wrap:source_affirmation")
+        self.assertTrue(state["questions_by_id"]["group-wrap:source_affirmation"]["source_affirmation"])
+        self.assertEqual(state["approval_candidates"][0]["group_id"], "group-wrap")
+
     def test_prepare_interview_session_targets_unresolved_food_groups_before_quantity(self) -> None:
         import asyncio
 
@@ -1740,6 +1803,144 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["current_question"]["question_kind"], "SOURCE_ORIGIN")
         self.assertFalse(updated["questions_by_id"]["group-wrap:source_origin"]["allow_other"])
 
+    def test_detail_free_text_answer_inserts_generic_source_question_before_quantity(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "question_order": ["q-detail", "q-quantity"],
+            "questions_by_id": {
+                "q-detail": {
+                    "question_id": "q-detail",
+                    "group_id": "group-bread",
+                    "primary_segment_id": "seg-bread-1",
+                    "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                    "question_kind": "DETAIL",
+                    "answer_type": "free_text",
+                    "required": True,
+                    "label": "flatbread",
+                    "source_question_policy": "ask_generic",
+                    "source_trigger_reason": "Bread source is still required after detail clarification.",
+                },
+                "q-quantity": {
+                    "question_id": "q-quantity",
+                    "group_id": "group-bread",
+                    "primary_segment_id": "seg-bread-1",
+                    "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                    "question_kind": "QUANTITY",
+                    "answer_type": "free_text",
+                    "required": True,
+                    "label": "flatbread",
+                },
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["q-detail", "q-quantity"],
+            "remaining_required_question_ids": ["q-detail", "q-quantity"],
+            "interview_messages": [],
+        }
+
+        answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="Bran and whole wheat",
+            context=state["questions_by_id"]["q-detail"],
+        )
+        updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
+
+        self.assertEqual(
+            updated["question_order"],
+            ["q-detail", "group-bread:source_origin", "q-quantity"],
+        )
+        self.assertEqual(
+            updated["remaining_required_question_ids"],
+            ["group-bread:source_origin", "q-quantity"],
+        )
+        self.assertEqual(updated["current_question"]["question_id"], "group-bread:source_origin")
+        self.assertEqual(updated["current_question"]["label"], "Bran and whole wheat")
+        self.assertEqual(updated["current_question"]["segment_ids"], ["seg-bread-1", "seg-bread-2"])
+
+    def test_last_required_answer_enters_confirmation_without_stale_question_pointer(self) -> None:
+        from app.services import interview_service
+
+        state = {
+            "session_mode": "MEAL_INTERVIEW",
+            "question_order": ["group-veg:source_origin"],
+            "questions_by_id": {
+                "group-veg:source_origin": {
+                    "question_id": "group-veg:source_origin",
+                    "group_id": "group-veg",
+                    "primary_segment_id": "seg-veg-1",
+                    "segment_ids": ["seg-veg-1"],
+                    "question_kind": "SOURCE_ORIGIN",
+                    "answer_type": "single_choice",
+                    "required": True,
+                    "label": "mixed vegetables",
+                    "choices": [
+                        {
+                            "choice_id": "HOME_COOKED",
+                            "label": "homemade",
+                            "value": "HOME_COOKED",
+                        }
+                    ],
+                }
+            },
+            "answers_by_question_id": {},
+            "pending_question_ids": ["group-veg:source_origin"],
+            "remaining_required_question_ids": ["group-veg:source_origin"],
+            "current_question_id": "group-veg:source_origin",
+            "current_question": {
+                "question_id": "group-veg:source_origin",
+                "question_kind": "SOURCE_ORIGIN",
+                "prompt": "How should I treat the mixed vegetables?",
+            },
+            "interview_messages": [],
+        }
+
+        answer = interview_service._parse_clarification_text(  # noqa: SLF001
+            text="homemade",
+            context=state["questions_by_id"]["group-veg:source_origin"],
+        )
+        updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
+
+        self.assertEqual(updated["roadmap_step"], "CONFIRMATION")
+        self.assertEqual(updated["pending_question_ids"], [])
+        self.assertEqual(updated["remaining_required_question_ids"], [])
+        self.assertNotIn("current_question_id", updated)
+        self.assertEqual(updated["current_question"]["roadmap_step"], "CONFIRMATION")
+        self.assertEqual(updated["current_question"]["prompt"], "Confirm or correct the identified meal items.")
+        self.assertEqual(updated["confirmation_items"][0]["source_origin_state"], "HOME_COOKED")
+
+    def test_source_origin_questions_are_canonicalized_to_full_deterministic_option_set(self) -> None:
+        from app.services import interview_service
+
+        question = interview_service._normalize_clarification_question(  # noqa: SLF001
+            {
+                "question_id": "group-bread:source_origin",
+                "group_id": "group-bread",
+                "primary_segment_id": "seg-bread-1",
+                "segment_ids": ["seg-bread-1"],
+                "question_kind": "SOURCE_ORIGIN",
+                "answer_type": "single_choice",
+                "required": True,
+                "label": "flatbread",
+                "user_prompt": "Was this bread homemade or from a restaurant?",
+                "choices": [
+                    {"choice_id": "HOME_COOKED", "label": "homemade", "value": "HOME_COOKED"},
+                    {"choice_id": "RESTAURANT", "label": "restaurant", "value": "RESTAURANT"},
+                ],
+                "allow_other": True,
+                "other_label": "Other",
+                "reason": "Bread source is unresolved.",
+            }
+        )
+
+        self.assertFalse(question["allow_other"])
+        self.assertEqual(
+            [choice["label"] for choice in question["choices"]],
+            ["homemade", "store bought", "packaged", "restaurant", "not sure"],
+        )
+        self.assertEqual(
+            question["user_prompt"],
+            "How should I treat the flatbread for nutrition: homemade, store bought, packaged, restaurant, or not sure?",
+        )
+
     def test_rejected_source_affirmation_prompts_same_group_source_correction(self) -> None:
         from app.services import interview_service
 
@@ -1779,12 +1980,28 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         updated = interview_service._apply_clarification_answer(state, answer)  # noqa: SLF001
 
         self.assertEqual(updated["current_question"]["group_id"], "group-bread")
-        self.assertEqual(updated["current_question"]["answer_type"], "free_text")
-        self.assertIn("source", updated["current_question"]["prompt"].lower())
+        self.assertEqual(updated["current_question"]["question_id"], "group-bread:source_origin")
+        self.assertEqual(updated["current_question"]["question_kind"], "SOURCE_ORIGIN")
+        self.assertEqual(updated["current_question"]["answer_type"], "single_choice")
+        self.assertEqual(
+            [choice["choice_id"] for choice in updated["current_question"]["choices"]],
+            [
+                "HOME_COOKED",
+                "STORE_BOUGHT_PREPARED",
+                "PACKAGED_BRANDED",
+                "RESTAURANT",
+                "UNKNOWN",
+            ],
+        )
+        self.assertEqual(
+            [choice["label"] for choice in updated["current_question"]["choices"]],
+            ["homemade", "store bought", "packaged", "restaurant", "not sure"],
+        )
         self.assertEqual(
             updated["current_question"]["correction_for_question_id"],
             "group-bread:source_affirmation",
         )
+        self.assertTrue(updated["current_question"]["source_correction"])
 
     def test_packaged_source_answer_inserts_brand_follow_up_and_preserves_segment_ids(self) -> None:
         from app.services import interview_service

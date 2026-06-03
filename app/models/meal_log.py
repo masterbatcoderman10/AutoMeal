@@ -52,6 +52,10 @@ class MealLog(Base):
         TIMESTAMPTZ(timezone=True),
         nullable=True,
     )
+    ack_sent_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMPTZ(timezone=True),
+        nullable=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ(timezone=True),
         nullable=False,

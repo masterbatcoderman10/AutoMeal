@@ -366,6 +366,50 @@ class ReasoningContractTests(unittest.TestCase):
         self.assertEqual(group["learned_source_distribution"][0]["candidate_id"], "candidate-khubz")
         self.assertEqual(group["selected_identity"]["candidate_id"], "")
 
+    def test_grouped_reasoning_contract_normalizes_legacy_source_policy_aliases(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "IDENTITY_CLARIFICATION_REQUIRED",
+                "meal_state": "PENDING_INTERVIEW",
+                "decision_rationale": "identity must be picked before source is confirmed",
+                "gate_reason": "legacy source policy alias",
+                "segment_count": 1,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_id": "group-flatbread",
+                        "group_label": "flatbread",
+                        "group_actions": ["IDENTITY_CLARIFICATION_REQUIRED"],
+                        "group_state": "PENDING_INTERVIEW",
+                        "primary_segment_id": "seg-bread-1",
+                        "segment_indexes": [0],
+                        "segment_ids": ["seg-bread-1"],
+                        "visual_evidence": ["one flatbread"],
+                        "missing_evidence": ["bread subtype"],
+                        "decision_rationale": "identity is still ambiguous",
+                        "gate_reason": "choose the flatbread type first",
+                        "clarification_needed": True,
+                        "clarification_actions": [],
+                        "question_kind": "IDENTITY",
+                        "question_focus": "bread subtype",
+                        "question_examples": ["khubz", "pita bread"],
+                        "source_question_policy": "ALWAYS_ASK",
+                        "source_trigger_reason": "legacy prompt output",
+                        "learned_source_distribution": [],
+                        "selected_identity": {
+                            "candidate_id": "",
+                            "label": "",
+                            "food_item_id": "",
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(grouped["food_groups"][0]["source_question_policy"], "ask_generic")
+
     def test_reasoning_response_format_contains_group_owned_clarification_actions_only(self) -> None:
         from app.services.reasoning_schema import reasoning_response_format
 

@@ -112,6 +112,9 @@ _SOURCE_ORIGIN_STATES = (
     "RESTAURANT",
     "UNKNOWN",
 )
+_SOURCE_POLICY_ASK_GENERIC = "ask_generic"
+_SOURCE_POLICY_ASK_AFFIRMATION = "ask_affirmation"
+_SOURCE_POLICY_DEFER_UNTIL_IDENTITY = "defer_until_identity"
 _MEAL_STATES = {
     "READY_TO_WRITE",
     "PENDING_CHOICE",
@@ -134,6 +137,29 @@ _GROUP_ACTIONS = (
     "FAILED_UNCLEAR",
     "NEEDS_SCHEMA_REVIEW",
 )
+
+
+def normalize_source_question_policy(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        return ""
+    if normalized == _SOURCE_POLICY_ASK_GENERIC:
+        return _SOURCE_POLICY_ASK_GENERIC
+    if normalized == _SOURCE_POLICY_ASK_AFFIRMATION:
+        return _SOURCE_POLICY_ASK_AFFIRMATION
+    if normalized == _SOURCE_POLICY_DEFER_UNTIL_IDENTITY:
+        return _SOURCE_POLICY_DEFER_UNTIL_IDENTITY
+    if normalized in {"always_ask", "deterministic_only"}:
+        return _SOURCE_POLICY_ASK_GENERIC
+    if "affirm" in normalized:
+        return _SOURCE_POLICY_ASK_AFFIRMATION
+    if "identity" in normalized and ("defer" in normalized or "after" in normalized):
+        return _SOURCE_POLICY_DEFER_UNTIL_IDENTITY
+    if normalized.startswith("ask_") or "always" in normalized or "deterministic" in normalized:
+        return _SOURCE_POLICY_ASK_GENERIC
+    return ""
 
 
 def reasoning_response_format() -> dict[str, Any]:
@@ -821,7 +847,7 @@ def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, An
     question_kind = _coerce_str(group.get("question_kind"), "question_kind")
     question_focus = _coerce_str(group.get("question_focus"), "question_focus")
     question_examples = _coerce_list_of_text(group.get("question_examples"), "question_examples")
-    source_question_policy = _coerce_str(group.get("source_question_policy"), "source_question_policy")
+    source_question_policy = normalize_source_question_policy(group.get("source_question_policy"))
     source_trigger_reason = _coerce_str(group.get("source_trigger_reason"), "source_trigger_reason")
     learned_source_distribution = _coerce_learned_source_distribution(group.get("learned_source_distribution"))
     selected_identity = _coerce_selected_identity(

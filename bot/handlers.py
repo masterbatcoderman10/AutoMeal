@@ -23,6 +23,7 @@ from bot.callback_data import (
     resolve_callback_token,
 )
 from bot.messages import (
+    format_grounding_in_progress_message,
     format_grounding_pending_message,
     format_interview_confirmation_message,
     format_recent_fix_targets,
@@ -409,6 +410,36 @@ def _mark_grounding_pending(interview: InterviewSession) -> None:
     interview.is_active = True
 
 
+def _mark_grounding_handoff_acknowledged(interview: InterviewSession, *, meal: MealLog | None = None) -> None:
+    now = datetime.now(UTC)
+    payload = dict(interview.current_prompt_payload or {})
+    payload["roadmap_step"] = "GROUNDING_PENDING"
+    payload["grounding_handoff_pending"] = False
+    payload["grounding_required"] = True
+    payload["grounding_status"] = "HANDOFF_ACKNOWLEDGED"
+    payload["grounding_handoff_completed_at"] = now.isoformat()
+    payload["grounding_consumer"] = "bot_confirm_handler"
+    payload["grounding_last_updated_at"] = now.isoformat()
+    interview.current_prompt_payload = payload
+    interview.state_key = "GROUNDING_PENDING"
+    interview.is_active = True
+
+    if meal is None:
+        return
+    meal.reasoning_state_json = interview_service.build_grounding_reasoning_state(
+        confirmation_items=interview_service.confirmation_items_from_state(
+            dict(getattr(meal, "reasoning_state_json", None) or {})
+        ),
+        status="HANDOFF_ACKNOWLEDGED",
+        prior_state=getattr(meal, "reasoning_state_json", None),
+        updated_at=now,
+        extra={
+            "handoff_acknowledged_at": now.isoformat(),
+            "handoff_consumer": "bot_confirm_handler",
+        },
+    )
+
+
 def _is_deterministic_meal_interview(state: Mapping[str, object]) -> bool:
     return (
         str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL) == interview_service.SESSION_MODE_MEAL
@@ -764,8 +795,10 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         await message.reply_text(correction_service.format_fix_summary(result))
                 return
             if _finalized_grounding_required(finalized):
-                _mark_grounding_pending(interview)
+                _mark_grounding_handoff_acknowledged(interview, meal=finalized.get("meal"))
                 session.add(interview)
+                if finalized.get("meal") is not None:
+                    session.add(finalized["meal"])
                 await session.commit()
                 message = update.callback_query.message
                 if message is not None:
@@ -819,7 +852,7 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
             state = _interview_state(interview)
             if state.get("roadmap_step") == "GROUNDING_PENDING":
-                await update.message.reply_text(format_grounding_pending_message(interview.meal_log_id))
+                await update.message.reply_text(format_grounding_in_progress_message(interview.meal_log_id))
                 return
             mode = str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL)
             if state.get("roadmap_step") != "CONFIRMATION" and _is_deterministic_meal_interview(state):
@@ -867,8 +900,10 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             await update.message.reply_text(correction_service.format_fix_summary(result))
                         return
                     if _finalized_grounding_required(finalized):
-                        _mark_grounding_pending(interview)
+                        _mark_grounding_handoff_acknowledged(interview, meal=finalized.get("meal"))
                         session.add(interview)
+                        if finalized.get("meal") is not None:
+                            session.add(finalized["meal"])
                         await session.commit()
                         await update.message.reply_text(format_grounding_pending_message(finalized["meal"].id))
                         return
@@ -1038,8 +1073,10 @@ async def _handle_meal_interview_turn(*, session, interview: InterviewSession, s
             await update.message.reply_text("I could not find that meal to confirm.")
             return
         if _finalized_grounding_required(finalized):
-            _mark_grounding_pending(interview)
+            _mark_grounding_handoff_acknowledged(interview, meal=finalized.get("meal"))
             session.add(interview)
+            if finalized.get("meal") is not None:
+                session.add(finalized["meal"])
             await session.commit()
             await update.message.reply_text(format_grounding_pending_message(finalized["meal"].id))
             return
@@ -1127,6 +1164,39 @@ async def _resolve_deterministic_confirmation(
         failure_state = dict(state)
         failure_state["last_turn_error"] = str(exc)
         failure_state["last_prompted_at"] = datetime.now(UTC)
+        confirmation_items = _confirmation_items_from_state(failure_state)
+        if confirmation_items:
+            fallback_payload = {
+                "turn_action": "ready_to_confirm_fallback",
+                "error": str(exc),
+                "remaining_required_question_ids": list(failure_state.get("remaining_required_question_ids") or []),
+                "confirmation_items": [dict(item) for item in confirmation_items],
+            }
+            failure_state = interview_service.apply_interview_turn_result(
+                failure_state,
+                turn_action="ready_to_confirm",
+                assistant_prompt="Resolved meal confirmation from deterministic answers.",
+                clarification_reason=None,
+                conversation_summary="Resolver failed; used deterministic clarification answers.",
+                confirmation_items=confirmation_items,
+                resolver_payload=fallback_payload,
+            )
+            failure_state["last_turn_error"] = str(exc)
+            failure_state["last_prompted_at"] = datetime.now(UTC)
+            await interview_service.persist_interview_step(
+                session=session,
+                interview=interview,
+                state=failure_state,
+                user_payload=user_payload,
+                user_message_id=user_message_id,
+            )
+            await reply_callable(
+                format_interview_confirmation_message(
+                    confirmation_items,
+                    action="log it",
+                )
+            )
+            return
         await interview_service.persist_interview_step(
             session=session,
             interview=interview,

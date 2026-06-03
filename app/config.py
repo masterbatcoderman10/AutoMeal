@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     SEGMENT_MODEL: str = "google/gemini-3-flash-preview"
     SEGMENT_RETRY_MODEL: str = "google/gemini-3.5-flash"
     LABEL_MODEL: str = "google/gemini-3-flash-preview"
-    REASONING_MODEL: str = "google/gemini-3.5-flash"
+    REASONING_MODEL: str = "google/gemini-3-flash-preview"
     REASONING_FALLBACK_MODEL: str = "google/gemini-3-flash-preview"
     INTERVIEW_MODEL: str = "google/gemini-3.1-flash-lite"
     INTERVIEW_FALLBACK_MODEL: str = "google/gemini-3-flash-preview"

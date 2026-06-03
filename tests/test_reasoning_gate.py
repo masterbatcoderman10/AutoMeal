@@ -230,6 +230,90 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertIn("fewer than 5", group["source_trigger_reason"].lower())
         self.assertEqual([action["type"] for action in group["clarification_actions"]], ["SOURCE_ORIGIN"])
 
+    def test_model_authored_source_action_is_replaced_with_canonical_source_options(self) -> None:
+        payload = {
+            "action": "AFFIRMATION_REQUIRED",
+            "meal_state": "PENDING_INTERVIEW",
+            "trace_id": "trace-canonical-source-action",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "identity is clear but source still matters",
+            "gate_reason": "source origin affects nutrition",
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "flatbread",
+                    "group_action": "AFFIRMATION_REQUIRED",
+                    "group_state": "PENDING_INTERVIEW",
+                    "group_actions": ["AFFIRMATION_REQUIRED", "ASK_SOURCE_ORIGIN"],
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "candidate-bread",
+                    "visual_evidence": ["flatbread on plate"],
+                    "missing_evidence": [],
+                    "decision_rationale": "looks like flatbread",
+                    "gate_reason": "source origin affects nutrition",
+                    "question_kind": "AFFIRMATION",
+                    "question_focus": "confirm the bread",
+                    "question_examples": [],
+                    "source_question_policy": "ask_generic",
+                    "clarification_needed": True,
+                    "clarification_actions": [
+                        {
+                            "type": "AFFIRMATION",
+                            "kind": "AFFIRMATION",
+                            "user_prompt": "Is this flatbread?",
+                            "answer_type": "confirm",
+                            "choices": [
+                                {"label": "Yes", "quick_prompt": "Yes"},
+                                {"label": "No", "quick_prompt": "No"},
+                            ],
+                            "allow_other": False,
+                            "other_label": "",
+                            "required": True,
+                            "reason": "identity confirmation required",
+                            "validation_hints": {"required": True},
+                            "question_focus": "confirm the bread",
+                        },
+                        {
+                            "type": "SOURCE_ORIGIN",
+                            "kind": "SOURCE_ORIGIN",
+                            "user_prompt": "Was this bread homemade or from a restaurant?",
+                            "answer_type": "single_choice",
+                            "choices": [
+                                {"label": "homemade", "quick_prompt": "homemade"},
+                                {"label": "restaurant", "quick_prompt": "restaurant"},
+                            ],
+                            "allow_other": True,
+                            "other_label": "Other",
+                            "required": True,
+                            "reason": "source origin affects nutrition",
+                            "validation_hints": {"required": True},
+                            "question_focus": "source origin",
+                        },
+                    ],
+                    "top_3": [
+                        _candidate_payload(
+                            candidate_id="candidate-bread",
+                            similarity=0.99,
+                            label="Flatbread",
+                            source="visual_reasoning",
+                        ),
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+        source_action = result["food_groups"][0]["clarification_actions"][1]
+
+        self.assertEqual(source_action["type"], "SOURCE_ORIGIN")
+        self.assertFalse(source_action["allow_other"])
+        self.assertEqual(
+            _choice_labels(source_action),
+            ["homemade", "store bought", "packaged", "restaurant", "not sure"],
+        )
+
     def test_ambiguous_group_keeps_identity_first_when_source_consensus_exists(self) -> None:
         payload = {
             "action": "AUTO_CONFIRM",
@@ -371,6 +455,78 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertIn("dominant", group["source_trigger_reason"].lower())
         self.assertEqual(group["selected_identity"]["candidate_id"], "candidate-rice")
         self.assertNotIn("SOURCE_ORIGIN", [action["type"] for action in group["clarification_actions"]])
+
+    def test_more_than_five_matches_with_ambiguous_source_distribution_asks_generic_source(self) -> None:
+        payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-ambiguous-source-policy",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "rice identity is clear but source history is split",
+            "gate_reason": "",
+            "food_groups": [
+                {
+                    "group_id": "group-rice",
+                    "group_label": "rice",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-rice",
+                    "segment_ids": ["segment-rice"],
+                    "selected_candidate_id": "candidate-rice",
+                    "visual_evidence": ["plain rice mound"],
+                    "missing_evidence": [],
+                    "decision_rationale": "identity is stable",
+                    "gate_reason": "",
+                    "question_kind": "NONE",
+                    "question_focus": "",
+                    "question_examples": [],
+                    "learned_match_count": 8,
+                    "learned_source_distribution": [
+                        {"candidate_id": "candidate-rice", "source": "HOME_COOKED", "count": 4, "share": 0.5},
+                        {"candidate_id": "candidate-rice", "source": "RESTAURANT", "count": 3, "share": 0.375},
+                        {"candidate_id": "candidate-rice", "source": "PACKAGED_BRANDED", "count": 1, "share": 0.125},
+                    ],
+                    "top_3": [
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-rice",
+                                similarity=0.99,
+                                label="Plain Rice",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-rice",
+                        },
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-jeera-rice",
+                                similarity=0.72,
+                                label="Jeera Rice",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-jeera-rice",
+                        },
+                        {
+                            **_candidate_payload(
+                                candidate_id="candidate-pulao",
+                                similarity=0.63,
+                                label="Vegetable Pulao",
+                                source="vector_match",
+                            ),
+                            "food_item_id": "food-pulao",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+        group = result["food_groups"][0]
+
+        self.assertEqual(group["group_action"], "ASK_SOURCE_ORIGIN")
+        self.assertEqual(group["source_question_policy"], "ask_generic")
+        self.assertIn("ambiguous", group["source_trigger_reason"].lower())
+        self.assertEqual([action["type"] for action in group["clarification_actions"]], ["SOURCE_ORIGIN"])
 
     def test_disagreeing_signals_escalate_to_interview(self) -> None:
         payload = {
@@ -1286,8 +1442,9 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertEqual(group["top_3"], [])
         self.assertEqual(
             [action["type"] for action in group["clarification_actions"]],
-            ["AFFIRMATION"],
+            ["AFFIRMATION", "SOURCE_ORIGIN"],
         )
+        self.assertEqual(group["source_question_policy"], "ask_generic")
         self.assertEqual(
             group["clarification_actions"][0]["user_prompt"],
             "I think this is bread. Is that right?",
@@ -1395,6 +1552,72 @@ class ReasoningGateTests(unittest.TestCase):
         self.assertEqual(
             [choice["label"] for choice in group["clarification_actions"][0]["choices"]],
             ["Khubz", "Pita", "Roti"],
+        )
+
+    def test_identity_follow_up_synthesizes_generic_source_from_learned_match_count_not_model_policy(self) -> None:
+        payload = {
+            "action": "IDENTITY_CLARIFICATION_REQUIRED",
+            "meal_state": "PENDING_INTERVIEW",
+            "trace_id": "",
+            "food_group_count": 1,
+            "segment_count": 1,
+            "decision_rationale": "bread subtype is still ambiguous",
+            "gate_reason": "legacy model source policy must be ignored",
+            "food_groups": [
+                {
+                    "group_id": "group-bread",
+                    "group_label": "Flatbread",
+                    "group_action": "IDENTITY_CLARIFICATION_REQUIRED",
+                    "group_actions": ["IDENTITY_CLARIFICATION_REQUIRED"],
+                    "group_state": "PENDING_INTERVIEW",
+                    "primary_segment_id": "segment-bread",
+                    "segment_ids": ["segment-bread"],
+                    "selected_candidate_id": "",
+                    "visual_evidence": ["round brown flatbread"],
+                    "missing_evidence": ["specific bread type"],
+                    "decision_rationale": "could be khubz, pita, or roti",
+                    "gate_reason": "bread subtype is ambiguous",
+                    "clarification_needed": True,
+                    "clarification_actions": [
+                        {
+                            "type": "CHOICE",
+                            "kind": "IDENTITY",
+                            "user_prompt": "Which bread is this?",
+                            "answer_type": "single_choice",
+                            "choices": [
+                                {"label": "Khubz", "quick_prompt": "Khubz"},
+                                {"label": "Pita", "quick_prompt": "Pita"},
+                                {"label": "Roti", "quick_prompt": "Roti"},
+                            ],
+                            "allow_other": True,
+                            "other_label": "Other",
+                            "required": True,
+                            "reason": "bread subtype is ambiguous",
+                            "validation_hints": {"required": True},
+                            "question_focus": "bread type",
+                        },
+                    ],
+                    "question_kind": "IDENTITY",
+                    "question_focus": "bread type",
+                    "question_examples": ["Khubz", "Pita", "Roti"],
+                    "source_question_policy": "ALWAYS_ASK",
+                    "learned_match_count": 0,
+                    "top_3": [],
+                }
+            ],
+        }
+
+        result = _run_gate(payload)
+
+        group = result["food_groups"][0]
+        self.assertEqual(group["source_question_policy"], "ask_generic")
+        self.assertEqual(
+            group["group_actions"],
+            ["IDENTITY_CLARIFICATION_REQUIRED", "ASK_SOURCE_ORIGIN"],
+        )
+        self.assertEqual(
+            [action["type"] for action in group["clarification_actions"]],
+            ["CHOICE", "SOURCE_ORIGIN"],
         )
 
     def test_source_origin_is_reasoning_owned_and_ordered_after_affirmation(self) -> None:

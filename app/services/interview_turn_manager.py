@@ -340,6 +340,7 @@ def _validate_ready_to_confirm_evidence(
     )
     broad_confirmation = _has_broad_confirmation(user_evidence_text)
     items_by_group = {item.group_id: item for item in result.confirmation_items}
+    answered_group_ids = _answered_group_ids(authoritative_state)
 
     for target in authoritative_state.get("unresolved_targets") or []:
         if not isinstance(target, Mapping):
@@ -349,6 +350,8 @@ def _validate_ready_to_confirm_evidence(
             continue
         item = items_by_group.get(group_id)
         if item is None:
+            continue
+        if group_id in answered_group_ids:
             continue
         if not _item_has_user_evidence(item, target, user_evidence_text):
             raise InterviewTurnValidationError(
@@ -364,6 +367,8 @@ def _validate_ready_to_confirm_evidence(
         item = items_by_group.get(group_id)
         if item is None:
             continue
+        if group_id in answered_group_ids:
+            continue
         if item.approval_status == "APPROVED":
             if broad_confirmation or _mentions_candidate(candidate, user_evidence_text):
                 continue
@@ -374,6 +379,20 @@ def _validate_ready_to_confirm_evidence(
             raise InterviewTurnValidationError(
                 f"ready_to_confirm corrected group {group_id} without explicit user evidence"
             )
+
+
+def _answered_group_ids(authoritative_state: Mapping[str, Any]) -> set[str]:
+    answers = authoritative_state.get("answers_by_question_id")
+    if not isinstance(answers, Mapping):
+        return set()
+    group_ids: set[str] = set()
+    for answer in answers.values():
+        if not isinstance(answer, Mapping):
+            continue
+        group_id = str(answer.get("group_id") or "").strip()
+        if group_id:
+            group_ids.add(group_id)
+    return group_ids
 
 
 def _combined_user_evidence_text(

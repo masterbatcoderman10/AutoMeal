@@ -159,7 +159,7 @@ async function streamExtractMessages(filePath, filterFn, maxMessages = 300) {
 async function cmdScanSessions(overridePath, options, raw) {
   const sessionsDir = getSessionsDir(overridePath);
   if (!sessionsDir) {
-    const searchedPath = overridePath || '.agent/projects';
+    const searchedPath = overridePath || '.agents/projects';
     error(`No Claude Code sessions found at ${searchedPath}.${overridePath ? '' : ' Is Claude Code installed?'}`);
   }
 
@@ -251,7 +251,7 @@ async function cmdScanSessions(overridePath, options, raw) {
 async function cmdExtractMessages(projectArg, options, raw, overridePath) {
   const sessionsDir = getSessionsDir(overridePath);
   if (!sessionsDir) {
-    const searchedPath = overridePath || '.agent/projects';
+    const searchedPath = overridePath || '.agents/projects';
     error(`No Claude Code sessions found at ${searchedPath}.${overridePath ? '' : ' Is Claude Code installed?'}`);
   }
 
@@ -392,7 +392,7 @@ async function cmdExtractMessages(projectArg, options, raw, overridePath) {
 async function cmdProfileSample(overridePath, options, raw) {
   const sessionsDir = getSessionsDir(overridePath);
   if (!sessionsDir) {
-    const searchedPath = overridePath || '.agent/projects';
+    const searchedPath = overridePath || '.agents/projects';
     error(`No Claude Code sessions found at ${searchedPath}.${overridePath ? '' : ' Is Claude Code installed?'}`);
   }
 

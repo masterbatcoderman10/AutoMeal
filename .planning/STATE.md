@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: "Phase 03 shipped — PR #3"
-stopped_at: Phase 3 context gathered
-last_updated: "2026-05-28T11:38:34.574Z"
-last_activity: 2026-05-28
+status: "Phase 04.5 shipped — PR #4"
+stopped_at: Phase 4.5 UAT complete
+last_updated: "2026-06-03T08:31:44.800Z"
+last_activity: 2026-06-03
 progress:
-  total_phases: 6
-  completed_phases: 2
-  total_plans: 13
-  completed_plans: 9
-  percent: 33
+  total_phases: 11
+  completed_phases: 8
+  total_plans: 40
+  completed_plans: 38
+  percent: 73
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-24)
 
 **Core value:** Lowest-friction meal logging for one person: snap a photo, get logged nutrition with zero manual entry, and have the system get faster and more accurate the more I use it.
-**Current focus:** Phase 02 — vision-slice
+**Current focus:** Phase 05 — agentic-grounding
 
 ## Current Position
 
-Phase: 02 (vision-slice) — EXECUTING
-Plan: 4 of 4
-Status: Phase 03 shipped — PR #3
-Last activity: 2026-05-28
+Phase: 04.5 (source-aware-clarification-expansion) — COMPLETE
+Plan: 3 of 3
+Status: Phase 04.5 shipped — PR #4
+Last activity: 2026-06-03
 
 Progress: [██████████] 100%
 
@@ -36,7 +36,7 @@ Progress: [██████████] 100%
 
 **Velocity:**
 
-- Total plans completed: 4
+- Total plans completed: 13
 - Average duration: 10min
 - Total execution time: 47min
 
@@ -45,10 +45,12 @@ Progress: [██████████] 100%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-foundation-ingest | 2 | 19min | 10min |
+| 04 | 8 | - | - |
 
 **Recent Trend:**
 
 - Plan 04 completed in 17min
+- Phase 04.5 UAT completed on 2026-06-03; source-aware clarification is verified clear
 
 *Updated after each plan completion*
 | Phase 01 P03 | 12min | 5 tasks | 5 files |
@@ -60,6 +62,11 @@ Progress: [██████████] 100%
 | Phase 02 P04 | 17m | 3 tasks | 6 files |
 
 ## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 4.5 inserted after Phase 4: Source-Aware Clarification Expansion (URGENT)
+- Phase 4.5 UAT completed on 2026-06-03 after clean and warm source-persistence runs
 
 ### Decisions
 
@@ -101,12 +108,26 @@ Recent decisions affecting current work:
 
 None yet.
 
+### Quick Tasks Completed
+
+| Date | Quick Task | Summary |
+|------|------------|---------|
+| 2026-05-30 | 260530-kkq-tighten-grouped-reasoning-prompt-context | Tightened reasoning/segmentation context, explicit no-vector-candidates context, and worker DB-lock handling; live meal reached INTERVIEWING, but empty-DB UAT still needs reset. |
+| 2026-05-30 | 260530-l8t-capture-phase-4-2-gap-llm-threaded-inter | Promoted deterministic interview continuation failure to Phase 04.2: LLM-threaded interview orchestration with reasoning context, conversation history, and structured final write-back. |
+| 2026-05-29 | 260529-epp-fix-phase-04-security-audit-open-threats | Closed Phase 04 security audit gaps; Phase 04 SECURITY.md now verifies 38/38 threats closed. |
+| 2026-06-01 | 260601-gf9-add-telegram-other-option-for-determinis | Added Telegram `Other` buttons for deterministic identity choices, free-text follow-up handling, redeployed bot, and live UAT advanced to confirmation after recording `White khubz`. |
+| 2026-06-01 | 260601-tv8-optimize-meal-reasoning-prompt-schema-ou | Compressed meal reasoning prompt/schema/output, removed model-emitted root legacy fields and IDs, forced visual-only foods to affirmation, reset blank UAT DB, and redeployed API/bot. |
+| 2026-06-01 | 260601-uj5-remove-meal-reasoning-token-limits-entir | Removed primary `meal_reasoning` output/thinking token caps, kept parser repair bounded, and restarted API/bot. |
+| 2026-06-01 | 260601-ulg-remove-meal-reasoning-parser-repair-path | Removed the secondary `meal_reasoning` parser-repair LLM path and restarted API/bot. |
+| 2026-06-03 | 260603-9oy-update-reasoning-prompt-from-pasted-text | Replaced the runtime meal-reasoning prompt with the pasted text, normalized legacy source-policy aliases, enforced deterministic source-question routing for zero/fewer-than-five/same-source/ambiguous-source match paths, and restarted API/bot. |
+
 ### Blockers/Concerns
 
 - Phase 1: CF-3 — iOS Shortcut "new photo added" trigger reliability is unverified on real device. Budget time for real-device smoke test; implement Share Sheet fallback if automatic trigger is unreliable.
 - Phase 2: Verify Gemini 3 Flash structured output + vision works in a single OpenRouter call. If not, split into two calls.
 - Phase 3: Gemini Embedding 2 cross-modal alignment on food must be verified with calibration script before building match logic.
 - Phase 4: Confidence calibration prompt patterns for multi-signal gating on Gemini 3 Flash are sparsely documented — plan a mini-research pass before implementing the gate.
+- Phase 04.5 source-aware clarification — UAT complete; source questions, packaged/home persistence, and grounding-handoff idempotency verified.
 - Phase 5: Firecrawl resource envelope on Mac mini needs verification before shipping (5 sequential fetches under Docker mem limits).
 - Phase 6: Mac mini sleep prevention (`pmset -a sleep 0`) must be confirmed before declaring Phase 6 complete.
 
@@ -125,6 +146,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-05-27T18:39:00.555Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-embed-match/03-CONTEXT.md
+Last session: 2026-06-03T08:20:00.000Z
+Stopped at: Phase 4.5 UAT complete
+Resume file: .planning/phases/04.5-source-aware-clarification-expansion/04.5-UAT.md

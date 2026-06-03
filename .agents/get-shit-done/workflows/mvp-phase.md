@@ -3,9 +3,9 @@ Guide the user through MVP-mode planning for a phase. Prompts for an "As a / I w
 </purpose>
 
 <required_reading>
-@.agent/get-shit-done/references/user-story-template.md
-@.agent/get-shit-done/references/spidr-splitting.md
-@.agent/get-shit-done/references/planner-mvp-mode.md
+@.agents/get-shit-done/references/user-story-template.md
+@.agents/get-shit-done/references/spidr-splitting.md
+@.agents/get-shit-done/references/planner-mvp-mode.md
 </required_reading>
 
 <runtime_note>
@@ -29,13 +29,24 @@ Example: /gsd mvp-phase 2.1
 ```
 Exit.
 
-Normalize per `@.agent/get-shit-done/references/phase-argument-parsing.md` (zero-pad integer phases to two digits).
+Normalize per `@.agents/get-shit-done/references/phase-argument-parsing.md` (zero-pad integer phases to two digits).
 
 ## 2. Validate phase exists and check status
 
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -84,7 +95,7 @@ Use `AskUserQuestion` with options [Re-prompt / Abort]. On Abort, exit cleanly. 
 
 ## 3. User story prompts
 
-Run three sequential `AskUserQuestion` calls. Each is free-text. After all three, assemble into the canonical sentence per `@.agent/get-shit-done/references/user-story-template.md`:
+Run three sequential `AskUserQuestion` calls. Each is free-text. After all three, assemble into the canonical sentence per `@.agents/get-shit-done/references/user-story-template.md`:
 
 **Prompt 1 — As a:**
 > "As a [user role]?"
@@ -123,7 +134,7 @@ If `RE_PROMPT_USER_STORY=true`, re-run only the offending prompt field(s), rebui
 
 ## 4. SPIDR splitting check
 
-Run the SPIDR rules from `@.agent/get-shit-done/references/spidr-splitting.md`. Briefly:
+Run the SPIDR rules from `@.agents/get-shit-done/references/spidr-splitting.md`. Briefly:
 
 **Trigger evaluation.** Check the assembled `USER_STORY` against the four size signals from the reference (compound capabilities, multi-actor, length > 120 chars, vague capability). If none fire, **skip SPIDR** entirely — go to step 5.
 

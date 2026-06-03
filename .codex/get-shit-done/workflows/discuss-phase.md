@@ -109,7 +109,18 @@ Phase: "API documentation"       → Structure/navigation, Code examples depth, 
 Phase number from argument (required).
 
 ```bash
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"; [ -f "$GSD_TOOLS" ] && GSD_SDK="node $GSD_TOOLS" || { command -v gsd-sdk >/dev/null 2>&1 && GSD_SDK=gsd-sdk || { echo "ERROR: gsd-sdk not found. Run: npx get-shit-done-cc@latest --claude --local" >&2; exit 1; }; }
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi; [ -f "$GSD_TOOLS" ] && GSD_SDK="node $GSD_TOOLS" || { command -v gsd-sdk >/dev/null 2>&1 && GSD_SDK=gsd-sdk || { echo "ERROR: gsd-sdk not found. Run: npx get-shit-done-cc@latest --claude --local" >&2; exit 1; }; }
 INIT=$($GSD_SDK query init.phase-op "${PHASE}"); [[ "$INIT" == @file:* ]] && INIT=$(cat "${INIT#@file:}")
 AGENT_SKILLS_ADVISOR=$($GSD_SDK query agent-skills gsd-advisor-researcher)
 ```

@@ -13,7 +13,18 @@ Parse arguments and load project state:
 
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -49,12 +60,21 @@ fi
 <step name="preflight_checks">
 Verify the work is ready to ship:
 
-1. **Verification passed?**
+1. **Shipping evidence passed?**
    ```bash
-   VERIFICATION=$(cat ${PHASE_DIR}/*-VERIFICATION.md 2>/dev/null)
+   VERIFICATION_FILE=$(ls "${PHASE_DIR}"/*-VERIFICATION.md 2>/dev/null | head -1)
+   UAT_FILE=$(ls "${PHASE_DIR}"/*-UAT.md 2>/dev/null | head -1)
+   VALIDATION_FILE=$(ls "${PHASE_DIR}"/*-VALIDATION.md 2>/dev/null | head -1)
+   NYQUIST_CFG=$($GSD_SDK query config-get workflow.nyquist_validation --raw 2>/dev/null || echo "true")
    ```
-   Check for `status: pass` or `status: passed`.
-   If no VERIFICATION.md or status is anything other than `pass` / `passed` (including `human_needed` / `gaps_found`): block with `PHASE_VERIFICATION_INCOMPLETE`; complete or formally re-run verification before shipping.
+   Accept either evidence contract:
+   - **Automated verification contract:** `VERIFICATION_FILE` exists and frontmatter has `status: pass` or `status: passed`.
+   - **UAT + validation contract:** no passed VERIFICATION.md is present, but `UAT_FILE` exists with frontmatter `status: complete`, its `## Summary` has `issues: 0` and `pending: 0`, and, when `NYQUIST_CFG` is not `false`, `VALIDATION_FILE` exists with frontmatter `nyquist_compliant: true`.
+
+   Block conditions:
+   - No passed VERIFICATION.md and no complete zero-issue UAT.md: block with `PHASE_VERIFICATION_INCOMPLETE`; complete `/gsd-verify-work` before shipping.
+   - UAT.md is complete but `issues > 0`, `pending > 0`, or unresolved `blocked > 0`: block with `PHASE_UAT_INCOMPLETE`; resolve or acknowledge gaps before shipping.
+   - Nyquist validation is enabled and VALIDATION.md is missing or `nyquist_compliant` is not `true`: block with `PHASE_VALIDATION_INCOMPLETE`; run `/gsd-validate-phase {phase}` before shipping.
 
 2. **Clean working tree?**
    ```bash
@@ -107,7 +127,9 @@ Phase {phase_number}: {phase_name}
 Or for milestone: `Milestone {version}: {name}`
 
 **2. Summary section:**
-Read ROADMAP.md for phase goal. Read VERIFICATION.md for verification status.
+Read ROADMAP.md for phase goal. Read verification evidence in this order:
+1. VERIFICATION.md when present and passed.
+2. Otherwise UAT.md plus VALIDATION.md.
 
 ```markdown
 ## Summary
@@ -115,6 +137,7 @@ Read ROADMAP.md for phase goal. Read VERIFICATION.md for verification status.
 **Phase {N}: {Name}**
 **Goal:** {goal from ROADMAP.md}
 **Status:** Verified ✓
+**Verification evidence:** {VERIFICATION.md passed | UAT.md complete + VALIDATION.md compliant}
 
 {One paragraph synthesized from SUMMARY.md files — what was built}
 ```
@@ -142,7 +165,9 @@ For each SUMMARY.md in the phase directory:
 ```markdown
 ## Verification
 
-- [x] Automated verification: {pass/fail from VERIFICATION.md}
+- [x] Phase verification: {VERIFICATION.md status OR UAT.md status}
+- [x] UAT: {passed}/{total} passed, {issues} issues, {pending} pending
+- [x] Nyquist validation: {VALIDATION.md nyquist_compliant=true | disabled | not applicable}
 - {human verification items from VERIFICATION.md, if any}
 ```
 
@@ -173,7 +198,7 @@ Rules:
 - Treat configured sections as append-only. They are rendered after `Key Decisions` and cannot replace, remove, or reorder the required core sections: `Summary`, `Changes`, `Requirements Addressed`, `Verification`, and `Key Decisions`.
 - Each entry must have `heading` plus at least one of `source`, `template`, or `fallback`.
 - `enabled` defaults to `true`; when `enabled` is `false`, skip the section without warning. This lets onboarding seed optional sections that a project can enable later.
-- `source` is a fallback chain of planning artifact headings: `PLAN.md ## Risks || VERIFICATION.md ## Manual Checks`. Allowed artifacts are `ROADMAP.md`, `PLAN.md`, `SUMMARY.md`, `VERIFICATION.md`, `STATE.md`, `REQUIREMENTS.md`, and `CONTEXT.md`.
+- `source` is a fallback chain of planning artifact headings: `PLAN.md ## Risks || VERIFICATION.md ## Manual Checks || UAT.md ## Summary`. Allowed artifacts are `ROADMAP.md`, `PLAN.md`, `SUMMARY.md`, `VERIFICATION.md`, `UAT.md`, `VALIDATION.md`, `STATE.md`, `REQUIREMENTS.md`, and `CONTEXT.md`.
 - `template` is literal Markdown with a closed token namespace only: `{phase_number}`, `{phase_name}`, `{phase_dir}`, `{base_branch}`, `{padded_phase}`.
 - `fallback` is literal Markdown used when `source` finds no content and no `template` is present.
 - Omit sections whose final rendered body is empty after trimming.

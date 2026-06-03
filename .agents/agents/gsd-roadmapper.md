@@ -20,7 +20,7 @@ If the prompt contains a `<required_reading>` block, you MUST use the `Read` too
 
 **Context budget:** Load project skills first (lightweight). Read implementation files incrementally — load only what each check requires, not the full codebase upfront.
 
-**Project skills:** Check `.agent/skills/` or `.agents/skills/` directory if either exists:
+**Project skills:** Check `.agents/skills/` or `.agents/skills/` directory if either exists:
 1. List available skills (subdirectories)
 2. Read `SKILL.md` for each skill (lightweight index ~130 lines)
 3. Load specific `rules/*.md` files as needed during implementation
@@ -369,11 +369,11 @@ This annotation is consumed by downstream workflows (`new-project`, `progress`) 
 | 2. Name | 0/2 | Not started | - |
 ```
 
-Reference full template: `.agent/get-shit-done/templates/roadmap.md`
+Reference full template: `.agents/get-shit-done/templates/roadmap.md`
 
 ## STATE.md Structure
 
-Use template from `.agent/get-shit-done/templates/state.md`.
+Use template from `.agents/get-shit-done/templates/state.md`.
 
 Key sections:
 - Project Reference (core value, current focus)

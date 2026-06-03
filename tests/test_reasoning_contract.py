@@ -1,0 +1,541 @@
+from __future__ import annotations
+
+import unittest
+from typing import Any
+
+
+def _candidate_payload() -> dict[str, Any]:
+    return {
+        "candidate_id": "candidate-1",
+        "label": "chicken curry",
+        "identity_confidence": 0.94,
+        "quantity_confidence": 0.84,
+        "match_consistency_confidence": 0.9,
+        "visual_evidence": ["segment_1: clear protein pieces"],
+        "missing_evidence": [],
+        "specificity": "high",
+        "nutrition_relevance": "medium",
+        "source": "vector_match",
+        "decision_rationale": "Best visual match with stable rice/curry profile.",
+    }
+
+
+class ReasoningContractTests(unittest.TestCase):
+    def test_reasoning_response_format_is_strict_and_actions_are_enumerated(self) -> None:
+        from app.services.reasoning_schema import reasoning_response_format
+
+        response_format = reasoning_response_format()
+        schema = response_format["json_schema"]["schema"]
+
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(schema["type"], "object")
+        self.assertIn("action", schema["required"])
+        self.assertIn("meal_state", schema["required"])
+        self.assertIn("food_groups", schema["required"])
+        self.assertIn("food_group_count", schema["required"])
+
+        food_group_schema = schema["properties"]["food_groups"]
+        self.assertEqual(food_group_schema["type"], "array")
+        group_schema = food_group_schema["items"]
+        self.assertEqual(group_schema["type"], "object")
+        self.assertFalse(group_schema["additionalProperties"])
+        self.assertNotIn("trace_id", schema["properties"])
+        self.assertNotIn("group_id", group_schema["properties"])
+        self.assertNotIn("primary_segment_id", group_schema["properties"])
+        self.assertNotIn("selected_candidate_id", group_schema["properties"])
+        self.assertNotIn("top_3", group_schema["properties"])
+        self.assertIn("segment_indexes", group_schema["required"])
+        self.assertIn("segment_ids", group_schema["properties"])
+        self.assertIn("segment_ids", group_schema["required"])
+        self.assertIn("source_question_policy", group_schema["properties"])
+        self.assertIn("source_trigger_reason", group_schema["properties"])
+        self.assertIn("learned_source_distribution", group_schema["properties"])
+        self.assertIn("selected_identity", group_schema["properties"])
+
+        action_schema = schema["properties"]["action"]
+        self.assertEqual(action_schema["type"], "string")
+        self.assertIn("enum", action_schema)
+        self.assertNotIn("INTERVIEW_USER", action_schema["enum"])
+        self.assertNotIn("INTERVIEW", action_schema["enum"])
+        self.assertIn("AFFIRMATION_REQUIRED", action_schema["enum"])
+        self.assertNotIn("const", action_schema)
+        self.assertNotIn("group_action", group_schema["properties"])
+        group_actions_schema = group_schema["properties"]["group_actions"]
+        self.assertEqual(group_actions_schema["type"], "array")
+        self.assertEqual(action_schema["enum"], group_actions_schema["items"]["enum"])
+        self.assertNotIn("INTERVIEW_USER", group_actions_schema["items"]["enum"])
+        self.assertIn("ASK_SOURCE_ORIGIN", group_actions_schema["items"]["enum"])
+        question_kind_schema = group_schema["properties"]["question_kind"]
+        self.assertIn("enum", question_kind_schema)
+        self.assertIn("IDENTITY", question_kind_schema["enum"])
+        self.assertIn("NONE", question_kind_schema["enum"])
+
+        meal_state_schema = schema["properties"]["meal_state"]
+        self.assertEqual(
+            set(meal_state_schema["enum"]),
+            {
+                "READY_TO_WRITE",
+                "PENDING_CHOICE",
+                "PENDING_INTERVIEW",
+                "PARTIAL_RESOLVED_WAITING",
+                "FAILED_UNCLEAR",
+                "NEEDS_SCHEMA_REVIEW",
+            },
+        )
+
+    def test_reasoning_response_format_requires_all_declared_fields_for_strict_mode(self) -> None:
+        from app.services.reasoning_schema import reasoning_response_format
+
+        response_format = reasoning_response_format()
+        schema = response_format["json_schema"]["schema"]
+
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+
+        group_schema = schema["properties"]["food_groups"]["items"]
+        self.assertEqual(set(group_schema["required"]), set(group_schema["properties"]))
+
+        action_schema = group_schema["properties"]["clarification_actions"]["items"]
+        self.assertEqual(set(action_schema["required"]), set(action_schema["properties"]))
+        choice_schema = action_schema["properties"]["choices"]["items"]
+        self.assertEqual(set(choice_schema["required"]), set(choice_schema["properties"]))
+
+    def test_reasoning_contract_requires_evidence_and_rationale_fields(self) -> None:
+        from app.services.reasoning_schema import reasoning_response_format
+
+        response_format = reasoning_response_format()
+        group_schema = response_format["json_schema"]["schema"]["properties"]["food_groups"]["items"]
+        required_fields = set(group_schema["required"])
+
+        expected_fields = {
+            "group_label",
+            "group_actions",
+            "group_state",
+            "segment_indexes",
+            "segment_ids",
+            "visual_evidence",
+            "missing_evidence",
+            "decision_rationale",
+            "gate_reason",
+            "source_question_policy",
+            "source_trigger_reason",
+            "learned_source_distribution",
+            "selected_identity",
+        }
+        for field in expected_fields:
+            self.assertIn(field, required_fields)
+
+    def test_unknown_action_routes_to_needs_schema_review(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        payload = {
+            "action": "SUDDENLY_UNKNOWN_ACTION",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-abc-123",
+            "decision_rationale": "model suggested an internal-only branch",
+            "gate_reason": "self-confidence is high",
+            "segment_count": 1,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-curry",
+                    "group_label": "chicken curry",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-1",
+                    "segment_ids": ["segment-1"],
+                    "selected_candidate_id": "candidate-1",
+                    "visual_evidence": ["segment_1: clear protein pieces"],
+                    "missing_evidence": [],
+                    "decision_rationale": "best candidate",
+                    "gate_reason": "",
+                    "top_3": [_candidate_payload(), _candidate_payload(), _candidate_payload()],
+                }
+            ],
+        }
+
+        coerced = coerce_reasoning_response(payload)
+
+        self.assertEqual(coerced["action"], "NEEDS_SCHEMA_REVIEW")
+        self.assertEqual(coerced["meal_state"], "NEEDS_SCHEMA_REVIEW")
+        self.assertIn("action", coerced["decision_rationale"].lower())
+
+    def test_top_three_payload_preserves_allowed_action_and_missing_evidence(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        payload = {
+            "action": "ASK_QUANTITY",
+            "meal_state": "PENDING_INTERVIEW",
+            "trace_id": "trace-321",
+            "decision_rationale": "open quantity bucket requested",
+            "gate_reason": "ask a question before final write",
+            "segment_count": 3,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-curry",
+                    "group_label": "chicken curry",
+                    "group_action": "ASK_QUANTITY",
+                    "group_state": "PENDING_INTERVIEW",
+                    "primary_segment_id": "segment-1",
+                    "segment_ids": ["segment-1"],
+                    "selected_candidate_id": "candidate-1",
+                    "visual_evidence": ["segment_1: clear protein pieces"],
+                    "missing_evidence": ["portion_unit"],
+                    "decision_rationale": "open quantity bucket requested",
+                    "gate_reason": "ask a question before final write",
+                    "top_3": [
+                        {
+                            **_candidate_payload(),
+                            "candidate_id": "candidate-1",
+                        },
+                        {
+                            **_candidate_payload(),
+                            "candidate_id": "candidate-2",
+                            "missing_evidence": ["portion_unit", "serving_size"],
+                            "visual_evidence": [],
+                        },
+                        {
+                            **_candidate_payload(),
+                            "candidate_id": "candidate-3",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        normalized = coerce_reasoning_response(payload)
+        self.assertEqual(normalized["action"], "ASK_QUANTITY")
+        self.assertEqual(normalized["meal_state"], "PENDING_INTERVIEW")
+        self.assertEqual(normalized["trace_id"], "trace-321")
+        self.assertEqual(len(normalized["food_groups"][0]["top_3"]), 3)
+        self.assertIn("portion_unit", normalized["food_groups"][0]["top_3"][1]["missing_evidence"])
+
+    def test_grouped_reasoning_contract_requires_food_groups(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response, reasoning_response_format
+
+        schema = reasoning_response_format()["json_schema"]["schema"]
+
+        self.assertIn("food_groups", schema["required"])
+        self.assertIn("food_group_count", schema["required"])
+        self.assertNotIn("top_3", schema["properties"])
+        self.assertNotIn("clarification_schema", schema["properties"])
+        group_schema = schema["properties"]["food_groups"]["items"]
+        self.assertIn("question_kind", group_schema["required"])
+        self.assertIn("question_focus", group_schema["required"])
+        self.assertIn("question_examples", group_schema["required"])
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "AUTO_CONFIRM",
+                "meal_state": "READY_TO_WRITE",
+                "trace_id": "trace-grouped-contract",
+                "decision_rationale": "grouped contract should reject missing food_groups",
+                "gate_reason": "",
+                "segment_count": 2,
+            }
+        )
+
+        self.assertEqual(grouped["meal_state"], "NEEDS_SCHEMA_REVIEW")
+
+    def test_grouped_reasoning_contract_preserves_question_metadata(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "ASK_CHOICE",
+                "meal_state": "PENDING_INTERVIEW",
+                "trace_id": "trace-question",
+                "decision_rationale": "hidden curry detail needs a follow-up",
+                "gate_reason": "missing hidden vegetable",
+                "segment_count": 1,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_id": "group-egg-curry",
+                        "group_label": "egg curry",
+                        "group_action": "ASK_CHOICE",
+                        "group_state": "PENDING_INTERVIEW",
+                        "primary_segment_id": "seg-egg",
+                        "segment_ids": ["seg-egg"],
+                        "selected_candidate_id": "candidate-egg",
+                        "visual_evidence": ["egg visible"],
+                        "missing_evidence": ["vegetable inside curry"],
+                        "decision_rationale": "egg visible but vegetable is hidden",
+                        "gate_reason": "missing hidden vegetable",
+                        "question_kind": "DETAIL",
+                        "question_focus": "vegetable inside egg curry",
+                        "question_examples": ["egg curry with bottle gourd"],
+                        "top_3": [_candidate_payload(), _candidate_payload(), _candidate_payload()],
+                    }
+                ],
+            }
+        )
+
+        group = grouped["food_groups"][0]
+        self.assertEqual(group["question_kind"], "DETAIL")
+        self.assertEqual(group["question_focus"], "vegetable inside egg curry")
+        self.assertEqual(group["question_examples"], ["egg curry with bottle gourd"])
+
+    def test_group_actions_list_derives_legacy_primary_action(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "IDENTITY_CLARIFICATION_REQUIRED",
+                "meal_state": "PENDING_INTERVIEW",
+                "decision_rationale": "flatbread identity and source are both needed",
+                "gate_reason": "subtype and source affect nutrition",
+                "segment_count": 1,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_label": "Flatbread",
+                        "group_actions": ["AFFIRMATION_REQUIRED", "IDENTITY_CLARIFICATION_REQUIRED", "ASK_SOURCE_ORIGIN"],
+                        "group_state": "PENDING_INTERVIEW",
+                        "segment_indexes": [1],
+                        "visual_evidence": ["round flatbread"],
+                        "missing_evidence": ["bread subtype"],
+                        "decision_rationale": "could be pita, khubz, or roti",
+                        "gate_reason": "bread subtype required",
+                        "clarification_needed": True,
+                        "clarification_actions": [],
+                        "question_kind": "IDENTITY",
+                        "question_focus": "bread type",
+                        "question_examples": ["pita", "khubz", "roti"],
+                    }
+                ],
+            }
+        )
+
+        group = grouped["food_groups"][0]
+        self.assertEqual(group["group_action"], "IDENTITY_CLARIFICATION_REQUIRED")
+        self.assertEqual(
+            group["group_actions"],
+            ["IDENTITY_CLARIFICATION_REQUIRED", "ASK_SOURCE_ORIGIN"],
+        )
+
+    def test_grouped_reasoning_contract_preserves_source_policy_metadata(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "IDENTITY_CLARIFICATION_REQUIRED",
+                "meal_state": "PENDING_INTERVIEW",
+                "decision_rationale": "identity must be picked before source is confirmed",
+                "gate_reason": "top candidates are close",
+                "segment_count": 2,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_id": "group-flatbread",
+                        "group_label": "flatbread",
+                        "group_actions": ["IDENTITY_CLARIFICATION_REQUIRED"],
+                        "group_state": "PENDING_INTERVIEW",
+                        "primary_segment_id": "seg-bread-1",
+                        "segment_indexes": [0, 1],
+                        "segment_ids": ["seg-bread-1", "seg-bread-2"],
+                        "visual_evidence": ["two flatbread pieces"],
+                        "missing_evidence": ["bread subtype"],
+                        "decision_rationale": "identity is still ambiguous",
+                        "gate_reason": "choose the flatbread type first",
+                        "clarification_needed": True,
+                        "clarification_actions": [],
+                        "question_kind": "IDENTITY",
+                        "question_focus": "bread subtype",
+                        "question_examples": ["khubz", "pita bread"],
+                        "source_question_policy": "defer_until_identity",
+                        "source_trigger_reason": "strong learned source history exists but identity is unresolved",
+                        "learned_source_distribution": [
+                            {"candidate_id": "candidate-khubz", "source": "HOME_COOKED", "count": 8, "share": 0.89},
+                            {"candidate_id": "candidate-khubz", "source": "PACKAGED_BRANDED", "count": 1, "share": 0.11},
+                        ],
+                        "selected_identity": {
+                            "candidate_id": "",
+                            "label": "",
+                            "food_item_id": "",
+                        },
+                    }
+                ],
+            }
+        )
+
+        group = grouped["food_groups"][0]
+        self.assertEqual(group["segment_ids"], ["seg-bread-1", "seg-bread-2"])
+        self.assertEqual(group["source_question_policy"], "defer_until_identity")
+        self.assertIn("identity", group["source_trigger_reason"].lower())
+        self.assertEqual(group["learned_source_distribution"][0]["candidate_id"], "candidate-khubz")
+        self.assertEqual(group["selected_identity"]["candidate_id"], "")
+
+    def test_grouped_reasoning_contract_normalizes_legacy_source_policy_aliases(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "IDENTITY_CLARIFICATION_REQUIRED",
+                "meal_state": "PENDING_INTERVIEW",
+                "decision_rationale": "identity must be picked before source is confirmed",
+                "gate_reason": "legacy source policy alias",
+                "segment_count": 1,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_id": "group-flatbread",
+                        "group_label": "flatbread",
+                        "group_actions": ["IDENTITY_CLARIFICATION_REQUIRED"],
+                        "group_state": "PENDING_INTERVIEW",
+                        "primary_segment_id": "seg-bread-1",
+                        "segment_indexes": [0],
+                        "segment_ids": ["seg-bread-1"],
+                        "visual_evidence": ["one flatbread"],
+                        "missing_evidence": ["bread subtype"],
+                        "decision_rationale": "identity is still ambiguous",
+                        "gate_reason": "choose the flatbread type first",
+                        "clarification_needed": True,
+                        "clarification_actions": [],
+                        "question_kind": "IDENTITY",
+                        "question_focus": "bread subtype",
+                        "question_examples": ["khubz", "pita bread"],
+                        "source_question_policy": "ALWAYS_ASK",
+                        "source_trigger_reason": "legacy prompt output",
+                        "learned_source_distribution": [],
+                        "selected_identity": {
+                            "candidate_id": "",
+                            "label": "",
+                            "food_item_id": "",
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(grouped["food_groups"][0]["source_question_policy"], "ask_generic")
+
+    def test_reasoning_response_format_contains_group_owned_clarification_actions_only(self) -> None:
+        from app.services.reasoning_schema import reasoning_response_format
+
+        response_format = reasoning_response_format()
+        schema = response_format["json_schema"]["schema"]
+        self.assertNotIn("clarification_schema", schema["properties"])
+        self.assertNotIn("trace_id", schema["properties"])
+
+        group = schema["properties"]["food_groups"]["items"]
+        clarification = group["properties"]["clarification_actions"]["items"]
+        self.assertEqual(clarification["type"], "object")
+        self.assertFalse(clarification["additionalProperties"])
+        self.assertNotIn("question_id", clarification["properties"])
+        self.assertNotIn("group_id", clarification["properties"])
+        self.assertIn("question_focus", clarification["required"])
+        self.assertIn("answer_type", clarification["required"])
+        self.assertIn("choices", clarification["required"])
+        self.assertIn("validation_hints", clarification["required"])
+        self.assertIn("required", clarification["required"])
+
+        answer_type_enum = set(clarification["properties"]["answer_type"]["enum"])
+        self.assertEqual(
+            answer_type_enum,
+            {
+                "single_choice",
+                "multi_choice",
+                "free_text",
+                "confirm",
+            },
+        )
+        self.assertEqual(
+            set(clarification["properties"]["kind"]["enum"]),
+            {
+                "AFFIRMATION",
+                "CHOICE",
+                "DETAIL",
+                "FREE_TEXT",
+                "IDENTITY",
+                "QUANTITY",
+                "SOURCE_ORIGIN",
+            },
+        )
+        self.assertEqual(
+            set(clarification["properties"]["type"]["enum"]),
+            {
+                "AFFIRMATION",
+                "CHOICE",
+                "SOURCE_ORIGIN",
+                "QUANTITY",
+                "FREE_TEXT",
+            },
+        )
+
+    def test_grouped_reasoning_ignores_root_clarification_schema(self) -> None:
+        from app.services.reasoning_schema import coerce_reasoning_response
+
+        grouped = coerce_reasoning_response(
+            {
+                "action": "ASK_CHOICE",
+                "meal_state": "PENDING_INTERVIEW",
+                "trace_id": "trace-group-contract",
+                "decision_rationale": "bread identity still needs confirmation",
+                "gate_reason": "top candidates are too close",
+                "segment_count": 1,
+                "food_group_count": 1,
+                "food_groups": [
+                    {
+                        "group_id": "group-bread",
+                        "group_label": "Flatbread",
+                        "group_action": "ASK_CHOICE",
+                        "group_state": "PENDING_INTERVIEW",
+                        "primary_segment_id": "segment-bread",
+                        "segment_ids": ["segment-bread"],
+                        "selected_candidate_id": "candidate-khubz",
+                        "visual_evidence": ["flatbread"],
+                        "missing_evidence": ["bread subtype"],
+                        "decision_rationale": "flatbread candidates are ambiguous",
+                        "gate_reason": "bread subtype required",
+                        "clarification_needed": True,
+                        "clarification_actions": [
+                            {
+                                "type": "CHOICE",
+                                "kind": "IDENTITY",
+                                "user_prompt": "Which bread?",
+                                "answer_type": "single_choice",
+                                "choices": [
+                                    {"label": "Brown khubz", "quick_prompt": "Brown khubz"},
+                                    {"label": "Whole wheat pita bread", "quick_prompt": "Whole wheat pita bread"},
+                                ],
+                                "allow_other": True,
+                                "other_label": "Other",
+                                "required": True,
+                                "reason": "bread subtype required",
+                                "validation_hints": {"required": True},
+                                "question_focus": "bread type",
+                            }
+                        ],
+                        "top_3": [_candidate_payload(), _candidate_payload(), _candidate_payload()],
+                    }
+                ],
+                "clarification_schema": [
+                    {
+                        "question_id": "group-bread:identity",
+                        "group_id": "group-bread",
+                        "group_label": "Flatbread",
+                        "question_kind": "identity",
+                        "question_focus": "bread type",
+                        "answer_type": "single_choice",
+                        "required": True,
+                        "segment_ids": ["segment-bread"],
+                        "primary_segment_id": "segment-bread",
+                        "choices": ["Brown khubz", "Whole wheat pita bread", "Tandoori roti"],
+                        "validation_hints": {"required": True, "min_choices": 1, "max_choices": 1},
+                    }
+                ],
+            }
+        )
+
+        group = grouped["food_groups"][0]
+        self.assertTrue(group["clarification_needed"])
+        self.assertEqual(
+            [action["type"] for action in group["clarification_actions"]],
+            ["CHOICE"],
+        )
+        self.assertNotIn("clarification_schema", grouped)
+        self.assertEqual(
+            [choice["label"] for choice in group["clarification_actions"][0]["choices"]],
+            ["Brown khubz", "Whole wheat pita bread"],
+        )

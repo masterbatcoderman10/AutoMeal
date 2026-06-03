@@ -1879,7 +1879,7 @@ function buildSkillManifest(cwd, skillsDir = null) {
     kind: 'skills',
   }] : [
     {
-      root: '.agent/skills',
+      root: '.agents/skills',
       path: path.join(cwd, '.claude', 'skills'),
       scope: 'project',
       kind: 'skills',
@@ -1909,7 +1909,7 @@ function buildSkillManifest(cwd, skillsDir = null) {
       kind: 'skills',
     },
     {
-      root: '.agent/skills',
+      root: '.agents/skills',
       path: getGlobalSkillsBase('claude'),
       scope: 'global',
       kind: 'skills',
@@ -1921,14 +1921,14 @@ function buildSkillManifest(cwd, skillsDir = null) {
       kind: 'skills',
     },
     {
-      root: '.agent/get-shit-done/skills',
+      root: '.agents/get-shit-done/skills',
       path: path.join(os.homedir(), '.claude', 'get-shit-done', 'skills'),
       scope: 'import-only',
       kind: 'skills',
       deprecated: true,
     },
     {
-      root: '.agent/commands/gsd',
+      root: '.agents/commands/gsd',
       path: path.join(os.homedir(), '.claude', 'commands', 'gsd'),
       scope: 'legacy-commands',
       kind: 'commands',

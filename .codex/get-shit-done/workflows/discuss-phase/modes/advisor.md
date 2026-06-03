@@ -100,7 +100,7 @@ research agents.
 
      Research this gray area and return a structured comparison table with rationale.
      ${AGENT_SKILLS_ADVISOR}",
-     subagent_type="general-purpose",
+     subagent_type="gsd-advisor-researcher",
      model="{ADVISOR_MODEL}",
      description="Research: {area_name}"
    )

@@ -31,6 +31,19 @@ class SegmentDecision:
     confidence: float | None
 
 
+def segment_debug_label(segment: SegmentDecision | Mapping[str, Any] | object, *, default: str = "unlabeled food") -> str:
+    if isinstance(segment, Mapping):
+        raw_hint = segment.get("label_hint")
+    else:
+        raw_hint = getattr(segment, "label_hint", None)
+
+    if isinstance(raw_hint, str):
+        normalized = " ".join(raw_hint.strip().split())
+        if normalized:
+            return normalized
+    return default
+
+
 def _resolve_image_reference(image_url: str) -> str:
     if image_url.startswith(("http://", "https://", "data:")):
         return image_url
@@ -98,8 +111,14 @@ def segment_prompt(image_url: str) -> list[dict[str, Any]]:
                     "text": (
                         "You are an image-segmentation assistant for meal photos. "
                         "Return food-related regions only. "
-                        "Represent each distinct visible food region or container as one box, "
-                        "grouping obvious same-food clusters that belong together. "
+                        "Represent each isolated visible food/component as one box, "
+                        "grouping only obvious same-food clusters that belong together. "
+                        "Do not create compound meal boxes for adjacent foods: bread with curry, "
+                        "rice with curry, sauce with bread, eggs with curry, or side-by-side foods "
+                        "must be separate segments unless physically integrated as a stuffed roll, "
+                        "sandwich, wrap, or mixed rice dish. "
+                        "Breads must be their own segments; keep chapatti/chapati, parota/paratha, "
+                        "khubz, pita, naan, and roti separate from nearby curry/stew/sauce. "
                         "Create separate boxes only when the same food appears in clearly separate locations. "
                         "Ignore tiny garnish, condiment drops, sauces, and minor crumbs unless they are "
                         "substantial enough to be read as a meaningful side. "
@@ -480,6 +499,7 @@ __all__ = [
     "SEGMENT_MIN_AREA",
     "WEAK_SEGMENT_CONFIDENCE_THRESHOLD",
     "SegmentDecision",
+    "segment_debug_label",
     "dedupe_overlapping_segments",
     "segment_prompt",
     "segment_response_format",

@@ -34,6 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live OpenRouter smoke probe for MealTracker vision stages.")
     parser.add_argument("--mode", choices=["detect", "segment", "label", "all"], required=True)
     parser.add_argument("--sample", required=True, help="Path to sample meal image.")
+    parser.add_argument(
+        "--detect-model",
+        default=None,
+        help="Optional detect-model override for detect/all runs.",
+    )
     return parser.parse_args()
 
 
@@ -70,13 +75,14 @@ def _save_temp_crop(source_image_path: Path, normalized_box: list[float], crops_
     return crop_path
 
 
-async def _run_detect(sample_path: Path) -> dict[str, object]:
+async def _run_detect(sample_path: Path, *, detect_model: str | None = None) -> dict[str, object]:
     settings = get_settings()
     client = get_llm_client()
+    model_name = detect_model or settings.DETECT_MODEL
     decision = await detect_food_photo(
         str(sample_path),
         llm_client=client,
-        model=settings.DETECT_MODEL,
+        model=model_name,
     )
     return {
         "mode": "detect",
@@ -146,9 +152,15 @@ async def _run_label(
     }
 
 
-async def run(mode: Mode, sample_path: Path, crops_dir: Path) -> dict[str, object]:
+async def run(
+    mode: Mode,
+    sample_path: Path,
+    crops_dir: Path,
+    *,
+    detect_model: str | None = None,
+) -> dict[str, object]:
     if mode == "detect":
-        return await _run_detect(sample_path)
+        return await _run_detect(sample_path, detect_model=detect_model)
     if mode == "segment":
         _, payload = await _run_segment(sample_path)
         if payload["segment_count"] == 0:
@@ -157,7 +169,7 @@ async def run(mode: Mode, sample_path: Path, crops_dir: Path) -> dict[str, objec
     if mode == "label":
         return await _run_label(sample_path, crops_dir)
 
-    detect_payload = await _run_detect(sample_path)
+    detect_payload = await _run_detect(sample_path, detect_model=detect_model)
     if detect_payload["decision"]["next_action"] != "segment":
         raise RuntimeError(f"detect stage stopped pipeline: {detect_payload['decision']}")
     segments, segment_payload = await _run_segment(sample_path)
@@ -191,7 +203,12 @@ async def main() -> int:
     crops_temp_dir = tempfile.TemporaryDirectory()
     crops_dir = Path(crops_temp_dir.name) / "crops"
     try:
-        payload = await run(args.mode, prepared_sample_path, crops_dir)
+        payload = await run(
+            args.mode,
+            prepared_sample_path,
+            crops_dir,
+            detect_model=args.detect_model,
+        )
         print(json.dumps(payload, indent=2))
         return 0
     finally:

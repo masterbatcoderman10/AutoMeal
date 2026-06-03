@@ -276,6 +276,8 @@ No project skills found. Add skills to any of: `.claude/skills/`, `.agents/skill
 
 Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync.
 
+When the user asks for "verification" or to "verify" work, treat that as a `$gsd-verify-work` style operational verification request, not just a code review. At minimum, rebuild and redeploy the affected service(s) before verifying behavior. If the user also asks for a reset, clean slate, blank DB, or equivalent wording, include a clean-state redeploy as part of verification.
+
 Use these entry points:
 - `/gsd-quick` for small fixes, doc updates, and ad-hoc tasks
 - `/gsd-debug` for investigation and bug fixing

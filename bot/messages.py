@@ -22,8 +22,83 @@ def format_soft_failure_message() -> str:
 def format_unresolved_match_message(meal_id: str) -> str:
     return (
         f"I see your meal (ID: {meal_id[:8]}), but I don't yet recognize it. "
-        "I flagged it for follow-up identification."
+        "I need one quick follow-up before I log it."
     )
+
+
+def format_interview_reminder_message(meal_id: str) -> str:
+    return f"Still need your reply for meal {meal_id[:8]} before I can finish logging it."
+
+
+def format_grounding_pending_message(meal_id: str) -> str:
+    return (
+        f"Thanks. Meal {meal_id[:8]} still needs packaged or restaurant grounding, "
+        "so I've queued the next step and won't write final entries until it completes."
+    )
+
+
+def format_grounding_in_progress_message(meal_id: str) -> str:
+    return (
+        f"Meal {meal_id[:8]} is still finishing packaged or restaurant grounding. "
+        "I'll send the final entries when it completes."
+    )
+
+
+def format_grounding_blocker_message(
+    meal_id: str,
+    *,
+    blocker: str,
+    saved_as_unverified: bool,
+) -> str:
+    if saved_as_unverified:
+        return (
+            f"I hit a grounding blocker for meal {meal_id[:8]}: {blocker}. "
+            "I saved the confirmed items as unverified and marked them for grounding follow-up."
+        )
+    return (
+        f"I hit a grounding blocker for meal {meal_id[:8]}: {blocker}. "
+        "I couldn't safely save the meal yet, so it is on hold until that blocker is resolved."
+    )
+
+
+def format_interview_confirmation_message(items: list[dict], *, action: str = "log it") -> str:
+    if not items:
+        return f"Please confirm before I write this. Reply `confirm` to {action}."
+    lines = ["Confirm before I write:"]
+    for item in items:
+        segment_id = item.get("segment_id") or "item"
+        name = item.get("name") or "Unknown food"
+        quantity = item.get("quantity_display")
+        portion = _portion_phrase(str(item.get("portion_bucket") or "STANDARD"))
+        extra_bits = [portion]
+        source_type = str(item.get("source_type") or "").upper()
+        if source_type == "PACKAGED" and item.get("brand_name"):
+            extra_bits.append(str(item["brand_name"]))
+        elif source_type == "RESTAURANT" and item.get("restaurant_name"):
+            extra_bits.append(str(item["restaurant_name"]))
+        if quantity:
+            extra_bits.append(str(quantity))
+        suffix = f" ({' | '.join(extra_bits)})" if extra_bits else ""
+        lines.append(f"{segment_id}: {name}{suffix}")
+    lines.append(f"Reply `confirm` to {action}, or send corrections like `first is paneer, second is lentil soup`.")
+    return "\n".join(lines)
+
+
+def format_fix_confirmation_message(payload: dict) -> str:
+    diff = payload.get("diff", {})
+    side_effects = payload.get("side_effects", {})
+    changed = ", ".join(diff.get("changed_fields", [])) or "details"
+    visual_note = (
+        "linked visual will be invalidated"
+        if side_effects.get("invalidated_visuals")
+        else "no visual invalidation"
+    )
+    nutrition_note = (
+        "nutrition will be recomputed"
+        if side_effects.get("recompute_nutrition")
+        else "nutrition unchanged"
+    )
+    return f"Confirm fix for {payload.get('entry_id')}: {changed}. {visual_note}; {nutrition_note}."
 
 
 @dataclass(frozen=True)
@@ -32,6 +107,7 @@ class CompletionItem:
     portion_bucket: str
     identification_method: str
     is_verified: bool
+    quantity_label: str | None = None
     calories: float | None = None
     protein_g: float | None = None
     carbs_g: float | None = None
@@ -62,6 +138,15 @@ def format_result_sentence(labels: list[str], weak_labels: set[str] | None = Non
 
 def _normalize_portion(portion_bucket: str) -> str:
     return portion_bucket.replace("PortionBucket.", "") if portion_bucket else "unknown"
+
+
+def _portion_phrase(portion_bucket: str) -> str:
+    normalized = _normalize_portion(portion_bucket).upper()
+    if normalized == "SMALL":
+        return "~small portion"
+    if normalized == "LARGE":
+        return "~large portion"
+    return "~standard portion"
 
 
 def _format_number(value: float) -> str:
@@ -133,7 +218,7 @@ def format_match_completion_message(items: list[CompletionItem]) -> str:
     lines: list[str] = []
     for item in items:
         lines.append(
-            f"{item.food_name} | portion={_normalize_portion(item.portion_bucket)} | "
+            f"{item.food_name} | {_portion_phrase(item.portion_bucket)} | "
             f"method={item.identification_method} | verified={str(item.is_verified).lower()}"
         )
         lines.append(_format_item_nutrition(item))
@@ -145,11 +230,32 @@ def format_match_completion_message(items: list[CompletionItem]) -> str:
     return "\n".join(lines)
 
 
+def format_recent_fix_targets(recent_entries: list[dict]) -> str:
+    if not recent_entries:
+        return ""
+
+    lines = ["Fix targets:"]
+    for index, entry in enumerate(recent_entries, start=1):
+        label = entry.get("food_name") or "Unknown food"
+        quantity = entry.get("quantity_display")
+        suffix = f" ({quantity})" if quantity else ""
+        short_id = entry.get("short_id") or str(entry.get("id") or "")[:8]
+        lines.append(f"{index}. {short_id} {label}{suffix}")
+    lines.append("Use /fix 1 or /fix <id>.")
+    return "\n".join(lines)
+
+
 __all__ = [
     "CompletionItem",
     "format_ack_message",
     "format_error_message",
+    "format_interview_confirmation_message",
+    "format_interview_reminder_message",
+    "format_fix_confirmation_message",
+    "format_grounding_blocker_message",
+    "format_grounding_pending_message",
     "format_match_completion_message",
+    "format_recent_fix_targets",
     "format_result_sentence",
     "format_soft_failure_message",
     "format_start_message",

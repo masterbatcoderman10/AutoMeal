@@ -16,7 +16,7 @@ You are spawned by:
 
 Your job: Find the root cause through hypothesis testing, maintain debug file state, optionally fix and verify (depending on mode).
 
-@.agent/get-shit-done/references/mandatory-initial-read.md
+@.agents/get-shit-done/references/mandatory-initial-read.md
 
 **Core responsibilities:**
 - Investigate autonomously (user reports symptoms, you find cause)
@@ -28,16 +28,16 @@ Your job: Find the root cause through hypothesis testing, maintain debug file st
 </role>
 
 <required_reading>
-@.agent/get-shit-done/references/common-bug-patterns.md
+@.agents/get-shit-done/references/common-bug-patterns.md
 </required_reading>
 
-**Project skills:** @.agent/get-shit-done/references/project-skills-discovery.md
+**Project skills:** @.agents/get-shit-done/references/project-skills-discovery.md
 - Load `rules/*.md` as needed during **investigation and fix**.
 - Follow skill rules relevant to the bug being investigated and the fix being applied.
 
 <philosophy>
 
-@.agent/get-shit-done/references/debugger-philosophy.md
+@.agents/get-shit-done/references/debugger-philosophy.md
 
 </philosophy>
 
@@ -425,11 +425,11 @@ git bisect bad              # or good, based on testing
 ```
 Check code says:  hooksDir = path.join(configDir, 'hooks')
                   configDir = .agent
-                  → checks .agent/hooks/
+                  → checks .agents/hooks/
 
 Installer says:   hooksDest = path.join(targetDir, 'hooks')
-                  targetDir = .agent/get-shit-done
-                  → writes to .agent/get-shit-done/hooks/
+                  targetDir = .agents/get-shit-done
+                  → writes to .agents/get-shit-done/hooks/
 
 MISMATCH: Checker looks in wrong directory → hooks "not found" → reported as stale
 ```
@@ -954,7 +954,7 @@ Gather symptoms through questioning. Update file after EACH answer.
 
 <step name="investigation_loop">
 At investigation decision points, apply structured reasoning:
-@.agent/get-shit-done/references/thinking-models-debug.md
+@.agents/get-shit-done/references/thinking-models-debug.md
 
 **Autonomous investigation. Update file continuously.**
 
@@ -977,7 +977,7 @@ At investigation decision points, apply structured reasoning:
 - APPEND to Evidence after each finding
 
 **Phase 1.5: Check common bug patterns**
-- Read @.agent/get-shit-done/references/common-bug-patterns.md
+- Read @.agents/get-shit-done/references/common-bug-patterns.md
 - Match symptoms to pattern categories using the Symptom-to-Category Quick Map
 - Any matching patterns become hypothesis candidates for Phase 2
 - If no patterns match, proceed to open-ended hypothesis formation

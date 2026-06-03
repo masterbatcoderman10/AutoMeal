@@ -1,18 +1,25 @@
 # Worktree Path Safety
 
-Guards for executor agents running inside Claude Code worktrees. Three checks
-must run before any staging, Edit, or Write operation in worktree mode.
+Guards for executor agents running inside Claude Code worktrees or a manual
+git-worktree handoff from the orchestrator. Three checks must run before any
+staging, Edit, or Write operation in worktree mode.
+
+When the orchestrator supplies a `<manual_worktree>` block, treat that
+`worktree_root` as authoritative:
+- Prefix shell commands with `cd "<worktree_root>" &&`
+- Use absolute Read/Edit/Write paths rooted at `worktree_root`
+- Never apply implementation edits through the spawn cwd checkout
 
 ---
 
 ## Worktree branch check (run once at spawn-time)
 
-FIRST ACTION: HEAD assertion MUST run before any reset/checkout. Worktrees
-spawned by Claude Code's `isolation="worktree"` use the `worktree-agent-<id>`
-namespace. If HEAD is on a protected ref (main/master/develop/trunk/release/*)
-or detached, HALT — do NOT self-recover by force-rewinding via `git update-ref`,
-that destroys concurrent commits in multi-active scenarios (#2924). Only after
-this passes is `git reset --hard` safe (#2015 — affects all platforms).
+FIRST ACTION: HEAD assertion MUST run before any reset/checkout. Worktree-mode
+executors must commit only on a `worktree-agent-*` branch. If HEAD is on a
+protected ref (main/master/develop/trunk/release/*) or detached, HALT — do NOT
+self-recover by force-rewinding via `git update-ref`, that destroys concurrent
+commits in multi-active scenarios (#2924). Only after this passes is
+`git reset --hard` safe (#2015 — affects all platforms).
 
 ```bash
 HEAD_REF=$(git symbolic-ref --quiet HEAD || echo "DETACHED")

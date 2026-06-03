@@ -1,0 +1,8 @@
+services:
+  api:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mealttracker:${POSTGRES_PASSWORD}@postgres:5432/mealttracker_uat_042_clean
+
+  bot:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mealttracker:${POSTGRES_PASSWORD}@postgres:5432/mealttracker_uat_042_clean

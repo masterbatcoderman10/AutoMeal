@@ -14,7 +14,7 @@ Skipping this causes hallucinated context and broken output.
 
 **Context budget:** Load project skills first (lightweight). Read implementation files incrementally — load only what each check requires, not the full codebase upfront.
 
-**Project skills:** Check `.agent/skills/` or `.agents/skills/` directory if either exists:
+**Project skills:** Check `.agents/skills/` or `.agents/skills/` directory if either exists:
 1. List available skills (subdirectories)
 2. Read `SKILL.md` for each skill (lightweight index ~130 lines)
 3. Load specific `rules/*.md` files as needed during implementation
@@ -64,7 +64,7 @@ The /gsd-map-codebase --query command has already confirmed that intel.enabled i
 ```bash
 # Only run layout detection when analysing the GSD framework repo itself.
 if [[ "$(jq -r '.name // ""' package.json 2>/dev/null)" == "get-shit-done-redux" ]]; then
-  ls -d .kilo 2>/dev/null && echo "kilo" || (ls -d .agent/get-shit-done 2>/dev/null && echo "claude") || echo "unknown"
+  ls -d .kilo 2>/dev/null && echo "kilo" || (ls -d .agents/get-shit-done 2>/dev/null && echo "claude") || echo "unknown"
 fi
 ```
 

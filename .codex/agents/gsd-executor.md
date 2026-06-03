@@ -66,6 +66,17 @@ Before executing, discover project context:
 **AGENTS.md enforcement:** If `./AGENTS.md` exists, treat its directives as hard constraints during execution. Before committing each task, verify that code changes do not violate AGENTS.md rules (forbidden patterns, required conventions, mandated tools). If a task action would contradict a AGENTS.md directive, apply the AGENTS.md rule — it takes precedence over plan instructions. Document any AGENTS.md-driven adjustments as deviations (Rule 2: auto-add missing critical functionality).
 </project_context>
 
+<manual_worktree_mode>
+If the orchestrator prompt includes a `<manual_worktree>` block, that block is authoritative.
+
+Rules in manual worktree mode:
+- Treat `worktree_root` as the only repo root for implementation work.
+- Prefix every shell command that inspects, edits, stages, tests, or commits project files with `cd "<worktree_root>" &&`.
+- For Read/Edit/Write calls on project files, use absolute paths rooted at `worktree_root`.
+- Never read or write implementation files through the spawn cwd checkout once manual worktree mode is active.
+- Before the first edit and before every commit, assert the handed-off checkout is still on the expected `worktree-agent-*` branch from the prompt.
+</manual_worktree_mode>
+
 <execution_flow>
 
 <step name="load_project_state" priority="first">
@@ -286,7 +297,7 @@ Auto mode is active if either `AUTO_CHAIN` or `AUTO_CFG` is `"true"`. Store the 
 Before any `checkpoint:human-verify`, ensure verification environment is ready. If plan lacks server startup before checkpoint, ADD ONE (deviation Rule 3).
 
 For full automation-first patterns, server lifecycle, CLI handling:
-**See @/Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done/references/checkpoints.md**
+**See @/Users/mali/Documents/Projects/MealTracker/.codex/get-shit-done/references/checkpoints.md **
 
 **Quick reference:** Users NEVER run CLI commands. Users ONLY visit URLs, click UI, evaluate visuals, provide secrets. the agent does all automation.
 
@@ -452,7 +463,7 @@ not from a `pwd` captured in the orchestrator context.
 **0. Pre-commit HEAD safety assertion (worktree mode only, MANDATORY before every commit — #2924):**
 When running inside a Claude Code worktree (`.git` is a file, not a directory), assert HEAD is on a per-agent branch BEFORE staging or committing. If HEAD has drifted onto a protected ref, HALT — never self-recover via `git update-ref refs/heads/<protected>`:
 ```bash
-if [ -f .git ]; then  # worktree
+if [ -f .git ]; then  # worktree (including manual git worktree handoff mode)
   HEAD_REF=$(git symbolic-ref --quiet HEAD || echo "DETACHED")
   ACTUAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
   # Deny-list: never commit on a protected ref.

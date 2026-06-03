@@ -43,13 +43,13 @@ class EmbeddingServiceContractTests(unittest.IsolatedAsyncioTestCase):
             embedding = await embedding_service.embed_image_for_document(
                 image_path=sample_path,
                 llm_client=client,
-                model="google/gemini-embedding-2-preview",
+                model="google/gemini-embedding-2",
             )
 
             self.assertEqual(len(embedding), embedding_service.EMBEDDING_DIMENSION)
             client.embed_multimodal.assert_awaited_once()
             _, kwargs = client.embed_multimodal.call_args
-            self.assertEqual(kwargs["model"], "google/gemini-embedding-2-preview")
+            self.assertEqual(kwargs["model"], "google/gemini-embedding-2")
             self.assertEqual(kwargs["output_dimensionality"], embedding_service.EMBEDDING_DIMENSION)
             self.assertEqual(kwargs["task_type"], embedding_service.RETRIEVAL_DOCUMENT)
             self.assertEqual(kwargs["content"][1]["type"], "image_url")
@@ -62,17 +62,21 @@ class EmbeddingServiceContractTests(unittest.IsolatedAsyncioTestCase):
         embedding = await embedding_service.embed_text_for_query(
             query_text="rice and lentils",
             llm_client=client,
-            model="google/gemini-embedding-2-preview",
+            model="google/gemini-embedding-2",
         )
 
         self.assertEqual(len(embedding), embedding_service.EMBEDDING_DIMENSION)
         client.embed_multimodal.assert_awaited_once()
         kwargs = client.embed_multimodal.call_args.kwargs
-        self.assertEqual(kwargs["model"], "google/gemini-embedding-2-preview")
+        self.assertEqual(kwargs["model"], "google/gemini-embedding-2")
         self.assertEqual(kwargs["output_dimensionality"], embedding_service.EMBEDDING_DIMENSION)
         self.assertEqual(kwargs["task_type"], embedding_service.RETRIEVAL_QUERY)
         self.assertEqual(kwargs["content"][0]["type"], "text")
         self.assertEqual(kwargs["content"][0]["text"], "rice and lentils")
+
+    def test_prepare_image_content_preserves_remote_url_inputs(self) -> None:
+        content = embedding_service._prepare_image_content("https://example.com/crop.jpg")
+        self.assertEqual(content[1]["image_url"]["url"], "https://example.com/crop.jpg")
 
     async def test_wrong_length_embedding_is_rejected_before_return(self) -> None:
         client = AsyncMock()
@@ -86,7 +90,7 @@ class EmbeddingServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 await embedding_service.embed_image_for_document(
                     image_path=sample_path,
                     llm_client=client,
-                    model="google/gemini-embedding-2-preview",
+                    model="google/gemini-embedding-2",
                 )
 
             client.embed_multimodal.assert_awaited_once()
@@ -105,7 +109,7 @@ class EmbeddingServiceContractTests(unittest.IsolatedAsyncioTestCase):
             embedding = await embedding_service.embed_image_for_document(
                 image_path=sample_path,
                 llm_client=client,
-                model="google/gemini-embedding-2-preview",
+                model="google/gemini-embedding-2",
             )
 
             self.assertEqual(len(embedding), embedding_service.EMBEDDING_DIMENSION)
@@ -123,7 +127,7 @@ class EmbeddingServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 await embedding_service.embed_image_for_document(
                     image_path=sample_path,
                     llm_client=client,
-                    model="google/gemini-embedding-2-preview",
+                    model="google/gemini-embedding-2",
                 )
 
             self.assertEqual(client.embed_multimodal.await_count, 1)
@@ -176,7 +180,7 @@ class OpenRouterClientContractTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(ValueError):
             await client.embed_multimodal(
-                model="google/gemini-embedding-2-preview",
+                model="google/gemini-embedding-2",
                 content=[{"type": "text", "text": "hello"}],
                 output_dimensionality=embedding_service.EMBEDDING_DIMENSION,
             )
@@ -184,7 +188,7 @@ class OpenRouterClientContractTests(unittest.IsolatedAsyncioTestCase):
         client._http.post.assert_awaited_once_with(  # type: ignore[attr-defined]
             "/embeddings",
             json={
-                "model": "google/gemini-embedding-2-preview",
+                "model": "google/gemini-embedding-2",
                 "input": [{"content": [{"type": "text", "text": "hello"}]}],
                 "dimensions": embedding_service.EMBEDDING_DIMENSION,
                 "encoding_format": "float",
@@ -199,7 +203,7 @@ class OpenRouterClientContractTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(ValueError):
             await client.embed_multimodal(
-                model="google/gemini-embedding-2-preview",
+                model="google/gemini-embedding-2",
                 content=[{"type": "text", "text": "hello"}],
             )
 
@@ -217,7 +221,7 @@ class OpenRouterClientContractTests(unittest.IsolatedAsyncioTestCase):
         client._http = _FakeHTTPClient(response)  # type: ignore[assignment]
 
         embedding = await client.embed_multimodal(
-            model="google/gemini-embedding-2-preview",
+            model="google/gemini-embedding-2",
             content=[{"type": "text", "text": "rice and lentils"}],
             output_dimensionality=embedding_service.EMBEDDING_DIMENSION,
             task_type=embedding_service.RETRIEVAL_QUERY,
@@ -227,7 +231,7 @@ class OpenRouterClientContractTests(unittest.IsolatedAsyncioTestCase):
         client._http.post.assert_awaited_once_with(  # type: ignore[attr-defined]
             "/embeddings",
             json={
-                "model": "google/gemini-embedding-2-preview",
+                "model": "google/gemini-embedding-2",
                 "input": [{"content": [{"type": "text", "text": "rice and lentils"}]}],
                 "dimensions": embedding_service.EMBEDDING_DIMENSION,
                 "encoding_format": "float",

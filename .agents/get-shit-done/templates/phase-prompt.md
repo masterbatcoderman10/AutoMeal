@@ -38,10 +38,10 @@ Output: [What artifacts will be created]
 </objective>
 
 <execution_context>
-@.agent/get-shit-done/workflows/execute-plan.md
-@.agent/get-shit-done/templates/summary.md
+@.agents/get-shit-done/workflows/execute-plan.md
+@.agents/get-shit-done/templates/summary.md
 [If plan contains checkpoint tasks (type="checkpoint:*"), add:]
-@.agent/get-shit-done/references/checkpoints.md
+@.agents/get-shit-done/references/checkpoints.md
 </execution_context>
 
 <context>
@@ -85,7 +85,7 @@ Output: [What artifacts will be created]
   <done>[Acceptance criteria]</done>
 </task>
 
-<!-- For checkpoint task examples and patterns, see @.agent/get-shit-done/references/checkpoints.md -->
+<!-- For checkpoint task examples and patterns, see @.agents/get-shit-done/references/checkpoints.md -->
 
 <task type="checkpoint:decision" gate="blocking">
   <decision>[What needs deciding]</decision>
@@ -278,7 +278,7 @@ TDD features get dedicated plans with `type: tdd`.
 → Yes: Create a TDD plan
 → No: Standard task in standard plan
 
-See `.agent/get-shit-done/references/tdd.md` for TDD plan structure.
+See `.agents/get-shit-done/references/tdd.md` for TDD plan structure.
 
 ---
 
@@ -382,9 +382,9 @@ Output: Working dashboard component.
 </objective>
 
 <execution_context>
-@.agent/get-shit-done/workflows/execute-plan.md
-@.agent/get-shit-done/templates/summary.md
-@.agent/get-shit-done/references/checkpoints.md
+@.agents/get-shit-done/workflows/execute-plan.md
+@.agents/get-shit-done/templates/summary.md
+@.agents/get-shit-done/references/checkpoints.md
 </execution_context>
 
 <context>
@@ -540,7 +540,7 @@ user_setup:
 
 **Result:** Execute-plan generates `{phase}-USER-SETUP.md` with checklist for the user.
 
-See `.agent/get-shit-done/templates/user-setup.md` for full schema and examples
+See `.agents/get-shit-done/templates/user-setup.md` for full schema and examples
 
 ---
 
@@ -607,4 +607,4 @@ Task completion ≠ Goal achievement. A task "create chat component" can complet
 5. Gaps found → fix plans created → execute → re-verify
 6. All must_haves pass → phase complete
 
-See `.agent/get-shit-done/workflows/verify-phase.md` for verification logic.
+See `.agents/get-shit-done/workflows/verify-phase.md` for verification logic.

@@ -79,11 +79,11 @@ Architecture not yet mapped. Follow existing patterns found in the codebase.
 
 **Fallback text:**
 ```
-No project skills found. Add skills to any of: `.agent/skills/`, `.agents/skills/`, `.cursor/skills/`, or `.github/skills/` with a `SKILL.md` index file.
+No project skills found. Add skills to any of: `.agents/skills/`, `.agents/skills/`, `.cursor/skills/`, or `.github/skills/` with a `SKILL.md` index file.
 ```
 
 **Discovery behavior:**
-- Scans `.agent/skills/`, `.agents/skills/`, `.cursor/skills/`, `.github/skills/` for subdirectories containing `SKILL.md`
+- Scans `.agents/skills/`, `.agents/skills/`, `.cursor/skills/`, `.github/skills/` for subdirectories containing `SKILL.md`
 - Extracts `name` and `description` from YAML frontmatter (supports multi-line descriptions)
 - Skips GSD's own installed skills (directories starting with `gsd-`)
 - Deduplicates by skill name across directories

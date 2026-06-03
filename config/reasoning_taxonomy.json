@@ -1,0 +1,93 @@
+{
+  "version": "04-04",
+  "nutrition_impact": {
+    "enabled": true,
+    "specificity_threshold": 0.25,
+    "high_impact_rules": [
+      {
+        "item_category": "rice",
+        "required_fields": ["grain_type", "preparation_style", "portion_visibility"],
+        "min_visible_fraction": 0.2
+      },
+      {
+        "item_category": "pasta",
+        "required_fields": ["pasta_type", "sauce_visibility", "portion_visibility"],
+        "min_visible_fraction": 0.2
+      },
+      {
+        "item_category": "noodles",
+        "required_fields": ["noodle_style", "sauce_visibility", "portion_visibility"],
+        "min_visible_fraction": 0.2
+      },
+      {
+        "item_category": "chicken",
+        "required_fields": ["cut_visibility", "cooking_method"],
+        "min_visible_fraction": 0.15
+      },
+      {
+        "item_category": "meat",
+        "required_fields": ["cut_visibility", "visible_fat_content"],
+        "min_visible_fraction": 0.15
+      }
+    ]
+  },
+  "quantity_unit_preferences": {
+    "open_units": [
+      "g",
+      "ml",
+      "oz",
+      "cup",
+      "piece",
+      "slice",
+      "serving",
+      "container",
+      "bowl"
+    ],
+    "discrete_units": [
+      "piece",
+      "slice",
+      "cup",
+      "container",
+      "glass",
+      "serving",
+      "bowl"
+    ],
+    "default_ranges": {
+      "liquid": {"min": 150, "max": 300, "unit": "ml"},
+      "rice": {"min": 90, "max": 160, "unit": "g"},
+      "curry": {"min": 220, "max": 340, "unit": "g"}
+    },
+    "question_budget_priority": [
+      "unit_visibility",
+      "portion_scale",
+      "serving_context",
+      "shared_plate_reference"
+    ]
+  },
+  "composite_food_handling": {
+    "default_strategy": "adaptive_split",
+    "split_trigger": {
+      "min_confidence": 0.72,
+      "min_visible_components": 2,
+      "requires_nutrition_impact": true
+    },
+    "components": [
+      "protein",
+      "vegetable",
+      "carb",
+      "sauce",
+      "oil"
+    ],
+    "fallback_behavior": {
+      "unknown_components": "ask_single_targeted_question",
+      "all_components_visible": "split_required"
+    }
+  },
+  "question_budget": {
+    "per_segment": 2,
+    "per_meal": 8,
+    "max_revisions": 2,
+    "identity_before_quantity": true,
+    "high_impact_gate_only": true
+  }
+}

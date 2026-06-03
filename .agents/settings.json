@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agent/hooks/gsd-check-update.js"
+            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agents/hooks/gsd-check-update.js"
           }
         ]
       },
@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .agent/hooks/gsd-session-state.sh"
+            "command": "bash .agents/hooks/gsd-session-state.sh"
           }
         ]
       },
@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agent/hooks/gsd-update-banner.js"
+            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agents/hooks/gsd-update-banner.js"
           }
         ]
       }
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agent/hooks/gsd-context-monitor.js",
+            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agents/hooks/gsd-context-monitor.js",
             "timeout": 10
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agent/hooks/gsd-read-injection-scanner.js",
+            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agents/hooks/gsd-read-injection-scanner.js",
             "timeout": 5
           }
         ]
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .agent/hooks/gsd-graphify-update.sh",
+            "command": "bash .agents/hooks/gsd-graphify-update.sh",
             "timeout": 5
           }
         ]
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .agent/hooks/gsd-phase-boundary.sh",
+            "command": "bash .agents/hooks/gsd-phase-boundary.sh",
             "timeout": 5
           }
         ]
@@ -74,7 +74,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agent/hooks/gsd-prompt-guard.js",
+            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agents/hooks/gsd-prompt-guard.js",
             "timeout": 5
           }
         ]
@@ -84,7 +84,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agent/hooks/gsd-read-guard.js",
+            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agents/hooks/gsd-read-guard.js",
             "timeout": 5
           }
         ]
@@ -94,7 +94,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agent/hooks/gsd-workflow-guard.js",
+            "command": "\"/Users/mali/.nvm/versions/node/v20.20.2/bin/node\" .agents/hooks/gsd-workflow-guard.js",
             "timeout": 5
           }
         ]
@@ -104,7 +104,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .agent/hooks/gsd-validate-commit.sh",
+            "command": "bash .agents/hooks/gsd-validate-commit.sh",
             "timeout": 5
           }
         ]

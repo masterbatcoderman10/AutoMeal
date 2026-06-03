@@ -48,7 +48,7 @@ Otherwise, load in this order:
 
 **a. MANIFEST.md** — the overall idea, requirements, and spike table with verdicts.
 
-**b. Findings skills** — glob `./.agent/skills/spike-findings-*/SKILL.md` and read any that exist, plus their `references/*.md`. These contain curated knowledge from prior wrap-ups.
+**b. Findings skills** — glob `./.agents/skills/spike-findings-*/SKILL.md` and read any that exist, plus their `references/*.md`. These contain curated knowledge from prior wrap-ups.
 
 **c. CONVENTIONS.md** — read `.planning/spikes/CONVENTIONS.md` if it exists. Established stack and patterns.
 
@@ -97,7 +97,18 @@ ls -d .planning/spikes/[0-9][0-9][0-9]-* 2>/dev/null | sort | tail -1
 Check `commit_docs` config:
 ```bash
 # SDK resolution: prefer local gsd-tools.cjs, fall back to global gsd-sdk (#3668)
-GSD_TOOLS="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/get-shit-done/bin/gsd-tools.cjs"
+GSD_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${RUNTIME_DIR:-}" ]; then
+  GSD_TOOLS="$RUNTIME_DIR/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.codex/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.agents/get-shit-done/bin/gsd-tools.cjs"
+elif [ -f "$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs" ]; then
+  GSD_TOOLS="$GSD_ROOT/.claude/get-shit-done/bin/gsd-tools.cjs"
+else
+  GSD_TOOLS="$GSD_ROOT/get-shit-done/bin/gsd-tools.cjs"
+fi
 if [ -f "$GSD_TOOLS" ]; then
   GSD_SDK="node $GSD_TOOLS"
 elif command -v gsd-sdk >/dev/null 2>&1; then
@@ -135,7 +146,7 @@ If `.planning/spikes/` has existing content, load context in this priority order
 
 **a. Conventions:** Read `.planning/spikes/CONVENTIONS.md` if it exists.
 
-**b. Findings skills:** Glob for `./.agent/skills/spike-findings-*/SKILL.md` and read any that exist, plus their `references/*.md` files.
+**b. Findings skills:** Glob for `./.agents/skills/spike-findings-*/SKILL.md` and read any that exist, plus their `references/*.md` files.
 
 **c. Manifest:** Read `.planning/spikes/MANIFEST.md` for the index of all spikes.
 

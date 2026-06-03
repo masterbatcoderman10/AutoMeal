@@ -17,3 +17,4 @@ pillow-heif==0.20.0
 structlog==24.4.0
 tenacity==9.0.0
 python-dotenv==1.0.1
+langfuse==4.7.0

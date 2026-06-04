@@ -1693,7 +1693,8 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_segment.identification_method, "INTERVIEW_BEST_EFFORT")
         self.assertFalse(final_segment.food.is_verified)
         self.assertTrue(final_segment.food.needs_grounding)
-        self.assertTrue(final_segment.create_food_visual)
+        self.assertFalse(final_segment.create_food_visual)
+        self.assertFalse(final_segment.visual_learning_eligible)
         self.assertEqual(captured["reasoning_state_json"].get("grounding_status"), "DEGRADED_SAVED")
         self.assertEqual(
             captured["reasoning_state_json"].get("grounding_failure", {}).get("category"),

@@ -508,6 +508,26 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return {"meal_entries": [], "food_visuals": [], "correction_events": []}
 
+        def _group_label_finalizer_outcomes(group_inputs):
+            outcomes = []
+            for group_input in group_inputs:
+                item = dict(group_input.confirmation_item)
+                item["name"] = "green chicken curry"
+                resolution = reasoning_service.final_resolution_from_confirmation(
+                    item=item,
+                    segment=group_input.segment,
+                    aliases=["green chicken curry"],
+                    trace_id=group_input.trace_id,
+                )
+                outcomes.append(
+                    SimpleNamespace(
+                        final_resolution=resolution,
+                        finalized_confirmation_item=item,
+                        audit_state={"group_id": group_input.group_id, "status": "SUCCEEDED"},
+                    )
+                )
+            return outcomes
+
         with patch.object(
             reasoning_service,
             "apply_final_meal_resolution",
@@ -606,6 +626,26 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return {"meal_entries": [], "food_visuals": [], "correction_events": []}
 
+        def _group_label_finalizer_outcomes(group_inputs):
+            outcomes = []
+            for group_input in group_inputs:
+                item = dict(group_input.confirmation_item)
+                item["name"] = "green chicken curry"
+                resolution = reasoning_service.final_resolution_from_confirmation(
+                    item=item,
+                    segment=group_input.segment,
+                    aliases=["green chicken curry"],
+                    trace_id=group_input.trace_id,
+                )
+                outcomes.append(
+                    SimpleNamespace(
+                        final_resolution=resolution,
+                        finalized_confirmation_item=item,
+                        audit_state={"group_id": group_input.group_id, "status": "SUCCEEDED"},
+                    )
+                )
+            return outcomes
+
         with patch.object(
             reasoning_service,
             "apply_final_meal_resolution",
@@ -621,7 +661,7 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             reasoning_service,
             "_run_group_finalizers",
-            new=AsyncMock(side_effect=lambda **kwargs: _echo_group_finalizer_outcomes(reasoning_service, kwargs["group_inputs"])),
+            new=AsyncMock(side_effect=lambda **kwargs: _group_label_finalizer_outcomes(kwargs["group_inputs"])),
         ):
             result = await reasoning_service.finalize_meal_from_reasoning(
                 session=session,

@@ -543,7 +543,12 @@ async def apply_final_meal_resolution(
                 ) or "identity correction"
 
         embedding = _coerce_embedding(resolution.segment_embedding)
-        if resolution.create_food_visual and embedding is not None:
+        should_create_food_visual = (
+            bool(resolution.create_food_visual)
+            and bool(resolution.visual_learning_eligible)
+            and bool(resolved_food.is_verified)
+        )
+        if should_create_food_visual and embedding is not None:
             if resolution.segment_cropped_image_url is None:
                 raise MealResolutionError(
                     "segment_cropped_image_url is required when create_food_visual is true and embedding exists"

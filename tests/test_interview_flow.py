@@ -1309,28 +1309,6 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
             "Explicit ready_to_confirm items must survive unchanged, including approval_status coverage.",
         )
 
-    def test_grounding_handoff_state_preserves_confirmation_context(self) -> None:
-        from app.services import interview_service
-
-        state = interview_service.build_grounding_reasoning_state(
-            confirmation_items=[
-                {
-                    "segment_id": "seg-1",
-                    "name": "Protein Bar",
-                    "source_type": "PACKAGED",
-                    "brand_name": "Acme",
-                }
-            ],
-            status="PENDING_HANDOFF",
-            prior_state={"existing": "keep"},
-        )
-
-        self.assertEqual(state["existing"], "keep")
-        self.assertTrue(state["grounding_required"])
-        self.assertTrue(state["post_interview_grounding"])
-        self.assertEqual(state["grounding_status"], "PENDING_HANDOFF")
-        self.assertEqual(state["confirmation_items"][0]["brand_name"], "Acme")
-
     def test_packaged_answer_creates_grounding_prep_resolution(self) -> None:
         from app.services import interview_service
 
@@ -1351,11 +1329,11 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolution.food.llm_reasoning, "NEEDS_GROUNDING")
         self.assertEqual(resolution.quantity_json["grounding_prep"]["status"], "NEEDS_GROUNDING")
 
-    async def test_finalize_confirmed_interview_keeps_packaged_grounding_handoff_with_finalized_metadata(self) -> None:
+    async def test_finalize_confirmed_interview_runs_packaged_grounding_inline_and_skips_handoff_state(self) -> None:
         from app.services import interview_service
 
         meal = SimpleNamespace(
-            id="meal-packaged-handoff",
+            id="meal-packaged-inline",
             processing_status=MealProcessingStatus.INTERVIEWING,
             reasoning_state_json={
                 "meal_reasoning": {
@@ -1395,6 +1373,7 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         )
         session = AsyncMock()
         session.add = Mock()
+        captured: dict[str, object] = {}
         confirmation_items = [
             {
                 "group_id": "group-bar",
@@ -1435,6 +1414,18 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                                         "restaurant_name": None,
                                         "correction_note": None,
                                         "supporting_details": ["store-bought packaged item"],
+                                        "serving_size_g": 68.0,
+                                        "calories": 240.0,
+                                        "protein_g": 20.0,
+                                        "carbs_g": 23.0,
+                                        "fat_g": 8.0,
+                                        "fiber_g": 6.0,
+                                        "is_verified": True,
+                                        "grounding_trace": {
+                                            "queries": ["Acme protein bar nutrition facts"],
+                                            "fetched_urls": ["https://acme.example/protein-bar"],
+                                            "stop_reason": "completed",
+                                        },
                                     }
                                 )
                             }
@@ -1444,7 +1435,27 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        with patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True):
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=1,
+                    FINALIZER_MODEL="google/gemini-3.1-flash-lite",
+                ),
+                create=True,
+            ),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
+        ):
             result = await interview_service.finalize_confirmed_interview(
                 session=session,
                 meal=meal,
@@ -1452,35 +1463,33 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 segments=[segment],
             )
 
-        self.assertTrue(result["grounding_required"])
-        self.assertEqual(meal.processing_status, MealProcessingStatus.INTERVIEWING)
-        self.assertTrue(meal.reasoning_state_json["grounding_required"])
-        self.assertTrue(meal.reasoning_state_json["post_interview_grounding"])
-        self.assertEqual(meal.reasoning_state_json["handoff_target"], "poll_post_interview_grounding")
-        self.assertEqual(
-            meal.reasoning_state_json["confirmation_items"][0]["name"],
-            "Acme Protein Bar",
-        )
-        self.assertEqual(meal.reasoning_state_json["confirmation_items"][0]["brand_name"], "Acme")
-        self.assertEqual(meal.reasoning_state_json["finalizer_groups"][0]["status"], "SUCCEEDED")
+        self.assertFalse(result.get("grounding_required", False))
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.COMPLETED)
+        self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "SUCCEEDED")
+        self.assertNotIn("handoff_target", captured["reasoning_state_json"])
+        self.assertFalse(captured["reasoning_state_json"].get("post_interview_grounding", False))
+        final_segment = captured["final_segments"][0]
+        self.assertFalse(final_segment.food.needs_grounding)
+        self.assertTrue(final_segment.food.is_verified)
+        self.assertEqual(final_segment.food.calories, 240.0)
+        self.assertIn("acme.example/protein-bar", final_segment.food.llm_reasoning or "")
 
-    async def test_finalize_confirmed_interview_degrades_malformed_finalizer_json_to_best_effort_save(self) -> None:
+    async def test_finalize_confirmed_interview_records_inline_grounding_failure_as_degraded_save(self) -> None:
         from app.services import interview_service
 
         meal = SimpleNamespace(
-            id="meal-finalizer-degraded",
+            id="meal-inline-grounding-degraded",
             processing_status=MealProcessingStatus.INTERVIEWING,
             reasoning_state_json={
                 "meal_reasoning": {
                     "food_groups": [
                         {
-                            "group_id": "group-curry",
-                            "group_label": "chicken curry",
-                            "question_kind": "DETAIL",
-                            "question_focus": "style of the curry",
-                            "group_actions": ["IDENTITY_CLARIFICATION_REQUIRED"],
-                            "primary_segment_id": "seg-curry-1",
-                            "segment_ids": ["seg-curry-1"],
+                            "group_id": "group-bar",
+                            "group_label": "protein bar",
+                            "question_kind": "IDENTITY",
+                            "group_actions": ["ASK_SOURCE_ORIGIN"],
+                            "primary_segment_id": "seg-bar-1",
+                            "segment_ids": ["seg-bar-1"],
                         }
                     ]
                 }
@@ -1488,20 +1497,21 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
             last_stage_started_at=None,
         )
         segment = SimpleNamespace(
-            id="seg-curry-1",
-            cropped_image_url="/data/uploads/crops/seg-curry-1.jpg",
+            id="seg-bar-1",
+            cropped_image_url="/data/uploads/crops/seg-bar-1.jpg",
             embedding=[0.11, 0.22, 0.33],
         )
         session = AsyncMock()
         session.add = Mock()
         confirmation_items = [
             {
-                "group_id": "group-curry",
-                "primary_segment_id": "seg-curry-1",
-                "segment_id": "seg-curry-1",
-                "segment_ids": ["seg-curry-1"],
-                "name": "Green masala",
-                "source_type": "HOME",
+                "group_id": "group-bar",
+                "primary_segment_id": "seg-bar-1",
+                "segment_id": "seg-bar-1",
+                "segment_ids": ["seg-bar-1"],
+                "name": "Protein Bar",
+                "source_type": "PACKAGED",
+                "brand_name": "Acme",
                 "portion_bucket": "STANDARD",
                 "approval_status": "CORRECTED",
                 "quantity_display": "1 bowl",
@@ -1522,6 +1532,15 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
             patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
             patch.object(
                 interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=1,
+                    FINALIZER_MODEL="google/gemini-3.1-flash-lite",
+                ),
+                create=True,
+            ),
+            patch.object(
+                interview_service,
                 "apply_final_meal_resolution",
                 new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
             ),
@@ -1535,8 +1554,14 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
 
         final_segment = captured["final_segments"][0]
         self.assertEqual(final_segment.identification_method, "INTERVIEW_BEST_EFFORT")
-        self.assertEqual(final_segment.food.canonical_name, "chicken curry (Green masala)")
+        self.assertFalse(final_segment.food.is_verified)
+        self.assertTrue(final_segment.food.needs_grounding)
         self.assertTrue(final_segment.create_food_visual)
+        self.assertEqual(captured["reasoning_state_json"].get("grounding_status"), "DEGRADED_SAVED")
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_failure", {}).get("category"),
+            "tool_execution",
+        )
         self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "DEGRADED")
 
     def test_source_origin_store_bought_preserves_state_and_requires_grounding(self) -> None:

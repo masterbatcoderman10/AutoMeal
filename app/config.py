@@ -27,11 +27,17 @@ class Settings(BaseSettings):
     FIRECRAWL_BASE_URL: str = "http://firecrawl-api:3002"
     FIRECRAWL_API_KEY: str = ""
     SEARXNG_BASE_URL: str = "http://searxng:8080"
+    FIRECRAWL_SEARCH_ENGINES: str = "google,duckduckgo,bing,brave"
+    FIRECRAWL_SEARCH_CATEGORIES: str = "general"
+    FIRECRAWL_MAX_RAM: float = 0.8
+    FIRECRAWL_MAX_CPU: float = 0.8
     GROUNDING_SEARCH_LIMIT: int = 5
     GROUNDING_MAX_TOOL_CALLS: int = 6
     GROUNDING_TOOL_TIMEOUT_S: float = 12.5
     GROUNDING_WALL_CLOCK_TIMEOUT_S: float = 90.0
     GROUNDING_SCRAPE_FORMAT: str = "markdown"
+    GROUNDING_RUNTIME_FALLBACK: str = "direct_searxng_search_then_firecrawl_scrape"
+    GROUNDING_SEQUENTIAL_SCRAPE_PROBE_COUNT: int = 5
     REASONING_MATCH_THRESHOLD: float = 0.90
     REASONING_TOP_CANDIDATE_FLOOR: float = 0.65
     REASONING_SEGMENT_PARALLELISM: int = 4
@@ -76,6 +82,13 @@ class Settings(BaseSettings):
     def _validate_grounding_positive_floats(cls, value: float, info) -> float:
         if value <= 0:
             raise ValueError(f"{info.field_name} must be greater than 0")
+        return value
+
+    @field_validator("FIRECRAWL_MAX_RAM", "FIRECRAWL_MAX_CPU")
+    @classmethod
+    def _validate_firecrawl_resource_caps(cls, value: float, info) -> float:
+        if value <= 0 or value > 1:
+            raise ValueError(f"{info.field_name} must be between 0 and 1")
         return value
 
     model_config = ConfigDict(

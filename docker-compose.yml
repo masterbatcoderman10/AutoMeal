@@ -100,6 +100,11 @@ services:
       POSTGRES_HOST: firecrawl-nuq-postgres
       POSTGRES_PORT: 5432
       BULL_AUTH_KEY: ${FIRECRAWL_PASSWORD}
+      SEARXNG_ENDPOINT: http://searxng:8080
+      SEARXNG_ENGINES: ${FIRECRAWL_SEARCH_ENGINES:-google,duckduckgo,bing,brave}
+      SEARXNG_CATEGORIES: ${FIRECRAWL_SEARCH_CATEGORIES:-general}
+      MAX_RAM: ${FIRECRAWL_MAX_RAM:-0.8}
+      MAX_CPU: ${FIRECRAWL_MAX_CPU:-0.8}
     depends_on:
       firecrawl-redis:
         condition: service_started
@@ -109,6 +114,8 @@ services:
         condition: service_healthy
       firecrawl-nuq-postgres:
         condition: service_healthy
+      searxng:
+        condition: service_started
 
   firecrawl-redis:
     image: redis:7-alpine

@@ -31,14 +31,14 @@ Two contract changes accompany this: (1) meal_reasoning gains a per-group **cons
 - **D-07:** The finalizer receives NO image input — only structured text (reasoning output for the group + that group's interview answers + a copy of the descriptive rationale + a thin meal summary).
 
 ### Tool Surface & Loop Implementation
-- **D-08:** Exactly two tools: `searxng_search` (gather search candidates) and `firecrawl_fetch` (extract a page as markdown).
+- **D-08:** Use **Firecrawl as the single grounding provider** — Firecrawl's native search (`/v1/search`) is configured to use the self-hosted SearXNG as its search backend (`SEARXNG_ENDPOINT`), so the app does NOT build or call a separate SearXNG client/tool. Expose two app-level tools, both backed by Firecrawl: `firecrawl_search` (SearXNG-backed search → candidate results + snippets/URLs) and `firecrawl_scrape` (fetch one URL → markdown). The search-then-scrape split is kept for cost control (don't scrape every result); collapsing to a single search-with-inline-scrape call is planner discretion if cost stays bounded. SearXNG remains a compose service but only as Firecrawl's backend, not a directly-called tool.
 - **D-09:** Hand-roll the async tool loop using the OpenAI SDK's native tool-calling on flash-lite. NO agent framework now — this matches the locked CLAUDE.md "What NOT to Use" decision (no LangChain/LlamaIndex/LangGraph; ~80-120 line loop). A migration to **pydantic-ai** is explicitly DEFERRED to a later phase (see Deferred Ideas). (During discussion pydantic-ai was briefly chosen then reversed.)
-- **D-10:** Swap the heavy Firecrawl stack for `devflowinc/firecrawl-simple` (api + redis + playwright; drops rabbitmq + nuq-postgres) in `docker-compose.yml` NOW, proactively, since the Mac mini already runs Postgres+pgvector+SearXNG+the pipeline. The `/v1/scrape` REST surface is preserved.
+- **D-10:** Firecrawl deployment: replace the heavy full stack with a leaner footprint, BUT this is now gated on a verification item — `devflowinc/firecrawl-simple` (api + redis + playwright) drops rabbitmq + nuq-postgres and is the preferred lean target, HOWEVER the planner/researcher MUST confirm the chosen Firecrawl variant exposes `/v1/search` with a `SEARXNG_ENDPOINT` backend (required by D-08). If firecrawl-simple lacks native search, either (a) use the official Firecrawl image trimmed to the services that support `/v1/search`, or (b) keep a direct SearXNG search path as a fallback. Decision: lean footprint preferred; native-search support is the hard constraint that picks the variant. `/v1/scrape` + `/v1/search` REST surface must both be available.
 
 ### Bounds (GROUND-02 / GROUND-03)
 - **D-11:** Cost cap = a **per-group tool-call count** cap (≤ ~6 search+fetch calls, mapping onto the 6-iteration bound), enforced in the loop. Per-meal cost is implicitly bounded by `group_count × per-group cap`. No live token-$ accounting.
 - **D-12:** 90-second wall-clock timeout applies per group loop.
-- **D-13:** URL allowlist scope is **per group finalizer loop**: `firecrawl_fetch` may only fetch URLs harvested from THAT loop's `searxng_search` results; fabricated or cross-group URLs are rejected (GROUND-03). Matches the parallel-isolation model.
+- **D-13:** URL allowlist scope is **per group finalizer loop**: `firecrawl_scrape` may only fetch URLs harvested from THAT loop's `firecrawl_search` (SearXNG-backed) results; fabricated or cross-group URLs are rejected (GROUND-03). Matches the parallel-isolation model.
 
 ### Finalizer / Enrichment Model
 - **D-14:** Keep `google/gemini-3.1-flash-lite` for the now tool-enabled finalizer, but expose an explicit enrichment/finalizer model + fallback config key. Verify lite handles the search loop reliably in UAT; escalate to `google/gemini-3-flash-preview` only if it under-performs on branded lookups.
@@ -108,7 +108,7 @@ Two contract changes accompany this: (1) meal_reasoning gains a per-group **cons
 - `app/config.py` — add grounding/tool config keys (enrichment model + fallback, SearXNG/Firecrawl base URLs, iteration/timeout/allowlist/cap).
 - `app/models/food_item.py` — nutrition fields (`calories`, `protein_g`, `carbs_g`, `fat_g`, `fiber_g`, `serving_size_g`) the summed totals land on.
 - `app/models/diary_entry.py`, `app/models/meal_segment.py` — `portion_bucket` columns + `PortionBucket` enum to drop in the D-28 migration.
-- `docker-compose.yml` — swap full Firecrawl → `devflowinc/firecrawl-simple` (D-10); `searxng/settings.yml` for JSON format + engines.
+- `docker-compose.yml` — lean Firecrawl footprint gated on native-`/v1/search` support (D-10); add `SEARXNG_ENDPOINT` to the Firecrawl env so SearXNG is its search backend; `searxng/settings.yml` for JSON format + engines.
 - `migrations/` (Alembic) — portion_bucket removal + any new quantity columns.
 
 ### Tests
@@ -136,7 +136,8 @@ Two contract changes accompany this: (1) meal_reasoning gains a per-group **cons
 - Finalizers are group-scoped and parallel; new context is added per group, never as cross-group sibling answers.
 
 ### Integration Points
-- Build `searxng_search` + `firecrawl_fetch` httpx tool functions hitting `SEARXNG_BASE_URL` (`/search?format=json`) and firecrawl-simple `/v1/scrape`.
+- Build `firecrawl_search` + `firecrawl_scrape` httpx tool functions hitting Firecrawl `/v1/search` (SearXNG-backed via `SEARXNG_ENDPOINT`) and `/v1/scrape`. No direct app→SearXNG client/tool.
+- Configure Firecrawl with `SEARXNG_ENDPOINT` pointing at the in-compose SearXNG; SearXNG stays internal-only as the search backend (JSON format enabled).
 - Wrap the finalizer call in a hand-rolled native tool-calling loop with the per-group allowlist, ≤6 tool-call cap, and 90s timeout.
 - Add `constituents` + `serving_count` to the model-facing reasoning schema; remove `group_actions`; lean the action enums.
 - App-side deterministic summation of per-constituent macros → group totals on the save path.
@@ -152,6 +153,12 @@ Two contract changes accompany this: (1) meal_reasoning gains a per-group **cons
 - "2 parottas" → group `serving_count = 2`, constituents costed per single serving, app multiplies — quantity clarification just updates `serving_count`.
 - "3 chicken pieces" demonstrates why `clarification_actions` must allow several same-kind questions (2 affirmations + 1 identification + 1 quantification) and why a single forced `group_action` is harmful.
 - The finalizer prompt becomes "enrich + ground + finalize", not just finalize; meal_reasoning prompt/schema enhancements (constituents, richness cues, size→grams) are in-scope reasoning-side work for this phase.
+
+## Research Flags
+
+- **Firecrawl native search + SearXNG backend (HARD constraint, D-08/D-10):** Confirm which Firecrawl variant exposes `/v1/search` with a `SEARXNG_ENDPOINT` backend. Verify `devflowinc/firecrawl-simple` supports it; if not, pick the leanest official-Firecrawl service set that does (or fall back to a direct SearXNG search path). This choice picks the compose footprint.
+- **Mac mini resource envelope (phase note):** 5 sequential Chromium scrapes under Docker memory limits without OOM, on the chosen Firecrawl variant.
+- **OpenRouter native tool-calling on `gemini-3.1-flash-lite`:** confirm a hand-rolled multi-turn `tools=` loop (search → scrape → final) works through the OpenRouter compatibility layer for the lite model; verify per-group bounds (≤6 calls / 90s) are enforceable in plain code.
 
 </specifics>
 

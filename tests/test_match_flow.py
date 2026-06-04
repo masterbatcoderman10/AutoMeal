@@ -1128,6 +1128,81 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.quantity_json["unit"], "bar")
         self.assertEqual(result.food_visuals[0].cropped_image_url, "/data/uploads/crops/seg-packaged-1.jpg")
 
+    async def test_apply_final_meal_resolution_persists_segment_quantity_and_derives_entry_bucket(self) -> None:
+        from app.services import meal_resolution_service
+
+        meal = SimpleNamespace(
+            id="meal-segment-quantity-persist",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={},
+            last_stage_started_at=None,
+        )
+        from app.models import FoodItem, MealSegment
+
+        resolved_food = FoodItem(
+            id="food-home-1",
+            name="Egg Curry",
+            source_type="HOME",
+            is_verified=True,
+            times_confirmed=1,
+        )
+        segment = SimpleNamespace(
+            id="seg-quantity-1",
+            ai_reasoning=None,
+            quantity_json=None,
+            quantity_display=None,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        session.add_all = Mock()
+
+        async def _session_get(model, identifier):
+            if model is MealSegment and identifier == "seg-quantity-1":
+                return segment
+            return None
+
+        session.get = AsyncMock(side_effect=_session_get)
+
+        final_segment = meal_resolution_service.FinalSegmentResolution(
+            food=meal_resolution_service.ResolvedFoodInput(
+                canonical_name="Egg Curry",
+                aliases=["Egg Curry"],
+                source_type="HOME",
+                is_verified=True,
+            ),
+            segment_id="seg-quantity-1",
+            segment_ai_reasoning={"grounding_trace": {"stop_reason": "completed"}},
+            portion_bucket="STANDARD",
+            identification_method="INTERVIEW",
+            quantity_json={
+                "quantity": 2,
+                "unit": "pieces",
+                "portion_bucket": "LARGE",
+            },
+            quantity_display="2 pieces",
+            create_food_visual=False,
+            visual_learning_eligible=False,
+        )
+
+        with patch.object(
+            meal_resolution_service,
+            "resolve_or_create_food_item",
+            new=AsyncMock(return_value=resolved_food),
+        ):
+            await meal_resolution_service.apply_final_meal_resolution(
+                session=session,
+                meal=meal,
+                final_segments=[final_segment],
+            )
+
+        self.assertEqual(
+            segment.quantity_json,
+            {"quantity": 2, "unit": "pieces", "portion_bucket": "LARGE"},
+        )
+        self.assertEqual(segment.quantity_display, "2 pieces")
+        entry = next(call.args[0] for call in session.add.call_args_list if hasattr(call.args[0], "meal_log_id"))
+        self.assertEqual(entry.portion_bucket, "LARGE")
+
     def test_group_finalizer_inputs_keep_bread_other_detail_and_source_answers_together(self) -> None:
         from app.services import interview_service
 

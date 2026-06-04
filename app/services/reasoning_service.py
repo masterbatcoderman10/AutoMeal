@@ -429,6 +429,16 @@ def _end_trace(trace: Any, *, output: Mapping[str, Any] | dict[str, Any]) -> Non
         end(output=dict(output))
 
 
+def append_grounding_trace(
+    *,
+    reasoning_payload: Mapping[str, Any],
+    grounding_trace: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = dict(reasoning_payload)
+    merged["grounding_trace"] = dict(grounding_trace)
+    return merged
+
+
 def _normalized_group_result(
     *,
     group: Mapping[str, Any],
@@ -2298,4 +2308,5 @@ __all__ = [
     "run_reasoning_request",
     "persist_reasoning_results",
     "finalize_meal_from_reasoning",
+    "append_grounding_trace",
 ]

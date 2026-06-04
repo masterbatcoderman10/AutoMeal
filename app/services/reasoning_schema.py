@@ -21,6 +21,8 @@ _MODEL_GROUP_REQUIRED_FIELDS = (
     "group_label",
     "group_actions",
     "group_state",
+    "serving_count",
+    "constituents",
     "segment_indexes",
     "segment_ids",
     "visual_evidence",
@@ -44,6 +46,8 @@ _GROUP_REQUIRED_FIELDS = (
     "group_action",
     "group_actions",
     "group_state",
+    "serving_count",
+    "constituents",
     "primary_segment_id",
     "segment_ids",
     "selected_candidate_id",
@@ -137,6 +141,89 @@ _GROUP_ACTIONS = (
     "FAILED_UNCLEAR",
     "NEEDS_SCHEMA_REVIEW",
 )
+_CONSTITUENT_UNIT_TYPES = ("count", "grams")
+_GROUNDING_STOP_REASONS = (
+    "COMPLETED",
+    "MAX_TOOL_CALLS",
+    "WALL_CLOCK_TIMEOUT",
+    "ALLOWLIST_REJECTED",
+    "DUPLICATE_TOOL_CALL",
+    "TOOL_ERROR",
+)
+_GROUNDING_PROVENANCE = ("searched", "model_knowledge")
+
+
+def _reasoning_constituent_properties() -> dict[str, Any]:
+    return {
+        "identity": {"type": "string"},
+        "identity_confidence": {"type": "number"},
+        "unit_type": {"type": "string", "enum": list(_CONSTITUENT_UNIT_TYPES)},
+        "magnitude": {"type": "number"},
+        "unit_label": {"type": "string"},
+        "cooking_method": {"type": "string"},
+        "notes": {"type": "string"},
+    }
+
+
+def _grounded_constituent_properties() -> dict[str, Any]:
+    return {
+        "identity": {"type": "string"},
+        "unit_type": {"type": "string", "enum": list(_CONSTITUENT_UNIT_TYPES)},
+        "magnitude": {"type": "number"},
+        "calories": {"type": "number"},
+        "protein_g": {"type": "number"},
+        "carbs_g": {"type": "number"},
+        "fat_g": {"type": "number"},
+        "fiber_g": {"type": "number"},
+        "provenance": {"type": "string", "enum": list(_GROUNDING_PROVENANCE)},
+        "source_url": {"type": ["string", "null"]},
+    }
+
+
+def grounding_result_response_format() -> dict[str, Any]:
+    grounded_constituent_properties = _grounded_constituent_properties()
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "grounding_result_contract_v1",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "group_label",
+                    "serving_count",
+                    "constituents",
+                    "is_verified",
+                    "stop_reason",
+                    "queries",
+                    "fetched_urls",
+                    "decision_rationale",
+                ],
+                "properties": {
+                    "group_label": {"type": "string"},
+                    "serving_count": {"type": "number"},
+                    "constituents": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": list(grounded_constituent_properties),
+                            "properties": grounded_constituent_properties,
+                        },
+                    },
+                    "is_verified": {"type": "boolean"},
+                    "stop_reason": {
+                        "type": "string",
+                        "enum": list(_GROUNDING_STOP_REASONS),
+                    },
+                    "queries": {"type": "array", "items": {"type": "string"}},
+                    "fetched_urls": {"type": "array", "items": {"type": "string"}},
+                    "decision_rationale": {"type": "string"},
+                },
+            },
+        },
+    }
 
 
 def normalize_source_question_policy(value: object) -> str:
@@ -163,6 +250,7 @@ def normalize_source_question_policy(value: object) -> str:
 
 
 def reasoning_response_format() -> dict[str, Any]:
+    constituent_properties = _reasoning_constituent_properties()
     clarification_choice_properties = {
         "label": {"type": "string"},
         "quick_prompt": {"type": "string"},
@@ -220,6 +308,16 @@ def reasoning_response_format() -> dict[str, Any]:
         "group_state": {
             "type": "string",
             "enum": sorted(_MEAL_STATES),
+        },
+        "serving_count": {"type": "number"},
+        "constituents": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(constituent_properties),
+                "properties": constituent_properties,
+            },
         },
         "segment_indexes": {
             "type": "array",
@@ -762,6 +860,34 @@ def _coerce_group_actions(group: Mapping[str, object]) -> list[str]:
     return deduped or ["AUTO_CONFIRM"]
 
 
+def _coerce_reasoning_constituents(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    constituents: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        unit_type = _coerce_str(item.get("unit_type"), "unit_type").lower()
+        if unit_type not in _CONSTITUENT_UNIT_TYPES:
+            unit_type = "count"
+        constituents.append(
+            {
+                "identity": _coerce_str(item.get("identity"), "identity"),
+                "identity_confidence": _coerce_number(
+                    item.get("identity_confidence"),
+                    "identity_confidence",
+                ),
+                "unit_type": unit_type,
+                "magnitude": _coerce_number(item.get("magnitude"), "magnitude"),
+                "unit_label": _coerce_str(item.get("unit_label"), "unit_label"),
+                "cooking_method": _coerce_str(item.get("cooking_method"), "cooking_method"),
+                "notes": _coerce_str(item.get("notes"), "notes"),
+            }
+        )
+    return constituents
+
+
 def _primary_group_action(group_actions: list[str]) -> str:
     for action in (
         "NEEDS_SCHEMA_REVIEW",
@@ -842,6 +968,14 @@ def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, An
         action,
         _coerce_str(group.get("group_state") or group.get("state"), "group_state"),
     )
+    constituents = _coerce_reasoning_constituents(group.get("constituents"))
+    serving_count = max(
+        0.0,
+        _coerce_number(
+            group.get("serving_count") if group.get("serving_count") is not None else 1,
+            "serving_count",
+        ),
+    )
     gate_reason = _coerce_str(group.get("gate_reason"), "gate_reason")
 
     question_kind = _coerce_str(group.get("question_kind"), "question_kind")
@@ -876,6 +1010,8 @@ def _coerce_group_payload(group: Mapping[str, object], idx: int) -> dict[str, An
         "group_action": action,
         "group_actions": group_actions,
         "group_state": group_state,
+        "serving_count": serving_count,
+        "constituents": constituents,
         "primary_segment_id": primary_segment_id,
         "segment_ids": segment_ids,
         "selected_candidate_id": selected_candidate_id,
@@ -983,5 +1119,8 @@ def coerce_reasoning_response(payload: Mapping[str, object] | object | None) -> 
         "food_groups": food_groups,
     }
 
-
-__all__ = ["reasoning_response_format", "coerce_reasoning_response"]
+__all__ = [
+    "reasoning_response_format",
+    "grounding_result_response_format",
+    "coerce_reasoning_response",
+]

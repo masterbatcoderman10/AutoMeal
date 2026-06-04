@@ -96,6 +96,35 @@ def _invoke_reasoning_writer(
 
 
 class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
+    def test_append_grounding_trace_preserves_existing_reasoning_fields(self) -> None:
+        from app.services.reasoning_service import append_grounding_trace
+
+        reasoning_payload = {
+            "trace_id": "trace-grounding-1",
+            "group_id": "group-1",
+            "group_state": "READY_TO_WRITE",
+            "decision_rationale": "initial grouped reasoning",
+            "visual_evidence": ["visible curry"],
+        }
+        grounding_trace = {
+            "iteration_count": 2,
+            "queries": ["chicken curry nutrition"],
+            "fetched_urls": ["https://example.com/menu/chicken-curry"],
+            "stop_reason": "COMPLETED",
+        }
+
+        merged = append_grounding_trace(
+            reasoning_payload=reasoning_payload,
+            grounding_trace=grounding_trace,
+        )
+
+        self.assertEqual(merged["trace_id"], "trace-grounding-1")
+        self.assertEqual(merged["group_id"], "group-1")
+        self.assertEqual(merged["decision_rationale"], "initial grouped reasoning")
+        self.assertEqual(merged["grounding_trace"]["stop_reason"], "COMPLETED")
+        self.assertEqual(merged["grounding_trace"]["queries"], ["chicken curry nutrition"])
+        self.assertNotIn("grounding_trace", reasoning_payload)
+
     async def test_persists_reasoning_before_final_write(self) -> None:
         from app.services import reasoning_service
 

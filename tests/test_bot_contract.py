@@ -2670,107 +2670,19 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
 
         engine.dispose.assert_awaited_once()
 
-    def test_rebuild_grounding_match_results_expands_grouped_confirmation_items(self) -> None:
+    def test_polling_module_removes_dead_grounding_worker_entry_points(self) -> None:
         from bot import polling
 
-        meal = SimpleNamespace(
-            reasoning_state_json={
-                "confirmation_items": [
-                    {
-                        "group_id": "group-eggs",
-                        "primary_segment_id": "seg-egg-1",
-                        "segment_id": "seg-egg-1",
-                        "segment_ids": ["seg-egg-1", "seg-egg-2"],
-                        "name": "Boiled eggs",
-                        "source_type": "PACKAGED",
-                        "brand_name": "Acme",
-                        "portion_bucket": "STANDARD",
-                        "quantity_display": "2 eggs",
-                    }
-                ],
-            },
-        )
-        segments = [
-            SimpleNamespace(id="seg-egg-1", embedding=[0.1] * 1536, match_candidates_json={}),
-            SimpleNamespace(id="seg-egg-2", embedding=[0.2] * 1536, match_candidates_json={}),
-        ]
+        source = Path(polling.__file__).read_text(encoding="utf-8")
 
-        rebuilt, missing = polling._rebuild_grounding_match_results(meal=meal, segments=segments)
-
-        self.assertEqual(missing, [])
-        self.assertEqual([segment.id for segment, _result in rebuilt], ["seg-egg-1", "seg-egg-2"])
-        for _segment, result in rebuilt:
-            self.assertEqual(result.candidate_payloads[0]["label"], "Boiled eggs")
-            self.assertEqual(result.candidate_payloads[0]["brand_name"], "Acme")
-
-    def test_rebuild_grounding_match_results_skips_excluded_unconfirmed_segments(self) -> None:
-        from bot import polling
-
-        meal = SimpleNamespace(
-            reasoning_state_json={
-                "confirmation_items": [
-                    {
-                        "group_id": "group-rice",
-                        "primary_segment_id": "seg-rice",
-                        "segment_id": "seg-rice",
-                        "segment_ids": ["seg-rice"],
-                        "name": "Basmati rice with chicken curry",
-                        "source_type": "HOME",
-                        "portion_bucket": "STANDARD",
-                    },
-                    {
-                        "group_id": "group-kebab",
-                        "primary_segment_id": "seg-kebab",
-                        "segment_id": "seg-kebab",
-                        "segment_ids": ["seg-kebab"],
-                        "name": "Chapli kebab",
-                        "source_type": "PACKAGED",
-                        "brand_name": "KNN",
-                        "portion_bucket": "STANDARD",
-                    },
-                ],
-            },
-        )
-        segments = [
-            SimpleNamespace(id="seg-rice", embedding=[0.1] * 1536, match_candidates_json={}),
-            SimpleNamespace(id="seg-kebab", embedding=[0.2] * 1536, match_candidates_json={}),
-            SimpleNamespace(id="seg-excluded-bowl", embedding=[0.3] * 1536, match_candidates_json={}),
-        ]
-
-        rebuilt, missing = polling._rebuild_grounding_match_results(meal=meal, segments=segments)
-
-        self.assertEqual(missing, [])
-        self.assertEqual([segment.id for segment, _result in rebuilt], ["seg-rice", "seg-kebab"])
-        self.assertEqual(rebuilt[1][1].candidate_payloads[0]["brand_name"], "KNN")
-
-    def test_rebuild_grounding_match_results_reports_missing_confirmed_segment(self) -> None:
-        from bot import polling
-
-        meal = SimpleNamespace(
-            reasoning_state_json={
-                "confirmation_items": [
-                    {
-                        "group_id": "group-kebab",
-                        "primary_segment_id": "seg-kebab",
-                        "segment_id": "seg-kebab",
-                        "segment_ids": ["seg-kebab", "seg-missing"],
-                        "name": "Chapli kebab",
-                        "source_type": "PACKAGED",
-                        "brand_name": "KNN",
-                        "portion_bucket": "STANDARD",
-                    }
-                ],
-            },
-        )
-        segments = [
-            SimpleNamespace(id="seg-kebab", embedding=[0.2] * 1536, match_candidates_json={}),
-            SimpleNamespace(id="seg-unconfirmed", embedding=[0.3] * 1536, match_candidates_json={}),
-        ]
-
-        rebuilt, missing = polling._rebuild_grounding_match_results(meal=meal, segments=segments)
-
-        self.assertEqual([segment.id for segment, _result in rebuilt], ["seg-kebab"])
-        self.assertEqual(missing, ["seg-missing"])
+        self.assertFalse(hasattr(polling, "poll_grounding_handoffs"))
+        self.assertFalse(hasattr(polling, "poll_post_interview_grounding"))
+        self.assertFalse(hasattr(polling, "_rebuild_grounding_match_results"))
+        self.assertNotIn("async def poll_grounding_handoffs", source)
+        self.assertNotIn("async def poll_post_interview_grounding", source)
+        self.assertNotIn("def _rebuild_grounding_match_results", source)
+        self.assertNotIn("GROUNDING_PENDING", source)
+        self.assertNotIn("build_grounding_reasoning_state", source)
 
     async def test_poll_recovers_acknowledged_meal_state_after_commit_failure(self) -> None:
         from bot import polling

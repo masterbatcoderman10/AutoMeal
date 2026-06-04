@@ -207,6 +207,28 @@ def _tool_timeout_s(*, loop_state: GroundingLoopState, default_timeout_s: float)
     return max(1.0, min(default_timeout_s, remaining))
 
 
+def _snippet_excerpt(value: object) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped[:280]
+        return None
+    if isinstance(value, Mapping):
+        for key in ("snippet", "description", "summary", "markdown", "content", "text"):
+            excerpt = _snippet_excerpt(value.get(key))
+            if excerpt:
+                return excerpt
+    return None
+
+
+def _append_trace_excerpt(trace: dict[str, Any], excerpt: str | None) -> None:
+    if not excerpt:
+        return
+    snippets = trace.setdefault("snippet_excerpts", [])
+    if excerpt not in snippets:
+        snippets.append(excerpt)
+
+
 async def _execute_grounding_tool(
     *,
     tool_name: str,
@@ -219,7 +241,7 @@ async def _execute_grounding_tool(
         query = _text(tool_args.get("query"), default="").strip()
         if not query:
             raise ValueError("firecrawl_search query is required")
-        results = await service.search(query)
+        results = await service.search(query, loop_state=loop_state)
         urls = [
             str(item.get("url") or "").strip()
             for item in results
@@ -227,6 +249,13 @@ async def _execute_grounding_tool(
         ]
         loop_state.allow_search_result_urls(urls)
         trace["queries"].append(query)
+        trace["provenance"] = "searched"
+        if urls and not trace.get("source_url"):
+            trace["source_url"] = urls[0]
+        for item in results:
+            if not isinstance(item, Mapping):
+                continue
+            _append_trace_excerpt(trace, _snippet_excerpt(item))
         return {
             "query": query,
             "results": results,
@@ -238,6 +267,11 @@ async def _execute_grounding_tool(
             raise ValueError("firecrawl_scrape url is required")
         payload = await service.scrape(url, loop_state=loop_state)
         trace["fetched_urls"].append(url)
+        trace["provenance"] = "searched"
+        trace["source_url"] = url
+        data = payload.get("data")
+        _append_trace_excerpt(trace, _snippet_excerpt(data))
+        _append_trace_excerpt(trace, _snippet_excerpt(payload))
         return {
             "url": url,
             "payload": payload,
@@ -262,6 +296,7 @@ async def _bounded_group_finalizer_response(
     trace: dict[str, Any] = {
         "queries": [],
         "fetched_urls": [],
+        "snippet_excerpts": [],
     }
     service = GroundingService(settings=settings)
     try:
@@ -283,7 +318,7 @@ async def _bounded_group_finalizer_response(
             message = _response_message(response)
             tool_calls = _tool_calls_from_message(message)
             if not tool_calls:
-                trace["stop_reason"] = loop_state.stop_reason or "completed"
+                trace["stop_reason"] = loop_state.stop_reason or "COMPLETED"
                 trace["tool_calls_used"] = loop_state.tool_calls_used
                 trace["duplicate_calls"] = loop_state.duplicate_calls
                 trace["iteration_count"] = loop_state.tool_calls_used
@@ -374,6 +409,18 @@ def _format_grounding_trace_text(trace: Mapping[str, Any] | None) -> str | None:
     fetched_urls = [str(url).strip() for url in trace.get("fetched_urls") or [] if str(url).strip()]
     if fetched_urls:
         pieces.append("fetched_urls=" + "; ".join(fetched_urls))
+    snippets = [str(snippet).strip() for snippet in trace.get("snippet_excerpts") or [] if str(snippet).strip()]
+    if snippets:
+        pieces.append("snippet_excerpts=" + "; ".join(snippets))
+    provenance = _optional_text(trace.get("provenance"))
+    if provenance:
+        pieces.append(f"provenance={provenance}")
+    source_url = _optional_text(trace.get("source_url"))
+    if source_url:
+        pieces.append(f"source_url={source_url}")
+    iteration_count = trace.get("iteration_count")
+    if isinstance(iteration_count, int):
+        pieces.append(f"iteration_count={iteration_count}")
     stop_reason = _optional_text(trace.get("stop_reason"))
     if stop_reason:
         pieces.append(f"stop_reason={stop_reason}")
@@ -1627,6 +1674,8 @@ def _finalized_confirmation_item(
             "fat_g": parsed.fat_g,
             "fiber_g": parsed.fiber_g,
             "is_verified": parsed.is_verified,
+            "provenance": parsed.provenance,
+            "source_url": parsed.source_url,
         }
     )
     if parsed.quantity_json is not None:
@@ -1654,9 +1703,17 @@ def _finalized_confirmation_item(
                 ]
                 merged_trace[normalized_key] = existing_values or incoming_values
                 continue
-            if normalized_key == "stop_reason" and merged_trace.get(normalized_key) and value == "completed":
+            if (
+                normalized_key == "stop_reason"
+                and merged_trace.get(normalized_key)
+                and str(value).strip().upper() == "COMPLETED"
+            ):
                 continue
             merged_trace[normalized_key] = value
+    if parsed.provenance and not merged_trace.get("provenance"):
+        merged_trace["provenance"] = parsed.provenance
+    if parsed.source_url and not merged_trace.get("source_url"):
+        merged_trace["source_url"] = parsed.source_url
     if merged_trace:
         item["grounding_trace"] = merged_trace
     return {key: value for key, value in item.items() if value is not None}

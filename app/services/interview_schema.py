@@ -176,13 +176,16 @@ class GroundingTracePayload(BaseModel):
 
     queries: list[str] = Field(default_factory=list)
     fetched_urls: list[str] = Field(default_factory=list)
+    snippet_excerpts: list[str] = Field(default_factory=list)
+    provenance: Literal["searched", "model_knowledge"] | None = None
+    source_url: str | None = None
     stop_reason: str | None = None
     failure_category: str | None = None
     tool_calls_used: int | None = None
     duplicate_calls: int | None = None
     iteration_count: int | None = None
 
-    @field_validator("queries", "fetched_urls", mode="before")
+    @field_validator("queries", "fetched_urls", "snippet_excerpts", mode="before")
     @classmethod
     def _normalize_text_list(cls, value: object) -> list[str]:
         if value is None:
@@ -196,9 +199,14 @@ class GroundingTracePayload(BaseModel):
                 normalized.append(text)
         return normalized
 
-    @field_validator("stop_reason", "failure_category", mode="before")
+    @field_validator("provenance", "stop_reason", "failure_category", mode="before")
     @classmethod
     def _normalize_optional_text(cls, value: object) -> str | None:
+        return InterviewTurnResult._normalize_optional_text(value)
+
+    @field_validator("source_url", mode="before")
+    @classmethod
+    def _normalize_optional_url(cls, value: object) -> str | None:
         return InterviewTurnResult._normalize_optional_text(value)
 
     @field_validator("tool_calls_used", "duplicate_calls", "iteration_count", mode="before")
@@ -237,6 +245,8 @@ class FinalizedGroupResult(BaseModel):
     fat_g: float | None = None
     fiber_g: float | None = None
     is_verified: bool = False
+    provenance: Literal["searched", "model_knowledge"] | None = None
+    source_url: str | None = None
     grounding_trace: GroundingTracePayload | None = None
 
     @field_validator(
@@ -248,6 +258,8 @@ class FinalizedGroupResult(BaseModel):
         "brand_name",
         "restaurant_name",
         "correction_note",
+        "provenance",
+        "source_url",
         mode="before",
     )
     @classmethod

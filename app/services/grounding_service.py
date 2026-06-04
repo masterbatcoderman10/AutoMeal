@@ -110,7 +110,20 @@ class GroundingService:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    async def search(self, query: str) -> list[dict[str, Any]]:
+    def _request_timeout_s(self, *, loop_state: GroundingLoopState | None) -> float:
+        if loop_state is None:
+            return self.tool_timeout_s
+        remaining = loop_state.remaining_time_s()
+        if remaining <= 0:
+            raise TimeoutError(loop_state.stop_reason or "WALL_CLOCK_TIMEOUT")
+        return min(self.tool_timeout_s, remaining)
+
+    async def search(
+        self,
+        query: str,
+        *,
+        loop_state: GroundingLoopState | None = None,
+    ) -> list[dict[str, Any]]:
         payload = {
             "query": query,
             "limit": self.search_limit,
@@ -119,7 +132,7 @@ class GroundingService:
             "/v1/search",
             json=payload,
             headers=self._headers(),
-            timeout=self.tool_timeout_s,
+            timeout=self._request_timeout_s(loop_state=loop_state),
         )
         response.raise_for_status()
         data = response.json()
@@ -145,7 +158,7 @@ class GroundingService:
                 "formats": [self.scrape_format],
             },
             headers=self._headers(),
-            timeout=self.tool_timeout_s,
+            timeout=self._request_timeout_s(loop_state=loop_state),
         )
         response.raise_for_status()
         data = response.json()

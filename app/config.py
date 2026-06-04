@@ -21,7 +21,17 @@ class Settings(BaseSettings):
     INTERVIEW_MODEL: str = "google/gemini-3.1-flash-lite"
     INTERVIEW_FALLBACK_MODEL: str = "google/gemini-3-flash-preview"
     FINALIZER_MODEL: str = "google/gemini-3.1-flash-lite"
+    GROUNDING_MODEL: str = "google/gemini-3.1-flash-lite"
+    GROUNDING_FALLBACK_MODEL: str = "google/gemini-3-flash-preview"
     FINALIZER_GROUP_PARALLELISM: int = 4
+    FIRECRAWL_BASE_URL: str = "http://firecrawl-api:3002"
+    FIRECRAWL_API_KEY: str = ""
+    SEARXNG_BASE_URL: str = "http://searxng:8080"
+    GROUNDING_SEARCH_LIMIT: int = 5
+    GROUNDING_MAX_TOOL_CALLS: int = 6
+    GROUNDING_TOOL_TIMEOUT_S: float = 12.5
+    GROUNDING_WALL_CLOCK_TIMEOUT_S: float = 90.0
+    GROUNDING_SCRAPE_FORMAT: str = "markdown"
     REASONING_MATCH_THRESHOLD: float = 0.90
     REASONING_TOP_CANDIDATE_FLOOR: float = 0.65
     REASONING_SEGMENT_PARALLELISM: int = 4
@@ -52,6 +62,20 @@ class Settings(BaseSettings):
     def _validate_finalizer_group_parallelism(cls, value: int) -> int:
         if value < 1:
             raise ValueError("FINALIZER_GROUP_PARALLELISM must be at least 1")
+        return value
+
+    @field_validator("GROUNDING_SEARCH_LIMIT", "GROUNDING_MAX_TOOL_CALLS")
+    @classmethod
+    def _validate_grounding_positive_ints(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be at least 1")
+        return value
+
+    @field_validator("GROUNDING_TOOL_TIMEOUT_S", "GROUNDING_WALL_CLOCK_TIMEOUT_S")
+    @classmethod
+    def _validate_grounding_positive_floats(cls, value: float, info) -> float:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be greater than 0")
         return value
 
     model_config = ConfigDict(

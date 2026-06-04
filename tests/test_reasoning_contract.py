@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from typing import Any
 
@@ -174,6 +175,31 @@ class ReasoningContractTests(unittest.TestCase):
             {"searched", "model_knowledge"},
         )
         self.assertEqual(constituent_schema["properties"]["source_url"]["type"], ["string", "null"])
+
+    def test_group_finalizer_response_format_persists_live_trace_and_provenance_fields(self) -> None:
+        from app.services.interview_schema import (
+            FinalizedGroupResult,
+            GroundingTracePayload,
+            group_finalizer_response_format,
+        )
+        from app.services.reasoning_schema import grounding_result_response_format
+
+        grounded_schema = grounding_result_response_format()["json_schema"]["schema"]
+        live_response_format = group_finalizer_response_format()
+        live_schema_text = json.dumps(live_response_format)
+
+        self.assertIn("provenance", FinalizedGroupResult.model_fields)
+        self.assertIn("source_url", FinalizedGroupResult.model_fields)
+        self.assertIn("snippet_excerpts", GroundingTracePayload.model_fields)
+        self.assertIn("provenance", GroundingTracePayload.model_fields)
+        self.assertIn("source_url", GroundingTracePayload.model_fields)
+        self.assertIn('"snippet_excerpts"', live_schema_text)
+        self.assertIn('"provenance"', live_schema_text)
+        self.assertIn('"source_url"', live_schema_text)
+        self.assertEqual(
+            set(grounded_schema["properties"]["constituents"]["items"]["properties"]["provenance"]["enum"]),
+            {"searched", "model_knowledge"},
+        )
 
     def test_unknown_action_routes_to_needs_schema_review(self) -> None:
         from app.services.reasoning_schema import coerce_reasoning_response

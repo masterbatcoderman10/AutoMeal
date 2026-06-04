@@ -1474,6 +1474,143 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_segment.food.calories, 240.0)
         self.assertIn("acme.example/protein-bar", final_segment.food.llm_reasoning or "")
 
+    async def test_finalize_confirmed_interview_persists_grounding_snippets_and_provenance(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-inline-grounding-trace",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "food_groups": [
+                        {
+                            "group_id": "group-bar",
+                            "group_label": "protein bar",
+                            "question_kind": "SOURCE_ORIGIN",
+                            "group_actions": ["ASK_SOURCE_ORIGIN"],
+                            "primary_segment_id": "seg-bar-1",
+                            "segment_ids": ["seg-bar-1"],
+                        }
+                    ]
+                }
+            },
+            last_stage_started_at=None,
+        )
+        segment = SimpleNamespace(
+            id="seg-bar-1",
+            cropped_image_url="/data/uploads/crops/seg-bar-1.jpg",
+            ai_reasoning={"trace_id": "trace-inline-grounding"},
+            embedding=[0.5, 0.6, 0.7],
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        captured: dict[str, object] = {}
+        confirmation_items = [
+            {
+                "group_id": "group-bar",
+                "primary_segment_id": "seg-bar-1",
+                "segment_id": "seg-bar-1",
+                "segment_ids": ["seg-bar-1"],
+                "name": "Acme",
+                "source_type": "PACKAGED",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "brand_name": "Acme",
+                "quantity_display": "1 bar",
+            }
+        ]
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "group_id": "group-bar",
+                                        "primary_segment_id": "seg-bar-1",
+                                        "segment_ids": ["seg-bar-1"],
+                                        "final_name": "Acme Protein Bar",
+                                        "aliases": ["Protein Bar"],
+                                        "source_type": "PACKAGED",
+                                        "portion_bucket": "STANDARD",
+                                        "quantity_display": "1 bar",
+                                        "quantity_json": {
+                                            "quantity": 1,
+                                            "unit": "bar",
+                                            "portion_bucket": "STANDARD",
+                                        },
+                                        "food_item_id": None,
+                                        "brand_name": "Acme",
+                                        "restaurant_name": None,
+                                        "correction_note": None,
+                                        "supporting_details": ["store-bought packaged item"],
+                                        "serving_size_g": 68.0,
+                                        "calories": 240.0,
+                                        "protein_g": 20.0,
+                                        "carbs_g": 23.0,
+                                        "fat_g": 8.0,
+                                        "fiber_g": 6.0,
+                                        "is_verified": True,
+                                        "provenance": "searched",
+                                        "source_url": "https://acme.example/protein-bar",
+                                        "grounding_trace": {
+                                            "queries": ["Acme protein bar nutrition facts"],
+                                            "fetched_urls": ["https://acme.example/protein-bar"],
+                                            "snippet_excerpts": ["Serving size 68 g | Calories 240"],
+                                            "provenance": "searched",
+                                            "source_url": "https://acme.example/protein-bar",
+                                            "stop_reason": "COMPLETED",
+                                        },
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
+        )
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=1,
+                    FINALIZER_MODEL="google/gemini-3.1-flash-lite",
+                ),
+                create=True,
+            ),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
+        ):
+            await interview_service.finalize_confirmed_interview(
+                session=session,
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=[segment],
+            )
+
+        final_segment = captured["final_segments"][0]
+        grounding_trace = final_segment.segment_ai_reasoning["grounding_trace"]
+        self.assertIn("snippet_excerpts", grounding_trace)
+        self.assertIn("provenance", grounding_trace)
+        self.assertIn("source_url", grounding_trace)
+        self.assertEqual(
+            grounding_trace["snippet_excerpts"],
+            ["Serving size 68 g | Calories 240"],
+        )
+        self.assertEqual(grounding_trace["provenance"], "searched")
+        self.assertEqual(grounding_trace["source_url"], "https://acme.example/protein-bar")
+
     async def test_finalize_confirmed_interview_records_inline_grounding_failure_as_degraded_save(self) -> None:
         from app.services import interview_service
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import time
 import unittest
 from pathlib import Path
 
@@ -33,6 +35,11 @@ class _FakeHttpClient:
 
 
 class GroundingServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_firecrawl_search_accepts_loop_budget_context(self) -> None:
+        from app.services.grounding_service import GroundingService
+
+        self.assertIn("loop_state", inspect.signature(GroundingService.search).parameters)
+
     def test_compose_wires_firecrawl_search_to_searxng_backend(self) -> None:
         compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text()
 
@@ -156,6 +163,62 @@ class GroundingServiceTests(unittest.IsolatedAsyncioTestCase):
             http_client.calls[-1]["json"],
             {"url": "https://example.com/menu/chicken-curry", "formats": ["markdown"]},
         )
+
+    async def test_firecrawl_scrape_caps_timeout_to_remaining_loop_budget(self) -> None:
+        from app.services.grounding_service import GroundingService, GroundingLoopState
+
+        settings = type(
+            "Settings",
+            (),
+            {
+                "FIRECRAWL_BASE_URL": "http://firecrawl:3002",
+                "FIRECRAWL_API_KEY": "fc-secret",
+                "GROUNDING_SEARCH_LIMIT": 5,
+                "GROUNDING_TOOL_TIMEOUT_S": 12.5,
+                "GROUNDING_SCRAPE_FORMAT": "markdown",
+            },
+        )()
+        http_client = _FakeHttpClient()
+        http_client.response_payload = {"success": True, "data": {"markdown": "# Nutrition"}}
+        service = GroundingService(settings=settings, http_client=http_client)
+        loop_state = GroundingLoopState(max_tool_calls=6, wall_clock_timeout_s=90.0)
+        loop_state.allow_search_result_urls(["https://example.com/menu/chicken-curry"])
+        loop_state.started_at = time.monotonic() - 89.6
+
+        await service.scrape(
+            "https://example.com/menu/chicken-curry",
+            loop_state=loop_state,
+        )
+
+        self.assertLess(http_client.calls[-1]["timeout"], 1.0)
+
+    async def test_firecrawl_scrape_stops_when_loop_budget_is_exhausted(self) -> None:
+        from app.services.grounding_service import GroundingService, GroundingLoopState
+
+        settings = type(
+            "Settings",
+            (),
+            {
+                "FIRECRAWL_BASE_URL": "http://firecrawl:3002",
+                "FIRECRAWL_API_KEY": "fc-secret",
+                "GROUNDING_SEARCH_LIMIT": 5,
+                "GROUNDING_TOOL_TIMEOUT_S": 12.5,
+                "GROUNDING_SCRAPE_FORMAT": "markdown",
+            },
+        )()
+        http_client = _FakeHttpClient()
+        service = GroundingService(settings=settings, http_client=http_client)
+        loop_state = GroundingLoopState(max_tool_calls=6, wall_clock_timeout_s=90.0)
+        loop_state.allow_search_result_urls(["https://example.com/menu/chicken-curry"])
+        loop_state.started_at = time.monotonic() - 91.0
+
+        with self.assertRaises(TimeoutError):
+            await service.scrape(
+                "https://example.com/menu/chicken-curry",
+                loop_state=loop_state,
+            )
+
+        self.assertEqual(http_client.calls, [])
 
     def test_duplicate_tool_call_policy_suppresses_repeated_calls(self) -> None:
         from app.services.grounding_service import GroundingLoopState

@@ -21,6 +21,56 @@ async def _noop_sleep(*_args, **_kwargs) -> None:
     return None
 
 
+def _echo_group_finalizer_outcomes(reasoning_service, group_inputs):
+    outcomes = []
+    for group_input in group_inputs:
+        item = dict(group_input.confirmation_item)
+        group_state = dict(group_input.group_state)
+        selected_candidate_id = str(group_state.get("selected_candidate_id") or "").strip()
+        top_candidates = [
+            dict(candidate)
+            for candidate in group_state.get("top_3") or []
+            if isinstance(candidate, dict)
+        ]
+        selected_candidate = next(
+            (
+                candidate
+                for candidate in top_candidates
+                if str(candidate.get("candidate_id") or "").strip() == selected_candidate_id
+            ),
+            {},
+        )
+        selected_source = str(
+            selected_candidate.get("source") or selected_candidate.get("source_type") or ""
+        ).strip()
+        if selected_source:
+            selected_label = str(selected_candidate.get("label") or "").strip()
+            if selected_label:
+                item["name"] = selected_label
+            selected_food_item_id = str(selected_candidate.get("food_item_id") or "").strip()
+            if selected_food_item_id:
+                item["food_item_id"] = selected_food_item_id
+            item["source_type"] = selected_source
+        else:
+            group_label = str(group_state.get("group_label") or "").strip()
+            if group_label:
+                item["name"] = group_label
+        resolution = reasoning_service.final_resolution_from_confirmation(
+            item=item,
+            segment=group_input.segment,
+            aliases=[str(item.get("name") or "unlabeled food")],
+            trace_id=group_input.trace_id,
+        )
+        outcomes.append(
+            SimpleNamespace(
+                final_resolution=resolution,
+                finalized_confirmation_item=item,
+                audit_state={"group_id": group_input.group_id, "status": "SUCCEEDED"},
+            )
+        )
+    return outcomes
+
+
 class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_cached_match_accepts_pgvector_numpy_embeddings(self) -> None:
         from app.services import matching_service
@@ -57,6 +107,23 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
 
         statement = session.execute.await_args.args[0]
         self.assertTrue(statement._with_options, "expected eager-loading options on match query")
+
+    async def test_cached_match_query_filters_to_verified_food_items(self) -> None:
+        from app.services import matching_service
+
+        segment = SimpleNamespace(id="segment-1", embedding=[0.12] * EMBEDDING_DIMENSION)
+        session = AsyncMock()
+        session.execute.return_value = Mock(first=Mock(return_value=None))
+
+        await matching_service.match_segment_with_cached_embedding(
+            segment=segment,
+            session=session,
+        )
+
+        statement = session.execute.await_args.args[0]
+        compiled = str(statement)
+        self.assertIn("food_items", compiled)
+        self.assertIn("is_verified", compiled)
 
     async def test_match_segment_uses_retrieval_query_embedding_and_sets_segment_vector(self) -> None:
         from app.services import matching_service
@@ -441,10 +508,42 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return {"meal_entries": [], "food_visuals": [], "correction_events": []}
 
+        def _group_label_finalizer_outcomes(group_inputs):
+            outcomes = []
+            for group_input in group_inputs:
+                item = dict(group_input.confirmation_item)
+                item["name"] = "green chicken curry"
+                resolution = reasoning_service.final_resolution_from_confirmation(
+                    item=item,
+                    segment=group_input.segment,
+                    aliases=["green chicken curry"],
+                    trace_id=group_input.trace_id,
+                )
+                outcomes.append(
+                    SimpleNamespace(
+                        final_resolution=resolution,
+                        finalized_confirmation_item=item,
+                        audit_state={"group_id": group_input.group_id, "status": "SUCCEEDED"},
+                    )
+                )
+            return outcomes
+
         with patch.object(
             reasoning_service,
             "apply_final_meal_resolution",
             new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _echo_group_finalizer_outcomes(reasoning_service, kwargs["group_inputs"])),
         ):
             result = await reasoning_service.finalize_meal_from_reasoning(
                 session=session,
@@ -527,10 +626,42 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return {"meal_entries": [], "food_visuals": [], "correction_events": []}
 
+        def _group_label_finalizer_outcomes(group_inputs):
+            outcomes = []
+            for group_input in group_inputs:
+                item = dict(group_input.confirmation_item)
+                item["name"] = "green chicken curry"
+                resolution = reasoning_service.final_resolution_from_confirmation(
+                    item=item,
+                    segment=group_input.segment,
+                    aliases=["green chicken curry"],
+                    trace_id=group_input.trace_id,
+                )
+                outcomes.append(
+                    SimpleNamespace(
+                        final_resolution=resolution,
+                        finalized_confirmation_item=item,
+                        audit_state={"group_id": group_input.group_id, "status": "SUCCEEDED"},
+                    )
+                )
+            return outcomes
+
         with patch.object(
             reasoning_service,
             "apply_final_meal_resolution",
             new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _group_label_finalizer_outcomes(kwargs["group_inputs"])),
         ):
             result = await reasoning_service.finalize_meal_from_reasoning(
                 session=session,
@@ -604,6 +735,18 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             reasoning_service,
             "apply_final_meal_resolution",
             new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _echo_group_finalizer_outcomes(reasoning_service, kwargs["group_inputs"])),
         ):
             result = await reasoning_service.finalize_meal_from_reasoning(
                 session=session,
@@ -676,6 +819,18 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             reasoning_service,
             "apply_final_meal_resolution",
             new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _echo_group_finalizer_outcomes(reasoning_service, kwargs["group_inputs"])),
         ):
             result = await reasoning_service.finalize_meal_from_reasoning(
                 session=session,
@@ -1018,7 +1173,7 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             "Chicken curry (green masala)",
         )
 
-    def test_best_effort_grounding_resolution_preserves_visual_learning_inputs(self) -> None:
+    def test_best_effort_grounding_resolution_blocks_visual_learning(self) -> None:
         from app.services import interview_service
 
         segment = SimpleNamespace(
@@ -1041,17 +1196,40 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(resolution.food.needs_grounding)
         self.assertFalse(resolution.food.is_verified)
-        self.assertTrue(
-            resolution.create_food_visual,
-            "Degraded saves should still preserve FoodVisual creation when segment crops and embeddings exist.",
-        )
+        self.assertFalse(resolution.create_food_visual)
+        self.assertFalse(resolution.visual_learning_eligible)
         self.assertEqual(
             resolution.segment_cropped_image_url,
             "/data/uploads/crops/seg-grounding-fallback.jpg",
         )
         self.assertEqual(len(resolution.segment_embedding or []), EMBEDDING_DIMENSION)
 
-    async def test_apply_final_meal_resolution_preserves_finalizer_write_metadata(self) -> None:
+    def test_unverified_grounding_resolution_blocks_visual_learning_until_verified(self) -> None:
+        from app.services import interview_service
+
+        segment = SimpleNamespace(
+            id="seg-grounding-pending",
+            cropped_image_url="/data/uploads/crops/seg-grounding-pending.jpg",
+            embedding=[0.61] * EMBEDDING_DIMENSION,
+        )
+
+        resolution = interview_service.final_resolution_from_confirmation(
+            item={
+                "segment_id": "seg-grounding-pending",
+                "name": "Protein Bar",
+                "source_type": "PACKAGED",
+                "brand_name": "Acme",
+                "quantity_display": "1 bar",
+            },
+            segment=segment,
+        )
+
+        self.assertTrue(resolution.food.needs_grounding)
+        self.assertFalse(resolution.food.is_verified)
+        self.assertFalse(resolution.create_food_visual)
+        self.assertFalse(resolution.visual_learning_eligible)
+
+    async def test_apply_final_meal_resolution_blocks_food_visual_creation_for_unverified_foods(self) -> None:
         from app.services import meal_resolution_service
 
         meal = SimpleNamespace(
@@ -1126,7 +1304,7 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.quantity_display, "1 bar")
         self.assertEqual(entry.quantity_json["quantity"], 1)
         self.assertEqual(entry.quantity_json["unit"], "bar")
-        self.assertEqual(result.food_visuals[0].cropped_image_url, "/data/uploads/crops/seg-packaged-1.jpg")
+        self.assertEqual(result.food_visuals, [])
 
     async def test_apply_final_meal_resolution_persists_segment_quantity_and_derives_entry_bucket(self) -> None:
         from app.services import meal_resolution_service

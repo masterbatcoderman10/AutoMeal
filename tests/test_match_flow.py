@@ -1277,6 +1277,18 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
                                         "restaurant_name": None,
                                         "correction_note": None,
                                         "supporting_details": ["store-bought packaged item"],
+                                        "serving_size_g": 68.0,
+                                        "calories": 240.0,
+                                        "protein_g": 20.0,
+                                        "carbs_g": 23.0,
+                                        "fat_g": 8.0,
+                                        "fiber_g": 6.0,
+                                        "is_verified": True,
+                                        "grounding_trace": {
+                                            "queries": ["Acme protein bar nutrition facts"],
+                                            "fetched_urls": ["https://acme.example/protein-bar"],
+                                            "stop_reason": "completed",
+                                        },
                                     }
                                 )
                             }

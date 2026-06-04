@@ -8,13 +8,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
 
+import httpx
+from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 from sqlalchemy import select
 
 from app.config import get_settings
 from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog, MealProcessingStatus, MealSegment
+from app.services.grounding_service import GroundingLoopState, GroundingService, build_grounding_loop_budget
 from app.services.grounding_stub import build_grounding_prep, normalize_source_type
 from app.services.interview_schema import (
     FinalizedGroupResult,
+    InterviewTurnValidationError,
     group_finalizer_response_format,
     parse_group_finalizer_response_payload,
 )
@@ -100,6 +104,339 @@ class GroupFinalizerOutcome:
     final_resolution: FinalSegmentResolution
     finalized_confirmation_item: dict[str, Any]
     audit_state: dict[str, Any]
+
+
+def _grounding_tool_schemas() -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "firecrawl_search",
+                "description": "Search for authoritative nutrition or menu pages for the current food group.",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "query": {"type": "string"},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "firecrawl_scrape",
+                "description": "Fetch one URL from the current group's allowlisted search results.",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "url": {"type": "string"},
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+    ]
+
+
+def _tool_loop_extra_body() -> dict[str, Any]:
+    return {
+        "parallel_tool_calls": False,
+        "reasoning": {
+            "max_tokens": 128,
+            "exclude": True,
+        },
+    }
+
+
+def _response_message(response: Mapping[str, Any]) -> dict[str, Any]:
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("finalizer response missing choices")
+    first = choices[0]
+    if not isinstance(first, Mapping):
+        raise ValueError("finalizer choice must be a mapping")
+    message = first.get("message")
+    if not isinstance(message, Mapping):
+        raise ValueError("finalizer response missing message")
+    return dict(message)
+
+
+def _tool_calls_from_message(message: Mapping[str, Any]) -> list[dict[str, Any]]:
+    raw_calls = message.get("tool_calls")
+    if not isinstance(raw_calls, list):
+        return []
+    return [dict(call) for call in raw_calls if isinstance(call, Mapping)]
+
+
+def _tool_call_arguments(tool_call: Mapping[str, Any]) -> dict[str, Any]:
+    function_payload = dict(tool_call.get("function") or {})
+    raw_arguments = function_payload.get("arguments")
+    if not isinstance(raw_arguments, str):
+        return {}
+    try:
+        parsed = json.loads(raw_arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"tool arguments must be valid JSON: {raw_arguments}") from exc
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _assistant_tool_call_message(message: Mapping[str, Any], tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": message.get("content"),
+        "tool_calls": tool_calls,
+    }
+
+
+def _tool_result_message(*, tool_call_id: str | None, tool_name: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "name": tool_name,
+        "content": json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str),
+    }
+
+
+def _tool_timeout_s(*, loop_state: GroundingLoopState, default_timeout_s: float) -> float:
+    remaining = loop_state.remaining_time_s()
+    if remaining <= 0:
+        raise TimeoutError("grounding loop exceeded wall-clock timeout")
+    return max(1.0, min(default_timeout_s, remaining))
+
+
+async def _execute_grounding_tool(
+    *,
+    tool_name: str,
+    tool_args: Mapping[str, Any],
+    service: GroundingService,
+    loop_state: GroundingLoopState,
+    trace: dict[str, Any],
+) -> dict[str, Any]:
+    if tool_name == "firecrawl_search":
+        query = _text(tool_args.get("query"), default="").strip()
+        if not query:
+            raise ValueError("firecrawl_search query is required")
+        results = await service.search(query)
+        urls = [
+            str(item.get("url") or "").strip()
+            for item in results
+            if isinstance(item, Mapping) and str(item.get("url") or "").strip()
+        ]
+        loop_state.allow_search_result_urls(urls)
+        trace["queries"].append(query)
+        return {
+            "query": query,
+            "results": results,
+            "allowlisted_urls": urls,
+        }
+    if tool_name == "firecrawl_scrape":
+        url = _text(tool_args.get("url"), default="").strip()
+        if not url:
+            raise ValueError("firecrawl_scrape url is required")
+        payload = await service.scrape(url, loop_state=loop_state)
+        trace["fetched_urls"].append(url)
+        return {
+            "url": url,
+            "payload": payload,
+        }
+    raise ValueError(f"unsupported grounding tool: {tool_name}")
+
+
+async def _bounded_group_finalizer_response(
+    *,
+    group_input: GroupFinalizerInput,
+    llm_client: Any,
+    settings: Any,
+    model_name: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    budget = build_grounding_loop_budget(settings)
+    loop_state = GroundingLoopState(
+        max_tool_calls=budget.max_tool_calls,
+        wall_clock_timeout_s=budget.wall_clock_timeout_s,
+    )
+    messages = _group_finalizer_messages(group_input)
+    tools = _grounding_tool_schemas()
+    trace: dict[str, Any] = {
+        "queries": [],
+        "fetched_urls": [],
+    }
+    service = GroundingService(settings=settings)
+    try:
+        while True:
+            response = await llm_client.chat_completion(
+                model=model_name,
+                messages=messages,
+                response_format=group_finalizer_response_format(),
+                tools=tools,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+                extra_body=_tool_loop_extra_body(),
+                max_tokens=FINALIZER_MAX_TOKENS,
+                timeout=_tool_timeout_s(
+                    loop_state=loop_state,
+                    default_timeout_s=budget.tool_timeout_s,
+                ),
+            )
+            message = _response_message(response)
+            tool_calls = _tool_calls_from_message(message)
+            if not tool_calls:
+                trace["stop_reason"] = loop_state.stop_reason or "completed"
+                trace["tool_calls_used"] = loop_state.tool_calls_used
+                trace["duplicate_calls"] = loop_state.duplicate_calls
+                trace["iteration_count"] = loop_state.tool_calls_used
+                return response, trace
+
+            messages.append(_assistant_tool_call_message(message, tool_calls))
+            for tool_call in tool_calls:
+                function_payload = dict(tool_call.get("function") or {})
+                tool_name = _text(function_payload.get("name"), default="")
+                tool_args = _tool_call_arguments(tool_call)
+                if not loop_state.record_tool_call(tool_name, tool_args):
+                    raise TimeoutError(loop_state.stop_reason or "grounding loop cap exceeded")
+                result = await _execute_grounding_tool(
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    service=service,
+                    loop_state=loop_state,
+                    trace=trace,
+                )
+                messages.append(
+                    _tool_result_message(
+                        tool_call_id=_optional_text(tool_call.get("id")),
+                        tool_name=tool_name,
+                        payload=result,
+                    )
+                )
+    finally:
+        await service.aclose()
+
+
+def _classify_grounding_failure(error: Exception) -> dict[str, Any]:
+    message = str(error or "").strip()
+    lowered = message.casefold()
+    category = "tool_execution"
+    if isinstance(error, httpx.HTTPStatusError):
+        status_code = int(error.response.status_code) if error.response is not None else None
+        if status_code in {401, 403}:
+            category = "provider_auth"
+        elif status_code == 429:
+            category = "provider_quota"
+        else:
+            category = "tool_execution"
+    elif isinstance(error, RateLimitError):
+        category = "provider_quota"
+    elif isinstance(error, AuthenticationError):
+        category = "provider_auth"
+    elif isinstance(error, (APIConnectionError, APIStatusError, httpx.TimeoutException, httpx.NetworkError)):
+        category = "network"
+    elif isinstance(error, TimeoutError):
+        category = "timeout"
+    elif isinstance(error, InterviewTurnValidationError):
+        category = "tool_execution"
+    elif "tool" in lowered or "firecrawl" in lowered or "searxng" in lowered:
+        category = "tool_execution"
+    return {
+        "category": category,
+        "message": message or "grounding loop failed",
+    }
+ 
+
+def _item_has_inline_grounding_result(item: Mapping[str, Any]) -> bool:
+    if _bool_or_default(item.get("is_verified"), default=False):
+        return True
+    return all(
+        _optional_float(item.get(field_name)) is not None
+        for field_name in ("serving_size_g", "calories", "protein_g", "carbs_g", "fat_g", "fiber_g")
+    )
+
+
+def _grounding_trace_from_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    trace = item.get("grounding_trace")
+    return dict(trace) if isinstance(trace, Mapping) else None
+
+
+def _format_grounding_trace_text(trace: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(trace, Mapping):
+        return None
+    pieces: list[str] = []
+    queries = [str(query).strip() for query in trace.get("queries") or [] if str(query).strip()]
+    if queries:
+        pieces.append("queries=" + "; ".join(queries))
+    fetched_urls = [str(url).strip() for url in trace.get("fetched_urls") or [] if str(url).strip()]
+    if fetched_urls:
+        pieces.append("fetched_urls=" + "; ".join(fetched_urls))
+    stop_reason = _optional_text(trace.get("stop_reason"))
+    if stop_reason:
+        pieces.append(f"stop_reason={stop_reason}")
+    failure_category = _optional_text(trace.get("failure_category"))
+    if failure_category:
+        pieces.append(f"failure_category={failure_category}")
+    return " | ".join(pieces) or None
+
+
+def _build_resolution_reasoning(
+    *,
+    item: Mapping[str, Any],
+    parsed: InterviewAnswer,
+    needs_grounding: bool,
+) -> str:
+    if needs_grounding:
+        return "NEEDS_GROUNDING"
+    details = [
+        str(detail).strip()
+        for detail in item.get("supporting_details") or []
+        if str(detail).strip()
+    ]
+    trace = _grounding_trace_from_item(item)
+    trace_text = _format_grounding_trace_text(trace)
+    if trace_text:
+        details.append(trace_text)
+    if details:
+        return " | ".join(details)
+    return parsed.evidence or "finalized inline"
+
+
+def _build_segment_grounding_reasoning(
+    *,
+    segment: MealSegment | None,
+    trace: Mapping[str, Any] | None,
+    reasoning_text: str,
+) -> dict[str, Any] | None:
+    if segment is None:
+        return None
+    existing = dict(getattr(segment, "ai_reasoning", None) or {})
+    if trace is not None:
+        existing["grounding_trace"] = dict(trace)
+    trace_text = _format_grounding_trace_text(trace)
+    if trace_text:
+        existing["grounding_trace_text"] = trace_text
+    if reasoning_text:
+        existing["final_reasoning"] = reasoning_text
+    return existing or None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    return parsed if parsed >= 0 else None
+
+
+def _bool_or_default(value: object, *, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def _first_degraded_grounding_failure(finalizer_groups: list[Mapping[str, Any]] | None) -> dict[str, Any]:
+    for group in finalizer_groups or []:
+        if not isinstance(group, Mapping):
+            continue
+        failure = group.get("grounding_failure")
+        if isinstance(failure, Mapping):
+            return {str(key): value for key, value in dict(failure).items()}
+    return {}
 
 
 def get_interview_roadmap() -> list[str]:
@@ -802,11 +1139,17 @@ def final_resolution_from_confirmation(
     aliases: list[str] | None = None,
     correction_reason: str | None = None,
     skip_grounding_handoff: bool = False,
+    trace_id: str | None = None,
 ) -> FinalSegmentResolution:
     parsed = InterviewAnswer.from_mapping(item)
-    grounding_prep = build_grounding_prep(item)
-    needs_grounding = grounding_prep is not None or best_effort
-    reasoning = "NEEDS_GROUNDING" if needs_grounding else parsed.evidence
+    inline_grounding_resolved = _item_has_inline_grounding_result(item)
+    grounding_prep = None if inline_grounding_resolved else build_grounding_prep(item)
+    needs_grounding = bool(grounding_prep is not None or best_effort)
+    reasoning = _build_resolution_reasoning(
+        item=item,
+        parsed=parsed,
+        needs_grounding=needs_grounding,
+    )
     segment_id = parsed.segment_id or (getattr(segment, "id", None) if segment is not None else None)
     embedding = getattr(segment, "embedding", None) if segment is not None else None
     segment_embedding = _embedding_payload(embedding)
@@ -828,12 +1171,27 @@ def final_resolution_from_confirmation(
             source_type=parsed.source_type,
             brand_name=parsed.brand_name,
             restaurant_name=parsed.restaurant_name,
+            serving_size_g=_optional_float(item.get("serving_size_g")),
+            calories=_optional_float(item.get("calories")),
+            protein_g=_optional_float(item.get("protein_g")),
+            carbs_g=_optional_float(item.get("carbs_g")),
+            fat_g=_optional_float(item.get("fat_g")),
+            fiber_g=_optional_float(item.get("fiber_g")),
             llm_reasoning=reasoning,
-            is_verified=not best_effort and not needs_grounding,
+            is_verified=(
+                _bool_or_default(item.get("is_verified"), default=(not best_effort and not needs_grounding))
+                and not best_effort
+                and not needs_grounding
+            ),
             times_confirmed=1,
             needs_grounding=needs_grounding,
         ),
         segment_id=segment_id,
+        segment_ai_reasoning=_build_segment_grounding_reasoning(
+            segment=segment,
+            trace=_grounding_trace_from_item(item),
+            reasoning_text=reasoning,
+        ),
         segment_cropped_image_url=getattr(segment, "cropped_image_url", None) if segment is not None else None,
         segment_embedding=segment_embedding,
         portion_bucket=parsed.portion_bucket,
@@ -844,6 +1202,7 @@ def final_resolution_from_confirmation(
         visual_learning_eligible=(not best_effort) or can_preserve_visual_learning,
         skip_grounding_handoff=skip_grounding_handoff,
         correction_reason=_optional_text(correction_reason),
+        trace_id=trace_id,
     )
 
 
@@ -860,30 +1219,6 @@ def _embedding_payload(value: object) -> list[float] | None:
         if isinstance(converted, list):
             return converted
     return None
-
-
-def build_grounding_reasoning_state(
-    *,
-    confirmation_items: list[Mapping[str, Any]],
-    status: str,
-    prior_state: Mapping[str, Any] | None = None,
-    updated_at: datetime | None = None,
-    extra: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    state = dict(prior_state or {})
-    state.update(
-        {
-            "completed_by": "interview_service",
-            "grounding_required": True,
-            "post_interview_grounding": True,
-            "grounding_status": status,
-            "confirmation_items": [dict(item) for item in confirmation_items],
-            "updated_at": (updated_at or datetime.now(UTC)).isoformat(),
-        }
-    )
-    if extra:
-        state.update({key: value for key, value in extra.items() if value is not None})
-    return state
 
 
 async def finalize_confirmed_interview(
@@ -934,34 +1269,10 @@ async def finalize_confirmed_interview(
             for item in confirmation_items
         ]
 
-    if any(
-        resolution.food.needs_grounding and not resolution.skip_grounding_handoff
-        for resolution in final_segments
-    ) and not force_degraded_save:
-        meal.processing_status = MealProcessingStatus.INTERVIEWING
-        meal.reasoning_state_json = build_grounding_reasoning_state(
-            confirmation_items=finalized_confirmation_items,
-            status="PENDING_HANDOFF",
-            prior_state=getattr(meal, "reasoning_state_json", None),
-            extra={
-                "handoff_target": "poll_post_interview_grounding",
-                "finalizer_groups": finalizer_groups or None,
-            },
-        )
-        if hasattr(meal, "last_stage_started_at"):
-            meal.last_stage_started_at = None
-        session.add(meal)
-        if hasattr(session, "commit"):
-            maybe = session.commit()
-            if hasattr(maybe, "__await__"):
-                await maybe
-        return {
-            "meal": meal,
-            "meal_entries": [],
-            "food_visuals": [],
-            "correction_events": [],
-            "grounding_required": True,
-        }
+    degraded_failure = dict(degraded_grounding_failure or {})
+    if not degraded_failure:
+        degraded_failure = _first_degraded_grounding_failure(finalizer_groups)
+    degraded_inline_save = force_degraded_save or bool(degraded_failure)
 
     result = await apply_final_meal_resolution(
         session=session,
@@ -976,10 +1287,10 @@ async def finalize_confirmed_interview(
             finalizer_groups=finalizer_groups,
             grounding_status=(
                 "DEGRADED_SAVED"
-                if force_degraded_save and degraded_grounding_failure is not None
+                if degraded_inline_save
                 else None
             ),
-            grounding_failure=degraded_grounding_failure,
+            grounding_failure=degraded_failure or None,
         ),
     )
     if hasattr(session, "commit"):
@@ -1012,8 +1323,6 @@ def _build_finalization_reasoning_state(
         }
     )
     if grounding_status:
-        state["grounding_required"] = True
-        state["post_interview_grounding"] = True
         state["grounding_status"] = grounding_status
     if isinstance(grounding_failure, Mapping):
         state["grounding_failure"] = {
@@ -1155,21 +1464,15 @@ async def _finalize_group_input(
     attempts: list[dict[str, Any]] = []
     model_name = str(getattr(settings, "FINALIZER_MODEL", "google/gemini-3.1-flash-lite"))
     last_error: Exception | None = None
+    grounding_failure: dict[str, Any] | None = None
 
     for attempt in range(1, FINALIZER_MAX_ATTEMPTS + 1):
         try:
-            response = await llm_client.chat_completion(
-                model=model_name,
-                messages=_group_finalizer_messages(group_input),
-                response_format=group_finalizer_response_format(),
-                extra_body={
-                    "parallel_tool_calls": False,
-                    "reasoning": {
-                        "max_tokens": 128,
-                        "exclude": True,
-                    },
-                },
-                max_tokens=FINALIZER_MAX_TOKENS,
+            response, grounding_trace = await _bounded_group_finalizer_response(
+                group_input=group_input,
+                llm_client=llm_client,
+                settings=settings,
+                model_name=model_name,
             )
             parsed = parse_group_finalizer_response_payload(
                 response,
@@ -1186,9 +1489,11 @@ async def _finalize_group_input(
                 group_input=group_input,
                 parsed=parsed,
                 attempts=attempts,
+                grounding_trace=grounding_trace,
             )
         except Exception as exc:
             last_error = exc
+            grounding_failure = _classify_grounding_failure(exc)
             attempts.append(
                 {
                     "attempt": attempt,
@@ -1202,6 +1507,7 @@ async def _finalize_group_input(
         group_input=group_input,
         attempts=attempts,
         last_error=last_error,
+        grounding_failure=grounding_failure,
     )
 
 
@@ -1210,21 +1516,19 @@ def _successful_group_finalizer_outcome(
     group_input: GroupFinalizerInput,
     parsed: FinalizedGroupResult,
     attempts: list[dict[str, Any]],
+    grounding_trace: Mapping[str, Any] | None,
 ) -> GroupFinalizerOutcome:
     finalized_confirmation_item = _finalized_confirmation_item(
         original_item=group_input.confirmation_item,
         parsed=parsed,
+        grounding_trace=grounding_trace,
     )
     final_resolution = final_resolution_from_confirmation(
         item=finalized_confirmation_item,
         segment=group_input.segment,
         aliases=[parsed.final_name, *parsed.aliases],
         correction_reason=parsed.correction_note,
-    )
-    handoff_action = (
-        "poll_post_interview_grounding"
-        if final_resolution.food.needs_grounding and not final_resolution.skip_grounding_handoff
-        else "apply_final_meal_resolution"
+        trace_id=group_input.trace_id,
     )
     return GroupFinalizerOutcome(
         group_id=group_input.group_id,
@@ -1237,7 +1541,8 @@ def _successful_group_finalizer_outcome(
             "attempts": attempts,
             "final_name": parsed.final_name,
             "source_type": parsed.source_type,
-            "handoff_action": handoff_action,
+            "handoff_action": "apply_final_meal_resolution",
+            "grounding_trace": dict(grounding_trace or {}),
         },
     )
 
@@ -1247,14 +1552,23 @@ def _degraded_group_finalizer_outcome(
     group_input: GroupFinalizerInput,
     attempts: list[dict[str, Any]],
     last_error: Exception | None,
+    grounding_failure: Mapping[str, Any] | None,
 ) -> GroupFinalizerOutcome:
     fallback_item = dict(group_input.confirmation_item)
     fallback_item["name"] = _best_effort_final_name(group_input)
+    if grounding_failure:
+        fallback_item["grounding_trace"] = {
+            "queries": [],
+            "fetched_urls": [],
+            "stop_reason": "degraded_save",
+            "failure_category": grounding_failure.get("category"),
+        }
     final_resolution = final_resolution_from_confirmation(
         item=fallback_item,
         segment=group_input.segment,
         best_effort=True,
         skip_grounding_handoff=True,
+        trace_id=group_input.trace_id,
     )
     finalized_confirmation_item = dict(fallback_item)
     return GroupFinalizerOutcome(
@@ -1270,6 +1584,7 @@ def _degraded_group_finalizer_outcome(
             "source_type": final_resolution.food.source_type,
             "handoff_action": "apply_final_meal_resolution",
             "error": str(last_error) if last_error is not None else "unknown finalizer failure",
+            "grounding_failure": dict(grounding_failure or {}),
         },
     )
 
@@ -1278,6 +1593,7 @@ def _finalized_confirmation_item(
     *,
     original_item: Mapping[str, Any],
     parsed: FinalizedGroupResult,
+    grounding_trace: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     item = dict(original_item)
     item.update(
@@ -1296,10 +1612,45 @@ def _finalized_confirmation_item(
             "correction_note": parsed.correction_note,
             "aliases": list(parsed.aliases),
             "supporting_details": list(parsed.supporting_details),
+            "serving_size_g": parsed.serving_size_g,
+            "calories": parsed.calories,
+            "protein_g": parsed.protein_g,
+            "carbs_g": parsed.carbs_g,
+            "fat_g": parsed.fat_g,
+            "fiber_g": parsed.fiber_g,
+            "is_verified": parsed.is_verified,
         }
     )
     if parsed.quantity_json is not None:
         item["quantity_json"] = parsed.quantity_json.model_dump(mode="json", exclude_none=True)
+    merged_trace = (
+        dict(parsed.grounding_trace.model_dump(mode="json", exclude_none=True))
+        if parsed.grounding_trace is not None
+        else {}
+    )
+    if grounding_trace:
+        for key, value in dict(grounding_trace).items():
+            normalized_key = str(key)
+            if value in (None, "", [], {}):
+                continue
+            if normalized_key in {"queries", "fetched_urls"} and normalized_key in merged_trace:
+                existing_values = [
+                    str(item).strip()
+                    for item in merged_trace.get(normalized_key) or []
+                    if str(item).strip()
+                ]
+                incoming_values = [
+                    str(item).strip()
+                    for item in value or []
+                    if str(item).strip()
+                ]
+                merged_trace[normalized_key] = existing_values or incoming_values
+                continue
+            if normalized_key == "stop_reason" and merged_trace.get(normalized_key) and value == "completed":
+                continue
+            merged_trace[normalized_key] = value
+    if merged_trace:
+        item["grounding_trace"] = merged_trace
     return {key: value for key, value in item.items() if value is not None}
 
 
@@ -3168,7 +3519,6 @@ __all__ = [
     "build_best_effort_closeout",
     "build_neutral_retry_prompt",
     "build_confirmation_message",
-    "build_grounding_reasoning_state",
     "build_interview_turn_state",
     "complete_target_question",
     "confirmation_items_from_state",

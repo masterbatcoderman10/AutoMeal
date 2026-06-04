@@ -171,6 +171,48 @@ class FinalizerQuantityPayload(BaseModel):
         return normalized
 
 
+class GroundingTracePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    queries: list[str] = Field(default_factory=list)
+    fetched_urls: list[str] = Field(default_factory=list)
+    stop_reason: str | None = None
+    failure_category: str | None = None
+    tool_calls_used: int | None = None
+    duplicate_calls: int | None = None
+    iteration_count: int | None = None
+
+    @field_validator("queries", "fetched_urls", mode="before")
+    @classmethod
+    def _normalize_text_list(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("value must be a list")
+        normalized: list[str] = []
+        for item in value:
+            text = ConfirmationItem._strip_text(item)
+            if isinstance(text, str) and text and text not in normalized:
+                normalized.append(text)
+        return normalized
+
+    @field_validator("stop_reason", "failure_category", mode="before")
+    @classmethod
+    def _normalize_optional_text(cls, value: object) -> str | None:
+        return InterviewTurnResult._normalize_optional_text(value)
+
+    @field_validator("tool_calls_used", "duplicate_calls", "iteration_count", mode="before")
+    @classmethod
+    def _normalize_optional_int(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("value must be an integer or null")
+        if value < 0:
+            raise ValueError("value must be >= 0")
+        return value
+
+
 class FinalizedGroupResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -188,6 +230,14 @@ class FinalizedGroupResult(BaseModel):
     restaurant_name: str | None
     correction_note: str | None
     supporting_details: list[str]
+    serving_size_g: float | None = None
+    calories: float | None = None
+    protein_g: float | None = None
+    carbs_g: float | None = None
+    fat_g: float | None = None
+    fiber_g: float | None = None
+    is_verified: bool = False
+    grounding_trace: GroundingTracePayload | None = None
 
     @field_validator(
         "group_id",
@@ -222,6 +272,26 @@ class FinalizedGroupResult(BaseModel):
     @classmethod
     def _normalize_segment_ids(cls, value: object) -> list[str]:
         return ConfirmationItem._normalize_segment_ids(value)
+
+    @field_validator(
+        "serving_size_g",
+        "calories",
+        "protein_g",
+        "carbs_g",
+        "fat_g",
+        "fiber_g",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_optional_float(cls, value: object) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("value must be numeric or null")
+        parsed = float(value)
+        if parsed < 0:
+            raise ValueError("value must be >= 0")
+        return parsed
 
     @field_validator("final_name")
     @classmethod

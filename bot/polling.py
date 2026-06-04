@@ -814,7 +814,6 @@ async def poll_interview_reminders(bot, settings, poll_interval: float | None = 
                         select(InterviewSession)
                         .where(
                             InterviewSession.is_active.is_(True),
-                            InterviewSession.state_key != "GROUNDING_PENDING",
                             InterviewSession.last_reminder_at.is_(None),
                             InterviewSession.updated_at <= cutoff,
                         )
@@ -825,10 +824,6 @@ async def poll_interview_reminders(bot, settings, poll_interval: float | None = 
                     result = await session.execute(statement)
                     interview = result.scalar_one_or_none()
                     if interview is None:
-                        await session.rollback()
-                        await _poll_sleep(interval)
-                        continue
-                    if _is_grounding_pending_session(interview):
                         await session.rollback()
                         await _poll_sleep(interval)
                         continue

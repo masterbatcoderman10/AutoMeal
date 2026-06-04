@@ -318,6 +318,7 @@ def _classify_grounding_failure(error: Exception) -> dict[str, Any]:
     message = str(error or "").strip()
     lowered = message.casefold()
     category = "tool_execution"
+    loop_stop_reason = None
     if isinstance(error, httpx.HTTPStatusError):
         status_code = int(error.response.status_code) if error.response is not None else None
         if status_code in {401, 403}:
@@ -334,14 +335,19 @@ def _classify_grounding_failure(error: Exception) -> dict[str, Any]:
         category = "network"
     elif isinstance(error, TimeoutError):
         category = "timeout"
+        if message in {"MAX_TOOL_CALLS", "WALL_CLOCK_TIMEOUT", "DUPLICATE_TOOL_CALL"}:
+            loop_stop_reason = message
     elif isinstance(error, InterviewTurnValidationError):
         category = "tool_execution"
     elif "tool" in lowered or "firecrawl" in lowered or "searxng" in lowered:
         category = "tool_execution"
-    return {
+    payload = {
         "category": category,
         "message": message or "grounding loop failed",
     }
+    if loop_stop_reason:
+        payload["loop_stop_reason"] = loop_stop_reason
+    return payload
  
 
 def _item_has_inline_grounding_result(item: Mapping[str, Any]) -> bool:
@@ -1502,6 +1508,8 @@ async def _finalize_group_input(
                     "error": str(exc),
                 }
             )
+            if grounding_failure.get("category") == "timeout":
+                break
 
     return _degraded_group_finalizer_outcome(
         group_input=group_input,

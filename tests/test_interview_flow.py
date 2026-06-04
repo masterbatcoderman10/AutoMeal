@@ -1564,6 +1564,152 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "DEGRADED")
 
+    async def test_finalize_confirmed_interview_preserves_loop_stop_reason_on_call_cap_exit(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-inline-grounding-call-cap",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "food_groups": [
+                        {
+                            "group_id": "group-bar",
+                            "group_label": "protein bar",
+                            "question_kind": "IDENTITY",
+                            "primary_segment_id": "seg-bar-1",
+                            "segment_ids": ["seg-bar-1"],
+                        }
+                    ]
+                }
+            },
+            last_stage_started_at=None,
+        )
+        segment = SimpleNamespace(
+            id="seg-bar-1",
+            cropped_image_url="/data/uploads/crops/seg-bar-1.jpg",
+            embedding=[0.11, 0.22, 0.33],
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        confirmation_items = [
+            {
+                "group_id": "group-bar",
+                "primary_segment_id": "seg-bar-1",
+                "segment_id": "seg-bar-1",
+                "segment_ids": ["seg-bar-1"],
+                "name": "Protein Bar",
+                "source_type": "PACKAGED",
+                "brand_name": "Acme",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "quantity_display": "1 bar",
+            }
+        ]
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                side_effect=[
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "tool-1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "firecrawl_search",
+                                                "arguments": json.dumps(
+                                                    {"query": "Acme protein bar nutrition"}
+                                                ),
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "tool-2",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "firecrawl_search",
+                                                "arguments": json.dumps(
+                                                    {"query": "Acme protein bar calories"}
+                                                ),
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    },
+                ]
+            )
+        )
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=1,
+                    FINALIZER_MODEL="google/gemini-3.1-flash-lite",
+                    GROUNDING_MAX_TOOL_CALLS=1,
+                    GROUNDING_WALL_CLOCK_TIMEOUT_S=90.0,
+                    GROUNDING_TOOL_TIMEOUT_S=12.5,
+                    FIRECRAWL_BASE_URL="http://firecrawl:3002",
+                    FIRECRAWL_API_KEY="",
+                    GROUNDING_SEARCH_LIMIT=5,
+                    GROUNDING_SCRAPE_FORMAT="markdown",
+                ),
+                create=True,
+            ),
+            patch.object(
+                interview_service.GroundingService,
+                "search",
+                new=AsyncMock(return_value=[{"url": "https://example.com/acme/protein-bar"}]),
+            ),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
+        ):
+            await interview_service.finalize_confirmed_interview(
+                session=session,
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=[segment],
+            )
+
+        self.assertEqual(captured["reasoning_state_json"].get("grounding_status"), "DEGRADED_SAVED")
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_failure", {}).get("category"),
+            "timeout",
+        )
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_failure", {}).get("loop_stop_reason"),
+            "MAX_TOOL_CALLS",
+        )
+        self.assertEqual(
+            captured["reasoning_state_json"]["finalizer_groups"][0]["grounding_failure"].get("loop_stop_reason"),
+            "MAX_TOOL_CALLS",
+        )
+
     def test_source_origin_store_bought_preserves_state_and_requires_grounding(self) -> None:
         from app.services import interview_service
 

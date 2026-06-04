@@ -50,6 +50,7 @@ class ResolvedFoodInput:
 class FinalSegmentResolution:
     food: ResolvedFoodInput
     segment_id: str | None = None
+    segment_ai_reasoning: dict[str, Any] | None = None
     segment_cropped_image_url: str | None = None
     segment_embedding: list[float] | None = None
     portion_bucket: str | PortionBucket = PortionBucket.STANDARD
@@ -450,6 +451,11 @@ async def apply_final_meal_resolution(
             session=session,
             food=resolution.food,
         )
+
+        if resolution.segment_id is not None and resolution.segment_ai_reasoning is not None:
+            segment = await session.get(MealSegment, resolution.segment_id)
+            if segment is not None:
+                segment.ai_reasoning = copy.deepcopy(resolution.segment_ai_reasoning)
 
         if resolution.existing_diary_entry_id is not None:
             existing = await session.get(DiaryEntry, resolution.existing_diary_entry_id)

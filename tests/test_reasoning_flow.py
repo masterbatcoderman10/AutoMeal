@@ -96,6 +96,18 @@ def _invoke_reasoning_writer(
 
 
 class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
+    def test_finalize_meal_from_reasoning_uses_shared_group_finalizer_path(self) -> None:
+        from app.services import interview_service, reasoning_service
+
+        finalize_source = inspect.getsource(reasoning_service.finalize_meal_from_reasoning)
+        bounded_source = inspect.getsource(interview_service._bounded_group_finalizer_response)  # noqa: SLF001
+
+        self.assertIn("_run_group_finalizers", finalize_source)
+        self.assertNotIn("build_grouped_final_segment_resolutions", finalize_source)
+        self.assertIn("_execute_grounding_tool", bounded_source)
+        self.assertIn("group_finalizer_response_format", bounded_source)
+        self.assertNotIn("tools=", inspect.getsource(reasoning_service._run_reasoning_model))
+
     def test_append_grounding_trace_preserves_existing_reasoning_fields(self) -> None:
         from app.services.reasoning_service import append_grounding_trace
 

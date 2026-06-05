@@ -825,6 +825,81 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["food_groups"][0]["group_action"], "AFFIRMATION_REQUIRED")
         self.assertEqual(result["food_groups"][0]["gate_reason"], "no usable candidate labels were available")
 
+    def test_fallback_food_groups_from_match_results_do_not_become_save_ready_after_failed_reasoning(self) -> None:
+        from app.services import reasoning_service
+
+        segment = type("MealSegment", (), {"id": "segment-strong-hit", "label": "chicken curry"})()
+        candidate = {
+            **_candidate_payload(),
+            "candidate_id": "candidate-strong-hit",
+            "label": "chicken curry",
+            "identity_confidence": 0.99,
+            "match_consistency_confidence": 0.99,
+            "missing_evidence": [],
+        }
+
+        fallback_groups = reasoning_service._fallback_food_groups_from_match_results(  # noqa: SLF001
+            [(segment, type("Result", (), {"top_candidates": [candidate], "similarity": 0.99})())],
+            meal_state="FAILED_UNCLEAR",
+            action="FAILED_UNCLEAR",
+        )
+
+        self.assertEqual(len(fallback_groups), 1)
+        self.assertNotIn(fallback_groups[0]["group_action"], {"AUTO_CONFIRM", "AUTO_CONFIRM_LEARNED"})
+        self.assertNotEqual(fallback_groups[0]["group_state"], "READY_TO_WRITE")
+
+    async def test_run_reasoning_request_keeps_failed_reasoning_closed_even_with_strong_vector_hit(self) -> None:
+        from app.services import reasoning_service
+
+        meal = type("Meal", (), {"id": "meal-failed-strong-hit", "image_url": None})()
+        segment = type(
+            "MealSegment",
+            (),
+            {
+                "id": "segment-strong-hit",
+                "label": "chicken curry",
+                "bounding_box": [0.1, 0.1, 0.8, 0.8],
+                "cropped_image_url": None,
+            },
+        )()
+        candidate = {
+            **_candidate_payload(),
+            "candidate_id": "candidate-strong-hit",
+            "label": "chicken curry",
+            "identity_confidence": 0.99,
+            "match_consistency_confidence": 0.99,
+            "missing_evidence": [],
+        }
+        llm_client = type("LLM", (), {})()
+        llm_client.chat_completion = AsyncMock(
+            return_value={"choices": [{"message": {"content": "not json"}}]},
+        )
+        settings = type(
+            "Settings",
+            (),
+            {
+                "REASONING_MODEL": "reasoning-primary",
+                "REASONING_FALLBACK_MODEL": "reasoning-primary",
+                "REASONING_MATCH_THRESHOLD": 0.9,
+            },
+        )()
+
+        with patch.object(reasoning_service.tracing_service, "maybe_start_trace", return_value=nullcontext(None)):
+            result, _trace = await reasoning_service.run_reasoning_request(
+                llm_client=llm_client,
+                meal_id=meal.id,
+                meal=meal,
+                match_results=[(segment, type("Result", (), {"top_candidates": [candidate], "similarity": 0.99})())],
+                settings=settings,
+            )
+
+        self.assertEqual(result["meal_state"], "FAILED_UNCLEAR")
+        self.assertEqual(result["action"], "FAILED_UNCLEAR")
+        self.assertEqual(result["food_group_count"], 1)
+        self.assertNotIn(result["food_groups"][0]["group_action"], {"AUTO_CONFIRM", "AUTO_CONFIRM_LEARNED"})
+        self.assertNotEqual(result["food_groups"][0]["group_state"], "READY_TO_WRITE")
+        self.assertNotIn(result["meal_state"], {"READY_TO_WRITE", "PENDING_INTERVIEW"})
+
     def test_reasoning_parser_settings_are_removed_from_config(self) -> None:
         from app.config import Settings
 

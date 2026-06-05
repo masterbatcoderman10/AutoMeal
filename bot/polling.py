@@ -603,7 +603,6 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                         await session.commit()
                         continue
 
-                    await session.commit()
                     for segment in segments:
                         segment.embedding = await matching_service.embed_segment_query_embedding(
                             segment=segment,
@@ -858,7 +857,6 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                         await session.commit()
                         continue
 
-                    await session.commit()
                     match_sem = asyncio.Semaphore(_resolve_match_parallelism(settings))
                     match_results = await asyncio.gather(
                         *[

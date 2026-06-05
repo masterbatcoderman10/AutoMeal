@@ -1329,7 +1329,10 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
             "food_groups": [],
         }
 
-    if any(group["group_state"] == _REVIEW_STATE for group in food_groups):
+    if any(group["group_state"] == _FAILED_UNCLEAR_STATE for group in food_groups):
+        meal_action = _FAILED_UNCLEAR_STATE
+        meal_state = _FAILED_UNCLEAR_STATE
+    elif any(group["group_state"] == _REVIEW_STATE for group in food_groups):
         meal_action = _REVIEW_STATE
         meal_state = _REVIEW_STATE
     else:
@@ -1507,7 +1510,17 @@ def _attach_deterministic_group_context(
 
 def _fallback_food_groups_from_match_results(
     match_results: list[tuple[MealSegment, Any]],
+    *,
+    meal_state: str | None = None,
+    action: str | None = None,
 ) -> list[dict[str, Any]]:
+    failure_state = (
+        _FAILED_UNCLEAR_STATE
+        if meal_state == _FAILED_UNCLEAR_STATE or action == _FAILED_UNCLEAR_STATE
+        else _REVIEW_STATE
+        if meal_state == _REVIEW_STATE or action == _REVIEW_STATE
+        else None
+    )
     fallback_groups: list[dict[str, Any]] = []
     for index, (segment, result) in enumerate(match_results, start=1):
         top_three = _normalize_top_three(result) if _vector_candidates_allowed_for_reasoning(result) else []
@@ -1520,19 +1533,38 @@ def _fallback_food_groups_from_match_results(
             {
                 "group_id": f"group-{index}",
                 "group_label": label or f"food group {index}",
-                "group_action": "AUTO_CONFIRM",
-                "group_state": "READY_TO_WRITE",
+                "group_action": failure_state or "AUTO_CONFIRM",
+                "group_state": failure_state or "READY_TO_WRITE",
                 "primary_segment_id": segment_id,
                 "segment_ids": [segment_id],
                 "selected_candidate_id": selected_candidate_id,
                 "visual_evidence": [],
                 "missing_evidence": [],
-                "decision_rationale": "Synthesized from segment match candidates",
-                "gate_reason": "",
+                "decision_rationale": (
+                    "Preserved vector candidates for review after reasoning failure"
+                    if failure_state
+                    else "Synthesized from segment match candidates"
+                ),
+                "gate_reason": (
+                    "reasoning failure preserved cached candidates for review"
+                    if failure_state
+                    else ""
+                ),
                 "top_3": top_three,
             }
-        )
+    )
     return fallback_groups
+
+
+def _has_reasoning_eligible_match_candidates(
+    match_results: list[tuple[MealSegment, Any]],
+) -> bool:
+    for _segment, result in match_results:
+        if not _vector_candidates_allowed_for_reasoning(result):
+            continue
+        if _normalize_top_three(result):
+            return True
+    return False
 
 
 def _segment_group_snapshot(
@@ -1926,11 +1958,18 @@ async def _run_reasoning_model(
 
         parsed = _parse_reasoning_message(response)
         if isinstance(parsed, Mapping):
+            raw_action = _coerce_str(parsed.get("action"), "action")
+            raw_meal_state = _coerce_str(parsed.get("meal_state"), "meal_state")
             deterministic_payload = _attach_deterministic_group_context(
                 parsed,
                 match_results=match_results,
             )
             normalized = coerce_reasoning_response(deterministic_payload)
+            if not normalized.get("food_groups"):
+                if raw_action:
+                    normalized["_fallback_action"] = raw_action
+                if raw_meal_state:
+                    normalized["_fallback_meal_state"] = raw_meal_state
             normalized["trace_id"] = _normalize_trace_id_from_payload(
                 normalized,
                 trace_metadata,
@@ -1990,7 +2029,16 @@ async def run_reasoning_request(
         trace_metadata = {"trace_id": None, "cached_tokens": None}
 
     if not parsed.get("food_groups") and match_results:
-        parsed["food_groups"] = _fallback_food_groups_from_match_results(match_results)
+        fallback_action = str(parsed.get("_fallback_action") or parsed.get("action") or "")
+        fallback_meal_state = str(parsed.get("_fallback_meal_state") or parsed.get("meal_state") or "")
+        if not _has_reasoning_eligible_match_candidates(match_results):
+            fallback_action = ""
+            fallback_meal_state = ""
+        parsed["food_groups"] = _fallback_food_groups_from_match_results(
+            match_results,
+            meal_state=fallback_meal_state,
+            action=fallback_action,
+        )
         parsed["food_group_count"] = len(parsed["food_groups"])
 
     parsed = coerce_reasoning_response(parsed)

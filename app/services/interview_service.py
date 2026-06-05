@@ -48,7 +48,7 @@ INTERVIEW_ROADMAP = (
 SESSION_MODE_MEAL = "MEAL_INTERVIEW"
 SESSION_MODE_FIX = "ENTRY_FIX"
 FINALIZER_MAX_ATTEMPTS = 2
-FINALIZER_MAX_TOKENS = 1200
+FINALIZER_MAX_TOKENS = 4096
 SOURCE_POLICY_NONE = ""
 SOURCE_POLICY_ASK_GENERIC = "ask_generic"
 SOURCE_POLICY_ASK_AFFIRMATION = "ask_affirmation"
@@ -383,7 +383,7 @@ async def _bounded_group_finalizer_response(
                 tool_choice="auto",
                 parallel_tool_calls=False,
                 extra_body=_tool_loop_extra_body(),
-                max_tokens=FINALIZER_MAX_TOKENS,
+                max_tokens=int(getattr(settings, "FINALIZER_MAX_TOKENS", 4096)),
                 timeout=_tool_timeout_s(
                     loop_state=loop_state,
                     default_timeout_s=budget.tool_timeout_s,
@@ -1612,6 +1612,11 @@ async def _finalize_group_input(
                 response,
                 expected_group_id=group_input.group_id,
             )
+            _validate_successful_finalizer_result(
+                parsed=parsed,
+                group_input=group_input,
+                grounding_trace=grounding_trace,
+            )
             attempts.append(
                 {
                     "attempt": attempt,
@@ -1644,6 +1649,79 @@ async def _finalize_group_input(
         attempts=attempts,
         last_error=last_error,
         grounding_failure=grounding_failure,
+    )
+
+
+def _validate_successful_finalizer_result(
+    *,
+    parsed: FinalizedGroupResult,
+    group_input: GroupFinalizerInput,
+    grounding_trace: Mapping[str, Any] | None,
+) -> None:
+    required_nutrition_fields = (
+        "serving_size_g",
+        "calories",
+        "protein_g",
+        "carbs_g",
+        "fat_g",
+        "fiber_g",
+    )
+    missing_fields = [
+        field_name
+        for field_name in required_nutrition_fields
+        if getattr(parsed, field_name) is None
+    ]
+    if missing_fields:
+        raise InterviewTurnValidationError(
+            "finalizer success missing save-ready nutrition fields: "
+            + ", ".join(missing_fields)
+        )
+    if parsed.is_verified is not True:
+        raise InterviewTurnValidationError("finalizer success requires is_verified=true")
+    if parsed.provenance not in {"searched", "model_knowledge"}:
+        raise InterviewTurnValidationError("finalizer success requires searched or model_knowledge provenance")
+
+    authoritative_source_type = parse_authoritative_source_type(parsed.source_type)
+    requires_searched_provenance = authoritative_source_type in {"PACKAGED", "RESTAURANT"}
+    if parsed.brand_name or parsed.restaurant_name:
+        requires_searched_provenance = True
+    if group_input.confirmation_item.get("brand_name") or group_input.confirmation_item.get("restaurant_name"):
+        requires_searched_provenance = True
+
+    if not requires_searched_provenance:
+        return
+    if parsed.provenance != "searched":
+        raise InterviewTurnValidationError(
+            "packaged or restaurant finalizer success requires searched provenance"
+        )
+    if not _finalizer_has_grounded_url(parsed=parsed, grounding_trace=grounding_trace):
+        raise InterviewTurnValidationError(
+            "packaged or restaurant finalizer success requires source_url or fetched URL evidence"
+        )
+
+
+def _finalizer_has_grounded_url(
+    *,
+    parsed: FinalizedGroupResult,
+    grounding_trace: Mapping[str, Any] | None,
+) -> bool:
+    if _optional_text(parsed.source_url):
+        return True
+    if parsed.grounding_trace is not None:
+        parsed_trace = parsed.grounding_trace.model_dump(mode="json", exclude_none=True)
+        if _trace_has_url_evidence(parsed_trace):
+            return True
+    return _trace_has_url_evidence(grounding_trace)
+
+
+def _trace_has_url_evidence(trace: Mapping[str, Any] | None) -> bool:
+    if not isinstance(trace, Mapping):
+        return False
+    if _optional_text(trace.get("source_url")):
+        return True
+    return any(
+        _optional_text(url)
+        for url in trace.get("fetched_urls") or []
     )
 
 

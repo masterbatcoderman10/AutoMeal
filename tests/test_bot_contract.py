@@ -3315,6 +3315,161 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order, ["commit", "commit", "commit", "send"])
         self.assertEqual(session.commit.await_count, 3)
 
+    async def test_poll_match_blocks_duplicate_reasoning_and_completion_side_effects_while_first_worker_runs_d11_d12(self) -> None:
+        from bot import polling
+
+        segment = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=[0.2] * 1536,
+            label="Daal Chawal",
+        )
+        meal = SimpleNamespace(
+            id="meal-match-claim",
+            processing_status=MealProcessingStatus.MATCHING,
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+        claim_released = asyncio.Event()
+        allow_match_finish = asyncio.Event()
+        duplicate_worker_entered = asyncio.Event()
+        pipeline_call_count = 0
+
+        class FakeSession:
+            def __init__(self, worker_name: str) -> None:
+                self.worker_name = worker_name
+                self.execute_count = 0
+                self.claimed_meal = False
+                self.add = Mock()
+                self.add_all = Mock()
+                self.commit = AsyncMock(side_effect=self._commit)
+                self.rollback = AsyncMock()
+                self.merge = AsyncMock()
+
+            async def _commit(self) -> None:
+                if self.claimed_meal and meal.processing_status == MealProcessingStatus.MATCHING:
+                    claim_released.set()
+
+            async def execute(self, _statement):
+                self.execute_count += 1
+                if self.execute_count == 1:
+                    if self.worker_name == "worker-1":
+                        self.claimed_meal = True
+                        return Mock(scalar_one_or_none=Mock(return_value=meal))
+                    if meal.processing_status == MealProcessingStatus.MATCHING and claim_released.is_set():
+                        duplicate_worker_entered.set()
+                        self.claimed_meal = True
+                        return Mock(scalar_one_or_none=Mock(return_value=meal))
+                    return Mock(scalar_one_or_none=Mock(return_value=None))
+                if self.execute_count == 2:
+                    return Mock(
+                        scalars=Mock(
+                            return_value=Mock(
+                                all=Mock(return_value=[segment]),
+                            )
+                        )
+                    )
+                raise asyncio.CancelledError
+
+        class SessionContext:
+            def __init__(self, session: FakeSession) -> None:
+                self._session = session
+
+            async def __aenter__(self):
+                return self._session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        sessions = [FakeSession("worker-1"), FakeSession("worker-2")]
+        session_factory = Mock(side_effect=[SessionContext(session) for session in sessions])
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            MATCHING_MODEL="google/gemini-embedding-2",
+            TELEGRAM_CHAT_ID="999",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        async def _match_segment(**_kwargs):
+            await allow_match_finish.wait()
+            return (
+                segment,
+                SimpleNamespace(
+                    food_visual_id="visual-1",
+                    food_item_id="item-1",
+                    is_match=True,
+                    is_below_threshold=False,
+                    food_visual=SimpleNamespace(
+                        food_item=SimpleNamespace(
+                            name="Daal Chawal",
+                            calories=420.0,
+                            protein_g=16.0,
+                            carbs_g=68.0,
+                            fat_g=12.0,
+                            is_verified=True,
+                        )
+                    ),
+                    query_embedding=[0.2] * 1536,
+                    similarity=0.95,
+                ),
+            )
+
+        async def _run_pipeline(**_kwargs):
+            nonlocal pipeline_call_count
+            pipeline_call_count += 1
+            if pipeline_call_count > 1:
+                duplicate_worker_entered.set()
+            meal.processing_status = MealProcessingStatus.COMPLETED
+            return (
+                {"action": "AUTO_CONFIRM", "meal_state": "READY_TO_WRITE"},
+                {
+                    "finalized": True,
+                    "meal_resolution": SimpleNamespace(
+                        meal_entries=[
+                            SimpleNamespace(
+                                segment_id="segment-1",
+                                portion_bucket="STANDARD",
+                                quantity_display=None,
+                            )
+                        ]
+                    ),
+                },
+            )
+
+        async def _cancel_after_no_claim(_delay: float) -> None:
+            raise asyncio.CancelledError
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(polling, "_match_segment_with_isolated_session", side_effect=_match_segment),
+            patch.object(polling, "_run_reasoning_pipeline", side_effect=_run_pipeline),
+            patch.object(polling, "format_match_completion_message", return_value="meal completed"),
+            patch.object(polling, "_poll_sleep", side_effect=_cancel_after_no_claim),
+        ):
+            worker_one = asyncio.create_task(
+                polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+            )
+            await claim_released.wait()
+            worker_two = asyncio.create_task(
+                polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+            )
+            await asyncio.sleep(0)
+            allow_match_finish.set()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await worker_one
+            with self.assertRaises(asyncio.CancelledError):
+                await worker_two
+
+        self.assertFalse(
+            duplicate_worker_entered.is_set(),
+            "second worker should not rerun MATCHING/reasoning or send a duplicate completion notification",
+        )
+        self.assertEqual(pipeline_call_count, 1)
+        bot.send_message.assert_awaited_once_with(chat_id="999", text="meal completed")
+
     async def test_poll_match_tracks_recent_entries_for_fix_followups(self) -> None:
         from bot import polling
 

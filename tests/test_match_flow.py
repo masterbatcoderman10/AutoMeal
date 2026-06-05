@@ -383,6 +383,121 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meal.processing_status, MealProcessingStatus.MATCHING)
         self.assertEqual(session.commit.await_count, 2)
 
+    async def test_poll_and_embed_keeps_single_worker_claim_while_embedding_is_in_flight_d11_d12(self) -> None:
+        from bot import polling
+        from app.services import matching_service
+
+        meal = SimpleNamespace(
+            id="meal-embed-claim",
+            processing_status=MealProcessingStatus.EMBEDDING,
+        )
+        segment = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=None,
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+        claim_released = asyncio.Event()
+        allow_embedding_finish = asyncio.Event()
+        duplicate_worker_entered = asyncio.Event()
+        embed_call_count = 0
+
+        class FakeSession:
+            def __init__(self, worker_name: str) -> None:
+                self.worker_name = worker_name
+                self.execute_count = 0
+                self.claimed_meal = False
+                self.commit = AsyncMock(side_effect=self._commit)
+                self.rollback = AsyncMock()
+                self.merge = AsyncMock()
+
+            async def _commit(self) -> None:
+                if self.claimed_meal and meal.processing_status == MealProcessingStatus.EMBEDDING:
+                    claim_released.set()
+
+            async def execute(self, _statement):
+                self.execute_count += 1
+                if self.execute_count == 1:
+                    if self.worker_name == "worker-1":
+                        self.claimed_meal = True
+                        return Mock(scalar_one_or_none=Mock(return_value=meal))
+                    if meal.processing_status == MealProcessingStatus.EMBEDDING and claim_released.is_set():
+                        duplicate_worker_entered.set()
+                        self.claimed_meal = True
+                        return Mock(scalar_one_or_none=Mock(return_value=meal))
+                    return Mock(scalar_one_or_none=Mock(return_value=None))
+                if self.execute_count == 2:
+                    return Mock(
+                        scalars=Mock(
+                            return_value=Mock(
+                                all=Mock(return_value=[segment]),
+                            )
+                        )
+                    )
+                raise asyncio.CancelledError
+
+        class SessionContext:
+            def __init__(self, session: FakeSession) -> None:
+                self._session = session
+
+            async def __aenter__(self):
+                return self._session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        sessions = [FakeSession("worker-1"), FakeSession("worker-2")]
+        session_factory = Mock(side_effect=[SessionContext(session) for session in sessions])
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        async def _embed_segment(**_kwargs):
+            nonlocal embed_call_count
+            embed_call_count += 1
+            if embed_call_count > 1:
+                duplicate_worker_entered.set()
+            await allow_embedding_finish.wait()
+            return [0.1] * matching_service.EMBEDDING_DIMENSION
+
+        async def _cancel_after_no_claim(_delay: float) -> None:
+            raise asyncio.CancelledError
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(
+                polling.matching_service,
+                "embed_segment_query_embedding",
+                side_effect=_embed_segment,
+            ),
+            patch.object(polling, "_poll_sleep", side_effect=_cancel_after_no_claim),
+        ):
+            worker_one = asyncio.create_task(
+                polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
+            )
+            await claim_released.wait()
+            worker_two = asyncio.create_task(
+                polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
+            )
+            await asyncio.sleep(0)
+            allow_embedding_finish.set()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await worker_one
+            with self.assertRaises(asyncio.CancelledError):
+                await worker_two
+
+        self.assertFalse(
+            duplicate_worker_entered.is_set(),
+            "second worker should not reacquire the same EMBEDDING meal while worker one still owns it",
+        )
+        self.assertEqual(embed_call_count, 1)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.MATCHING)
+
     async def test_poll_and_embed_marks_meal_without_segments_failed(self) -> None:
         from bot import polling
 

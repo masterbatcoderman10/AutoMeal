@@ -3190,7 +3190,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("send", order)
         self.assertLess(order.index("commit"), order.index("send"))
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        self.assertEqual(session.commit.await_count, 3)
+        self.assertEqual(session.commit.await_count, 2)
         bot.send_message.assert_awaited_once_with(chat_id="999", text="meal completed")
         self.assertEqual(formatter.call_count, 1)
         completion_items = list(formatter.call_args[0][0]) if formatter.call_args else []
@@ -3312,8 +3312,8 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        self.assertEqual(order, ["commit", "commit", "commit", "send"])
-        self.assertEqual(session.commit.await_count, 3)
+        self.assertEqual(order, ["commit", "commit", "send"])
+        self.assertEqual(session.commit.await_count, 2)
 
     async def test_poll_match_blocks_duplicate_reasoning_and_completion_side_effects_while_first_worker_runs_d11_d12(self) -> None:
         from bot import polling
@@ -3329,10 +3329,11 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             processing_status=MealProcessingStatus.MATCHING,
         )
         engine = SimpleNamespace(dispose=AsyncMock())
-        claim_released = asyncio.Event()
+        match_started = asyncio.Event()
         allow_match_finish = asyncio.Event()
         duplicate_worker_entered = asyncio.Event()
         pipeline_call_count = 0
+        claim_active = True
 
         class FakeSession:
             def __init__(self, worker_name: str) -> None:
@@ -3346,8 +3347,9 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 self.merge = AsyncMock()
 
             async def _commit(self) -> None:
-                if self.claimed_meal and meal.processing_status == MealProcessingStatus.MATCHING:
-                    claim_released.set()
+                nonlocal claim_active
+                if self.claimed_meal:
+                    claim_active = False
 
             async def execute(self, _statement):
                 self.execute_count += 1
@@ -3355,7 +3357,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                     if self.worker_name == "worker-1":
                         self.claimed_meal = True
                         return Mock(scalar_one_or_none=Mock(return_value=meal))
-                    if meal.processing_status == MealProcessingStatus.MATCHING and claim_released.is_set():
+                    if meal.processing_status == MealProcessingStatus.MATCHING and not claim_active:
                         duplicate_worker_entered.set()
                         self.claimed_meal = True
                         return Mock(scalar_one_or_none=Mock(return_value=meal))
@@ -3391,6 +3393,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def _match_segment(**_kwargs):
+            match_started.set()
             await allow_match_finish.wait()
             return (
                 segment,
@@ -3451,7 +3454,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             worker_one = asyncio.create_task(
                 polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
             )
-            await claim_released.wait()
+            await match_started.wait()
             worker_two = asyncio.create_task(
                 polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
             )

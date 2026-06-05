@@ -381,7 +381,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segment_one.embedding, [0.1] * matching_service.EMBEDDING_DIMENSION)
         self.assertEqual(segment_two.embedding, [0.2] * matching_service.EMBEDDING_DIMENSION)
         self.assertEqual(meal.processing_status, MealProcessingStatus.MATCHING)
-        self.assertEqual(session.commit.await_count, 2)
+        self.assertEqual(session.commit.await_count, 1)
 
     async def test_poll_and_embed_keeps_single_worker_claim_while_embedding_is_in_flight_d11_d12(self) -> None:
         from bot import polling
@@ -397,10 +397,11 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
             embedding=None,
         )
         engine = SimpleNamespace(dispose=AsyncMock())
-        claim_released = asyncio.Event()
+        embedding_started = asyncio.Event()
         allow_embedding_finish = asyncio.Event()
         duplicate_worker_entered = asyncio.Event()
         embed_call_count = 0
+        claim_active = True
 
         class FakeSession:
             def __init__(self, worker_name: str) -> None:
@@ -412,8 +413,9 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
                 self.merge = AsyncMock()
 
             async def _commit(self) -> None:
-                if self.claimed_meal and meal.processing_status == MealProcessingStatus.EMBEDDING:
-                    claim_released.set()
+                nonlocal claim_active
+                if self.claimed_meal:
+                    claim_active = False
 
             async def execute(self, _statement):
                 self.execute_count += 1
@@ -421,7 +423,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
                     if self.worker_name == "worker-1":
                         self.claimed_meal = True
                         return Mock(scalar_one_or_none=Mock(return_value=meal))
-                    if meal.processing_status == MealProcessingStatus.EMBEDDING and claim_released.is_set():
+                    if meal.processing_status == MealProcessingStatus.EMBEDDING and not claim_active:
                         duplicate_worker_entered.set()
                         self.claimed_meal = True
                         return Mock(scalar_one_or_none=Mock(return_value=meal))
@@ -459,6 +461,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
             embed_call_count += 1
             if embed_call_count > 1:
                 duplicate_worker_entered.set()
+            embedding_started.set()
             await allow_embedding_finish.wait()
             return [0.1] * matching_service.EMBEDDING_DIMENSION
 
@@ -479,7 +482,7 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
             worker_one = asyncio.create_task(
                 polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
             )
-            await claim_released.wait()
+            await embedding_started.wait()
             worker_two = asyncio.create_task(
                 polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
             )

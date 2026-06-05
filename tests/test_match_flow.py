@@ -1259,9 +1259,13 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
                                         "fat_g": 27.0,
                                         "fiber_g": 3.0,
                                         "is_verified": True,
+                                        "provenance": "model_knowledge",
+                                        "source_url": None,
                                         "grounding_trace": {
                                             "queries": [],
                                             "fetched_urls": [],
+                                            "provenance": "model_knowledge",
+                                            "source_url": None,
                                             "stop_reason": "model_knowledge",
                                         },
                                     }

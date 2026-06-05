@@ -1421,9 +1421,13 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                                         "fat_g": 8.0,
                                         "fiber_g": 6.0,
                                         "is_verified": True,
+                                        "provenance": "searched",
+                                        "source_url": "https://acme.example/protein-bar",
                                         "grounding_trace": {
                                             "queries": ["Acme protein bar nutrition facts"],
                                             "fetched_urls": ["https://acme.example/protein-bar"],
+                                            "provenance": "searched",
+                                            "source_url": "https://acme.example/protein-bar",
                                             "stop_reason": "completed",
                                         },
                                     }
@@ -1666,6 +1670,68 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(final_segment.create_food_visual)
         self.assertFalse(final_segment.visual_learning_eligible)
+
+    def test_successful_finalizer_allows_home_model_knowledge_complete_nutrition(self) -> None:
+        from app.services import interview_service
+        from app.services.interview_schema import FinalizedGroupResult
+
+        group_input = interview_service.GroupFinalizerInput(
+            group_id="group-home-curry",
+            primary_segment_id="seg-curry-1",
+            segment_ids=["seg-curry-1"],
+            confirmation_item={
+                "group_id": "group-home-curry",
+                "primary_segment_id": "seg-curry-1",
+                "segment_id": "seg-curry-1",
+                "segment_ids": ["seg-curry-1"],
+                "name": "Chicken curry",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+            },
+            group_state={},
+            clarification_answers=[],
+            segment=None,
+            segment_ref={},
+        )
+        parsed = FinalizedGroupResult.model_validate(
+            {
+                "group_id": "group-home-curry",
+                "primary_segment_id": "seg-curry-1",
+                "segment_ids": ["seg-curry-1"],
+                "final_name": "Chicken curry",
+                "aliases": ["Homemade chicken curry"],
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "quantity_display": "1 bowl",
+                "quantity_json": {
+                    "quantity": 1,
+                    "unit": "bowl",
+                    "portion_bucket": "STANDARD",
+                },
+                "food_item_id": None,
+                "brand_name": None,
+                "restaurant_name": None,
+                "correction_note": None,
+                "supporting_details": ["Model knowledge is sufficient for this homemade item."],
+                "serving_size_g": 280.0,
+                "calories": 410.0,
+                "protein_g": 32.0,
+                "carbs_g": 14.0,
+                "fat_g": 24.0,
+                "fiber_g": 3.0,
+                "is_verified": True,
+                "provenance": "model_knowledge",
+                "source_url": None,
+                "grounding_trace": None,
+            }
+        )
+
+        interview_service._validate_successful_finalizer_result(  # noqa: SLF001
+            parsed=parsed,
+            group_input=group_input,
+            grounding_trace={},
+        )
 
     async def test_finalize_confirmed_interview_persists_grounding_snippets_and_provenance(self) -> None:
         from app.services import interview_service

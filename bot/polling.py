@@ -417,6 +417,7 @@ async def poll_and_detect_food(bot, settings, poll_interval: float | None = None
 
     try:
         while True:
+            meal: MealLog | None = None
             try:
                 async with session_factory() as session:
                     statement = (
@@ -430,7 +431,6 @@ async def poll_and_detect_food(bot, settings, poll_interval: float | None = None
                     meal = result.scalar_one_or_none()
 
                     if meal is not None:
-                        await session.commit()
                         decision = await detect_food_photo(
                             meal.image_url,
                             llm_client=llm_client,
@@ -445,8 +445,17 @@ async def poll_and_detect_food(bot, settings, poll_interval: float | None = None
                 raise
             except Exception:
                 logger.exception("Error in poll_and_detect_food")
+                try:
+                    async with session_factory() as session:
+                        await session.rollback()
+                        if meal is not None:
+                            _transition_meal_status(meal, MealProcessingStatus.FAILED)
+                            await session.merge(meal)
+                            await session.commit()
+                except Exception:
+                    logger.exception("Error while marking meal as FAILED in detection")
 
-            await asyncio.sleep(interval)
+            await _poll_sleep(interval)
     finally:
         await engine.dispose()
 
@@ -487,7 +496,6 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                         await _poll_sleep(interval)
                         continue
 
-                    await session.commit()
                     segments = await segment_food_photo_with_retry(
                         meal.image_url,
                         llm_client=llm_client,
@@ -853,7 +861,7 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                     )
                     segments = list(segment_result.scalars().all())
                     if not segments:
-                        _transition_meal_status(meal, MealProcessingStatus.REASONING)
+                        _transition_meal_status(meal, MealProcessingStatus.FAILED)
                         await session.commit()
                         continue
 

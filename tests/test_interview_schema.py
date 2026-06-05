@@ -128,6 +128,30 @@ class InterviewSchemaContractTests(unittest.TestCase):
                 }
             )
 
+    def test_confirmation_item_rejects_invalid_authoritative_source_type(self) -> None:
+        schema_module = _load_module_or_fail(self, "app.services.interview_schema")
+        if schema_module is None:
+            return
+
+        confirmation_item = getattr(schema_module, "ConfirmationItem", None)
+        self.assertIsNotNone(confirmation_item)
+        if confirmation_item is None:
+            return
+
+        with self.assertRaises(ValidationError):
+            confirmation_item.model_validate(
+                {
+                    "group_id": "group-bar",
+                    "primary_segment_id": "seg-bar-1",
+                    "segment_id": "seg-bar-1",
+                    "segment_ids": ["seg-bar-1"],
+                    "name": "Protein Bar",
+                    "source_type": "takeout?",
+                    "portion_bucket": "STANDARD",
+                    "approval_status": "CORRECTED",
+                }
+            )
+
     def test_group_finalizer_schema_exposes_strict_save_ready_contract(self) -> None:
         schema_module = _load_module_or_fail(self, "app.services.interview_schema")
         if schema_module is None:
@@ -253,6 +277,12 @@ class InterviewSchemaContractTests(unittest.TestCase):
         with self.assertRaises(schema_module.InterviewTurnValidationError):
             schema_module.parse_group_finalizer_result(
                 {**valid_payload, "top_3": []},
+                expected_group_id="group-chicken",
+            )
+
+        with self.assertRaises(schema_module.InterviewTurnValidationError):
+            schema_module.parse_group_finalizer_result(
+                {**valid_payload, "source_type": "takeout?"},
                 expected_group_id="group-chicken",
             )
 

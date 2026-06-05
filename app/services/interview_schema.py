@@ -6,7 +6,7 @@ from typing import Any, Literal, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from app.services.grounding_stub import normalize_source_type
+from app.services.grounding_stub import parse_authoritative_source_type
 
 
 class ConfirmationItem(BaseModel):
@@ -82,7 +82,7 @@ class ConfirmationItem(BaseModel):
     @field_validator("source_type", mode="before")
     @classmethod
     def _normalize_source(cls, value: object) -> str:
-        return normalize_source_type(value)
+        return parse_authoritative_source_type(value)
 
     @field_validator("portion_bucket", mode="before")
     @classmethod
@@ -315,7 +315,7 @@ class FinalizedGroupResult(BaseModel):
     @field_validator("source_type", mode="before")
     @classmethod
     def _normalize_source_type(cls, value: object) -> str:
-        return normalize_source_type(value)
+        return parse_authoritative_source_type(value)
 
     @field_validator("portion_bucket", mode="before")
     @classmethod

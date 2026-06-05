@@ -545,6 +545,48 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meal.processing_status, MealProcessingStatus.FAILED)
         session.commit.assert_awaited_once()
 
+    async def test_poll_and_match_marks_zero_segment_meal_failed_instead_of_stranding_it_in_reasoning(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            id="meal-match-no-segments",
+            processing_status=MealProcessingStatus.MATCHING,
+        )
+        session = AsyncMock()
+        meal_result = Mock(scalar_one_or_none=Mock(return_value=meal))
+        segments_result = Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[]))))
+        session.execute.side_effect = [meal_result, segments_result, asyncio.CancelledError]
+        session.add = Mock()
+        session.add_all = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            TELEGRAM_CHAT_ID="999",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(polling, "_poll_sleep", new=_noop_sleep),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+
+        self.assertEqual(meal.processing_status, MealProcessingStatus.FAILED)
+        session.commit.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
+
 
 class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
     async def test_grouped_auto_confirm_collapses_to_one_final_write_item_per_food_group(self) -> None:

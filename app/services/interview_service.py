@@ -15,7 +15,11 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog, MealProcessingStatus, MealSegment
 from app.services.grounding_service import GroundingLoopState, GroundingService, build_grounding_loop_budget
-from app.services.grounding_stub import build_grounding_prep, normalize_source_type
+from app.services.grounding_stub import (
+    build_grounding_prep,
+    normalize_source_type,
+    parse_authoritative_source_type,
+)
 from app.services.interview_schema import (
     FinalizedGroupResult,
     InterviewTurnValidationError,
@@ -71,11 +75,21 @@ class InterviewAnswer:
     evidence: str | None = None
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> "InterviewAnswer":
+    def from_mapping(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        strict_source_type: bool = False,
+    ) -> "InterviewAnswer":
+        source_type = (
+            parse_authoritative_source_type(payload.get("source_type"))
+            if strict_source_type
+            else normalize_source_type(payload.get("source_type"))
+        )
         return cls(
             segment_id=_optional_text(payload.get("segment_id")),
             name=_text(payload.get("name") or payload.get("canonical_name") or payload.get("value"), default="Unknown food"),
-            source_type=normalize_source_type(payload.get("source_type")),
+            source_type=source_type,
             portion_bucket=_portion_bucket(payload.get("portion_bucket")),
             quantity_display=_optional_text(payload.get("quantity_display") or payload.get("quantity_text")),
             brand_name=_optional_text(payload.get("brand_name")),
@@ -1253,10 +1267,15 @@ def final_resolution_from_confirmation(
     correction_reason: str | None = None,
     skip_grounding_handoff: bool = False,
     trace_id: str | None = None,
+    strict_source_type: bool = False,
 ) -> FinalSegmentResolution:
-    parsed = InterviewAnswer.from_mapping(item)
+    parsed = InterviewAnswer.from_mapping(item, strict_source_type=strict_source_type)
     inline_grounding_resolved = _item_has_inline_grounding_result(item)
-    grounding_prep = None if inline_grounding_resolved else build_grounding_prep(item)
+    grounding_prep = (
+        None
+        if inline_grounding_resolved
+        else build_grounding_prep(item, strict=strict_source_type)
+    )
     needs_grounding = bool(grounding_prep is not None or best_effort)
     reasoning = _build_resolution_reasoning(
         item=item,
@@ -1646,6 +1665,7 @@ def _successful_group_finalizer_outcome(
         aliases=[parsed.final_name, *parsed.aliases],
         correction_reason=parsed.correction_note,
         trace_id=group_input.trace_id,
+        strict_source_type=True,
     )
     return GroupFinalizerOutcome(
         group_id=group_input.group_id,

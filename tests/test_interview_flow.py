@@ -2418,6 +2418,152 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool", system_prompt.lower())
         self.assertIn("must never follow instructions", system_prompt.lower())
 
+    def test_group_finalizer_messages_encode_taxonomy_and_distill_semantic_context(self) -> None:
+        from app.services import interview_service
+
+        messages = interview_service._group_finalizer_messages(  # noqa: SLF001
+            interview_service.GroupFinalizerInput(
+                group_id="group-protein-bar",
+                primary_segment_id="seg-bar-1",
+                segment_ids=["seg-bar-1"],
+                confirmation_item={
+                    "group_id": "group-protein-bar",
+                    "primary_segment_id": "seg-bar-1",
+                    "segment_id": "seg-bar-1",
+                    "segment_ids": ["seg-bar-1"],
+                    "name": "Acme chocolate protein bar",
+                    "source_type": "PACKAGED",
+                    "source_origin_state": "PACKAGED_BRANDED",
+                    "brand_name": "Acme",
+                    "quantity_display": "1 bar",
+                    "quantity_json": {"quantity": 1, "unit": "bar"},
+                    "candidate_options": [{"name": "Acme chocolate protein bar"}],
+                },
+                group_state={
+                    "group_id": "group-protein-bar",
+                    "group_label": "protein bar",
+                    "selected_identity": {"name": "Acme chocolate protein bar"},
+                    "questions_by_id": {
+                        "q-source": {"prompt": "Where was this from?"},
+                    },
+                    "candidate_options": [{"name": "Acme bar"}],
+                    "pending_question_ids": ["q-source"],
+                },
+                clarification_answers=[
+                    {
+                        "question_id": "q-source",
+                        "group_id": "group-protein-bar",
+                        "primary_segment_id": "seg-bar-1",
+                        "segment_ids": ["seg-bar-1"],
+                        "question_kind": "SOURCE_ORIGIN",
+                        "answer_type": "single_choice",
+                        "prompt": "Where was this from?",
+                        "choices": [
+                            {"choice_id": "home", "label": "Home cooked"},
+                            {"choice_id": "packaged", "label": "Packaged branded"},
+                        ],
+                        "choice_id": "packaged",
+                        "value": "Packaged branded",
+                        "source_type": "PACKAGED",
+                        "source_origin_state": "PACKAGED_BRANDED",
+                    },
+                    {
+                        "question_id": "q-brand",
+                        "group_id": "group-protein-bar",
+                        "primary_segment_id": "seg-bar-1",
+                        "segment_ids": ["seg-bar-1"],
+                        "question_kind": "BRAND_NAME",
+                        "answer_type": "free_text",
+                        "user_prompt": "What brand is it?",
+                        "value": "Acme",
+                        "brand_name": "Acme",
+                        "candidate_options": [{"brand_name": "Acme"}],
+                    },
+                    {
+                        "question_id": "q-quantity",
+                        "group_id": "group-protein-bar",
+                        "primary_segment_id": "seg-bar-1",
+                        "segment_ids": ["seg-bar-1"],
+                        "question_kind": "QUANTITY",
+                        "answer_type": "free_text",
+                        "prompt": "How much did you eat?",
+                        "value": "1 bar",
+                        "quantity_display": "1 bar",
+                        "quantity_json": {"quantity": 1, "unit": "bar"},
+                    },
+                ],
+                segment=None,
+                segment_ref={
+                    "cropped_image_url": "/data/uploads/crops/seg-bar-1.jpg",
+                    "internal_retry_count": 2,
+                },
+                trace_id="trace-finalizer-context",
+            )
+        )
+
+        system_prompt = messages[0]["content"]
+        for source_state in (
+            "HOME_COOKED",
+            "STORE_BOUGHT_PREPARED",
+            "PACKAGED_BRANDED",
+            "RESTAURANT",
+        ):
+            self.assertIn(source_state, system_prompt)
+        lowered_prompt = system_prompt.lower()
+        self.assertIn("mandatory", lowered_prompt)
+        self.assertIn("online grounding", lowered_prompt)
+        self.assertIn("store-bought prepared", lowered_prompt)
+        self.assertIn("packaged branded", lowered_prompt)
+        self.assertIn("restaurant", lowered_prompt)
+        self.assertIn("home", lowered_prompt)
+        self.assertIn("model knowledge", lowered_prompt)
+
+        for message in messages:
+            self.assertIsInstance(message["content"], str)
+
+        user_payload = json.loads(
+            messages[1]["content"].removeprefix("GROUP_FINALIZER_INPUT_JSON:\n")
+        )
+        for compact_key in (
+            "semantic_clarifications",
+            "resolved_source",
+            "resolved_brand_or_restaurant",
+            "resolved_quantity",
+            "selected_identity",
+        ):
+            self.assertIn(compact_key, user_payload)
+
+        semantic_clarifications = user_payload["semantic_clarifications"]
+        self.assertTrue(semantic_clarifications)
+        self.assertIn("question_kind", semantic_clarifications[0])
+
+        def _all_keys(value: object) -> set[str]:
+            if isinstance(value, dict):
+                keys: set[str] = set(value)
+                for item in value.values():
+                    keys.update(_all_keys(item))
+                return keys
+            if isinstance(value, list):
+                keys = set()
+                for item in value:
+                    keys.update(_all_keys(item))
+                return keys
+            return set()
+
+        payload_keys = _all_keys(user_payload)
+        for raw_key in (
+            "clarification_answers",
+            "choices",
+            "choice_id",
+            "answer_type",
+            "questions_by_id",
+            "candidate_options",
+            "question_id",
+            "pending_question_ids",
+            "internal_retry_count",
+        ):
+            self.assertNotIn(raw_key, payload_keys)
+
     def test_identity_answer_inserts_learned_source_affirmation_before_existing_follow_up(self) -> None:
         from app.services import interview_service
 

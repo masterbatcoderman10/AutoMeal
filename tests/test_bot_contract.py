@@ -227,6 +227,70 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
 
         callback_query.answer.assert_awaited_once_with("Unauthorized chat.", show_alert=True)
 
+    async def test_interview_callback_confirm_keeps_meal_interview_active_when_finalization_failed(self) -> None:
+        from bot.handlers import interview_callback
+        from bot.messages import format_grounding_blocker_message
+
+        interview = SimpleNamespace(
+            id="interview-callback-failed",
+            meal_log_id="meal-callback-failed",
+            is_active=True,
+            current_prompt_payload={
+                "roadmap_step": "CONFIRMATION",
+                "confirmation_items": [{"segment_id": "seg-1", "name": "Protein Bar"}],
+            },
+        )
+        meal = SimpleNamespace(
+            id="meal-callback-failed",
+            processing_status=MealProcessingStatus.FAILED,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        reply_text = AsyncMock()
+        callback_query = SimpleNamespace(
+            data="confirm:meal-callback-failed",
+            answer=AsyncMock(),
+            message=SimpleNamespace(chat=SimpleNamespace(id="999"), reply_text=reply_text),
+        )
+        update = SimpleNamespace(callback_query=callback_query, message=None)
+        context = SimpleNamespace(bot_data={})
+        finalized = {
+            "mode": "MEAL_INTERVIEW",
+            "meal": meal,
+            "result": SimpleNamespace(meal_entries=[SimpleNamespace(id="entry-1", segment_id="seg-1")]),
+            "confirmation_items": [{"segment_id": "seg-1", "name": "Protein Bar"}],
+        }
+
+        with (
+            patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
+            patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
+            patch("bot.handlers._load_active_interview", AsyncMock(return_value=interview)),
+            patch("bot.handlers._finalize_interview_confirmation", AsyncMock(return_value=finalized)),
+        ):
+            await interview_callback(update, context)
+
+        callback_query.answer.assert_awaited_once_with()
+        self.assertTrue(interview.is_active)
+        reply_text.assert_awaited_once_with(
+            format_grounding_blocker_message(
+                "meal-callback-failed",
+                blocker="meal finalization failed closed",
+                saved_as_unverified=False,
+            )
+        )
+        self.assertNotIn("recent_entries", context.bot_data)
+        session.commit.assert_awaited_once()
+        engine.dispose.assert_awaited_once()
+
     async def test_interview_text_confirm_finishes_confirmation_state(self) -> None:
         from bot.handlers import interview_text
 
@@ -241,7 +305,11 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
         )
-        meal = SimpleNamespace(id="meal-1", segments=[SimpleNamespace(id="seg-1")])
+        meal = SimpleNamespace(
+            id="meal-1",
+            segments=[SimpleNamespace(id="seg-1")],
+            processing_status=MealProcessingStatus.COMPLETED,
+        )
         session = AsyncMock()
         session.add = Mock()
         session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
@@ -265,13 +333,22 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
             patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
-            patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value={"grounding_required": False})) as finalize,
+            patch(
+                "bot.handlers.interview_service.finalize_confirmed_interview",
+                AsyncMock(
+                    return_value={
+                        "grounding_required": False,
+                        "meal_entries": [SimpleNamespace(id="entry-1", segment_id="seg-1")],
+                    }
+                ),
+            ) as finalize,
         ):
             await interview_text(update, context)
 
         finalize.assert_awaited_once()
         self.assertFalse(interview.is_active)
-        reply_text.assert_awaited_once_with("Meal confirmation saved.")
+        reply_text.assert_awaited_once()
+        self.assertIn("Meal confirmation saved.", reply_text.await_args.args[0])
         session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
@@ -328,7 +405,11 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
         )
-        meal = SimpleNamespace(id="meal-deterministic-confirm", segments=[SimpleNamespace(id="seg-1")])
+        meal = SimpleNamespace(
+            id="meal-deterministic-confirm",
+            segments=[SimpleNamespace(id="seg-1")],
+            processing_status=MealProcessingStatus.COMPLETED,
+        )
         session = AsyncMock()
         session.add = Mock()
         session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
@@ -352,13 +433,22 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             patch("bot.handlers.get_settings", return_value=SimpleNamespace(TELEGRAM_CHAT_ID="999", DATABASE_URL="postgresql://db")),
             patch("bot.handlers._make_session_factory", return_value=(engine, Mock(return_value=SessionContext()))),
             patch("bot.handlers._resolve_active_interview_for_text", AsyncMock(return_value=(interview, None))),
-            patch("bot.handlers.interview_service.finalize_confirmed_interview", AsyncMock(return_value={"grounding_required": False})) as finalize,
+            patch(
+                "bot.handlers.interview_service.finalize_confirmed_interview",
+                AsyncMock(
+                    return_value={
+                        "grounding_required": False,
+                        "meal_entries": [SimpleNamespace(id="entry-1", segment_id="seg-1")],
+                    }
+                ),
+            ) as finalize,
         ):
             await interview_text(update, context)
 
         finalize.assert_awaited_once()
         self.assertFalse(interview.is_active)
-        reply_text.assert_awaited_once_with("Meal confirmation saved.")
+        reply_text.assert_awaited_once()
+        self.assertIn("Meal confirmation saved.", reply_text.await_args.args[0])
         session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
@@ -532,8 +622,9 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_interview_text_confirm_closes_session_after_inline_grounding_finalize(self) -> None:
+    async def test_interview_text_confirm_keeps_session_active_when_inline_grounding_finalize_writes_no_entries(self) -> None:
         from bot.handlers import interview_text
+        from bot.messages import format_grounding_blocker_message
 
         interview = SimpleNamespace(
             id="interview-2",
@@ -547,7 +638,12 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
         )
-        meal = SimpleNamespace(id="meal-2", segments=[SimpleNamespace(id="seg-1")], reasoning_state_json={})
+        meal = SimpleNamespace(
+            id="meal-2",
+            segments=[SimpleNamespace(id="seg-1")],
+            reasoning_state_json={},
+            processing_status=MealProcessingStatus.COMPLETED,
+        )
         session = AsyncMock()
         session.add = Mock()
         session.execute.return_value = Mock(scalar_one_or_none=Mock(return_value=meal))
@@ -585,9 +681,18 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         ):
             await interview_text(update, context)
 
-        self.assertFalse(interview.is_active)
+        self.assertTrue(interview.is_active)
         reply_text.assert_awaited_once()
-        self.assertIn("Meal confirmation saved.", reply_text.await_args.args[0])
+        self.assertEqual(
+            reply_text.await_args.args[0],
+            format_grounding_blocker_message(
+                "meal-2",
+                blocker="finalization produced no saved meal entries",
+                saved_as_unverified=False,
+            ),
+        )
+        self.assertNotIn("Meal confirmation saved.", reply_text.await_args.args[0])
+        self.assertNotIn("recent_entries", context.bot_data)
         session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
@@ -2211,6 +2316,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 SimpleNamespace(id="seg-pita-1"),
                 SimpleNamespace(id="seg-chicken-1"),
             ],
+            processing_status=MealProcessingStatus.COMPLETED,
         )
         session = AsyncMock()
         session.add = Mock()
@@ -2292,8 +2398,17 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             [item["approval_status"] for item in confirmation_items],
             ["CORRECTED", "APPROVED", "CORRECTED"],
         )
-        self.assertFalse(interview.is_active)
-        reply_text.assert_awaited_once_with("Meal confirmation saved.")
+        from bot.messages import format_grounding_blocker_message
+
+        self.assertTrue(interview.is_active)
+        reply_text.assert_awaited_once_with(
+            format_grounding_blocker_message(
+                "meal-ready",
+                blocker="finalization produced no saved meal entries",
+                saved_as_unverified=False,
+            )
+        )
+        self.assertNotIn("recent_entries", context.bot_data)
         session.commit.assert_awaited()
         engine.dispose.assert_awaited_once()
 

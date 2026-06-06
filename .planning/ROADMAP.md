@@ -15,7 +15,7 @@ Eleven phases transform a blank repo into a fully operational personal meal trac
 - [x] **Phase 4.3: Deterministic Clarification Schema & Interview UI** - Replace freeform LLM interview turns with a reasoning-produced clarification schema, deterministic Telegram MCQ/open-field rendering, structured answer capture, and a compact final resolver that feeds the existing authoritative FoodItem/DiaryEntry/FoodVisual write path. (completed 2026-06-01)
 - [ ] **Phase 4.4: Parallel Group Finalization & Lite Detect Swap** - After deterministic clarification completes, run one structured post-processing/finalization call per food group in parallel using `google/gemini-3.1-flash-lite` so final save-ready metadata comes from each group's reasoning outcome plus its own clarifications; also swap the detect/classification model from Gemma to the same Lite model.
 - [x] **Phase 4.5: Source-Aware Clarification Expansion** - Before the existing per-group finalizer runs, add deterministic source, brand, and restaurant clarification for food groups with no vector match, too few vector matches, or ambiguous high-score distributions; extend the group contract with stable `segment_ids`. (completed 2026-06-03)
-- [x] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps (completed 2026-06-05)
+- [ ] **Phase 5: Agentic Grounding** - Reasoning and post-interview stages can search and fetch brand/restaurant nutrition via SearXNG + Firecrawl with hard budget caps (11/11 plans executed; verification gaps open)
 - [ ] **Phase 6: Bot Surface & Daily Summary** - All slash commands, daily 03:00 summary via APScheduler, per-meal push with entry IDs for corrections
 
 ## Phase Details
@@ -297,5 +297,5 @@ Eleven phases transform a blank repo into a fully operational personal meal trac
 | 4.3. Deterministic Clarification Schema & Interview UI | 6/6 | Complete   | 2026-06-01 |
 | 4.4. Parallel Group Finalization & Lite Detect Swap | 0/2 | Not started | - |
 | 4.5. Source-Aware Clarification Expansion | 3/3 | Complete | 2026-06-03 |
-| 5. Agentic Grounding | 11/11 | Complete   | 2026-06-06 |
+| 5. Agentic Grounding | 11/11 | In Progress | verification gaps |
 | 6. Bot Surface & Daily Summary | 0/TBD | Not started | - |

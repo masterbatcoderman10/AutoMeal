@@ -1730,6 +1730,126 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
             grounding_trace={},
         )
 
+    async def test_finalize_confirmed_interview_promotes_complete_home_draft_without_model_owned_metadata(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-home-draft-promotion",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "food_groups": [
+                        {
+                            "group_id": "group-home-curry",
+                            "group_label": "chicken curry",
+                            "question_kind": "DETAIL",
+                            "primary_segment_id": "seg-curry-1",
+                            "segment_ids": ["seg-curry-1"],
+                        }
+                    ]
+                }
+            },
+            last_stage_started_at=None,
+        )
+        segment = SimpleNamespace(
+            id="seg-curry-1",
+            cropped_image_url="/data/uploads/crops/seg-curry-1.jpg",
+            embedding=[0.21, 0.22, 0.23],
+        )
+        confirmation_items = [
+            {
+                "group_id": "group-home-curry",
+                "primary_segment_id": "seg-curry-1",
+                "segment_id": "seg-curry-1",
+                "segment_ids": ["seg-curry-1"],
+                "name": "Chicken curry",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "quantity_display": "1 bowl",
+            }
+        ]
+        complete_home_draft = {
+            "group_id": "group-home-curry",
+            "primary_segment_id": "seg-curry-1",
+            "segment_ids": ["seg-curry-1"],
+            "final_name": "Chicken curry",
+            "aliases": ["Homemade chicken curry"],
+            "source_type": "HOME",
+            "portion_bucket": "STANDARD",
+            "quantity_display": "1 bowl",
+            "quantity_json": {
+                "quantity": 1,
+                "unit": "bowl",
+                "portion_bucket": "STANDARD",
+            },
+            "food_item_id": None,
+            "brand_name": None,
+            "restaurant_name": None,
+            "correction_note": None,
+            "supporting_details": ["Complete homemade nutrition estimate."],
+            "serving_size_g": 280.0,
+            "calories": 410.0,
+            "protein_g": 32.0,
+            "carbs_g": 14.0,
+            "fat_g": 24.0,
+            "fiber_g": 3.0,
+            "selected_source_ids": [],
+            "confidence": 0.86,
+        }
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(complete_home_draft),
+                            }
+                        }
+                    ]
+                }
+            )
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=1,
+                    FINALIZER_MODEL="google/gemini-3-flash-preview",
+                ),
+                create=True,
+            ),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
+        ):
+            await interview_service.finalize_confirmed_interview(
+                session=session,
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=[segment],
+            )
+
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.COMPLETED)
+        self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "SUCCEEDED")
+        final_segment = captured["final_segments"][0]
+        self.assertTrue(final_segment.food.is_verified)
+        self.assertEqual(final_segment.food.provenance, "model_knowledge")
+        self.assertEqual(final_segment.food.calories, 410.0)
+        self.assertEqual(final_segment.food.fiber_g, 3.0)
+
     async def test_finalize_confirmed_interview_persists_grounding_snippets_and_provenance(self) -> None:
         from app.services import interview_service
 

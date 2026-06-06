@@ -244,10 +244,8 @@ class FinalizedGroupResult(BaseModel):
     carbs_g: float | None = None
     fat_g: float | None = None
     fiber_g: float | None = None
-    is_verified: bool = False
-    provenance: Literal["searched", "model_knowledge"] | None = None
-    source_url: str | None = None
-    grounding_trace: GroundingTracePayload | None = None
+    confidence: float | None = None
+    selected_source_ids: list[str] = Field(default_factory=list)
 
     @field_validator(
         "group_id",
@@ -258,17 +256,17 @@ class FinalizedGroupResult(BaseModel):
         "brand_name",
         "restaurant_name",
         "correction_note",
-        "provenance",
-        "source_url",
         mode="before",
     )
     @classmethod
     def _strip_text(cls, value: object) -> object:
         return ConfirmationItem._strip_text(value)
 
-    @field_validator("aliases", "supporting_details", mode="before")
+    @field_validator("aliases", "supporting_details", "selected_source_ids", mode="before")
     @classmethod
     def _normalize_text_lists(cls, value: object) -> list[str]:
+        if value is None:
+            return []
         if not isinstance(value, list):
             raise ValueError("value must be a list")
         normalized: list[str] = []
@@ -303,6 +301,18 @@ class FinalizedGroupResult(BaseModel):
         parsed = float(value)
         if parsed < 0:
             raise ValueError("value must be >= 0")
+        return parsed
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_optional_confidence(cls, value: object) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("confidence must be numeric or null")
+        parsed = float(value)
+        if parsed < 0 or parsed > 1:
+            raise ValueError("confidence must be between 0 and 1")
         return parsed
 
     @field_validator("final_name")

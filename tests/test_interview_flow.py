@@ -1388,56 +1388,63 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 "quantity_display": "1 bar",
             }
         ]
-        llm_client = SimpleNamespace(
-            chat_completion=AsyncMock(
-                return_value={
-                    "choices": [
-                        {
-                            "message": {
-                                "content": json.dumps(
-                                    {
-                                        "group_id": "group-bar",
-                                        "primary_segment_id": "seg-bar-1",
-                                        "segment_ids": ["seg-bar-1"],
-                                        "final_name": "Acme Protein Bar",
-                                        "aliases": ["Protein Bar"],
-                                        "source_type": "PACKAGED",
-                                        "portion_bucket": "STANDARD",
-                                        "quantity_display": "1 bar",
-                                        "quantity_json": {
-                                            "quantity": 1,
-                                            "unit": "bar",
-                                            "portion_bucket": "STANDARD",
-                                        },
-                                        "food_item_id": None,
-                                        "brand_name": "Acme",
-                                        "restaurant_name": None,
-                                        "correction_note": None,
-                                        "supporting_details": ["store-bought packaged item"],
-                                        "serving_size_g": 68.0,
-                                        "calories": 240.0,
-                                        "protein_g": 20.0,
-                                        "carbs_g": 23.0,
-                                        "fat_g": 8.0,
-                                        "fiber_g": 6.0,
-                                        "is_verified": True,
-                                        "provenance": "searched",
-                                        "source_url": "https://acme.example/protein-bar",
-                                        "grounding_trace": {
-                                            "queries": ["Acme protein bar nutrition facts"],
-                                            "fetched_urls": ["https://acme.example/protein-bar"],
-                                            "provenance": "searched",
-                                            "source_url": "https://acme.example/protein-bar",
-                                            "stop_reason": "completed",
-                                        },
-                                    }
-                                )
+        finalizer_response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "group_id": "group-bar",
+                                "primary_segment_id": "seg-bar-1",
+                                "segment_ids": ["seg-bar-1"],
+                                "final_name": "Acme Protein Bar",
+                                "aliases": ["Protein Bar"],
+                                "source_type": "PACKAGED",
+                                "portion_bucket": "STANDARD",
+                                "quantity_display": "1 bar",
+                                "quantity_json": {
+                                    "quantity": 1,
+                                    "unit": "bar",
+                                    "portion_bucket": "STANDARD",
+                                },
+                                "food_item_id": None,
+                                "brand_name": "Acme",
+                                "restaurant_name": None,
+                                "correction_note": None,
+                                "supporting_details": ["store-bought packaged item"],
+                                "serving_size_g": 68.0,
+                                "calories": 240.0,
+                                "protein_g": 20.0,
+                                "carbs_g": 23.0,
+                                "fat_g": 8.0,
+                                "fiber_g": 6.0,
+                                "confidence": 0.92,
+                                "selected_source_ids": ["src_1"],
                             }
-                        }
-                    ]
+                        )
+                    }
                 }
-            )
-        )
+            ]
+        }
+        grounding_trace = {
+            "queries": ["Acme protein bar nutrition facts"],
+            "fetched_urls": ["https://acme.example/protein-bar"],
+            "snippet_excerpts": ["Serving size 68 g | Calories 240"],
+            "source_registry": [
+                {
+                    "source_id": "src_1",
+                    "url": "https://acme.example/protein-bar",
+                    "title": "Acme Protein Bar",
+                    "snippet": "Serving size 68 g | Calories 240",
+                    "fetched": True,
+                }
+            ],
+            "tool_calls_used": 2,
+            "duplicate_calls": 0,
+            "iteration_count": 2,
+            "stop_reason": "COMPLETED",
+        }
+        llm_client = SimpleNamespace(chat_completion=AsyncMock())
 
         async def _capture_apply_final_meal_resolution(**kwargs):
             captured.update(kwargs)
@@ -1445,6 +1452,11 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "_bounded_group_finalizer_response",
+                new=AsyncMock(return_value=(finalizer_response, grounding_trace)),
+            ),
             patch.object(
                 interview_service,
                 "get_settings",
@@ -1717,10 +1729,8 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 "carbs_g": 14.0,
                 "fat_g": 24.0,
                 "fiber_g": 3.0,
-                "is_verified": True,
-                "provenance": "model_knowledge",
-                "source_url": None,
-                "grounding_trace": None,
+                "confidence": 0.86,
+                "selected_source_ids": [],
             }
         )
 
@@ -1846,7 +1856,7 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "SUCCEEDED")
         final_segment = captured["final_segments"][0]
         self.assertTrue(final_segment.food.is_verified)
-        self.assertEqual(final_segment.food.provenance, "model_knowledge")
+        self.assertIn("provenance=model_knowledge", final_segment.food.llm_reasoning or "")
         self.assertEqual(final_segment.food.calories, 410.0)
         self.assertEqual(final_segment.food.fiber_g, 3.0)
 
@@ -1895,57 +1905,63 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 "quantity_display": "1 bar",
             }
         ]
-        llm_client = SimpleNamespace(
-            chat_completion=AsyncMock(
-                return_value={
-                    "choices": [
-                        {
-                            "message": {
-                                "content": json.dumps(
-                                    {
-                                        "group_id": "group-bar",
-                                        "primary_segment_id": "seg-bar-1",
-                                        "segment_ids": ["seg-bar-1"],
-                                        "final_name": "Acme Protein Bar",
-                                        "aliases": ["Protein Bar"],
-                                        "source_type": "PACKAGED",
-                                        "portion_bucket": "STANDARD",
-                                        "quantity_display": "1 bar",
-                                        "quantity_json": {
-                                            "quantity": 1,
-                                            "unit": "bar",
-                                            "portion_bucket": "STANDARD",
-                                        },
-                                        "food_item_id": None,
-                                        "brand_name": "Acme",
-                                        "restaurant_name": None,
-                                        "correction_note": None,
-                                        "supporting_details": ["store-bought packaged item"],
-                                        "serving_size_g": 68.0,
-                                        "calories": 240.0,
-                                        "protein_g": 20.0,
-                                        "carbs_g": 23.0,
-                                        "fat_g": 8.0,
-                                        "fiber_g": 6.0,
-                                        "is_verified": True,
-                                        "provenance": "searched",
-                                        "source_url": "https://acme.example/protein-bar",
-                                        "grounding_trace": {
-                                            "queries": ["Acme protein bar nutrition facts"],
-                                            "fetched_urls": ["https://acme.example/protein-bar"],
-                                            "snippet_excerpts": ["Serving size 68 g | Calories 240"],
-                                            "provenance": "searched",
-                                            "source_url": "https://acme.example/protein-bar",
-                                            "stop_reason": "COMPLETED",
-                                        },
-                                    }
-                                )
+        finalizer_response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "group_id": "group-bar",
+                                "primary_segment_id": "seg-bar-1",
+                                "segment_ids": ["seg-bar-1"],
+                                "final_name": "Acme Protein Bar",
+                                "aliases": ["Protein Bar"],
+                                "source_type": "PACKAGED",
+                                "portion_bucket": "STANDARD",
+                                "quantity_display": "1 bar",
+                                "quantity_json": {
+                                    "quantity": 1,
+                                    "unit": "bar",
+                                    "portion_bucket": "STANDARD",
+                                },
+                                "food_item_id": None,
+                                "brand_name": "Acme",
+                                "restaurant_name": None,
+                                "correction_note": None,
+                                "supporting_details": ["store-bought packaged item"],
+                                "serving_size_g": 68.0,
+                                "calories": 240.0,
+                                "protein_g": 20.0,
+                                "carbs_g": 23.0,
+                                "fat_g": 8.0,
+                                "fiber_g": 6.0,
+                                "confidence": 0.92,
+                                "selected_source_ids": ["src_1"],
                             }
-                        }
-                    ]
+                        )
+                    }
                 }
-            )
-        )
+            ]
+        }
+        grounding_trace = {
+            "queries": ["Acme protein bar nutrition facts"],
+            "fetched_urls": ["https://acme.example/protein-bar"],
+            "snippet_excerpts": ["Serving size 68 g | Calories 240"],
+            "source_registry": [
+                {
+                    "source_id": "src_1",
+                    "url": "https://acme.example/protein-bar",
+                    "title": "Acme Protein Bar",
+                    "snippet": "Serving size 68 g | Calories 240",
+                    "fetched": True,
+                }
+            ],
+            "tool_calls_used": 2,
+            "duplicate_calls": 0,
+            "iteration_count": 2,
+            "stop_reason": "COMPLETED",
+        }
+        llm_client = SimpleNamespace(chat_completion=AsyncMock())
 
         async def _capture_apply_final_meal_resolution(**kwargs):
             captured.update(kwargs)
@@ -1953,6 +1969,11 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "_bounded_group_finalizer_response",
+                new=AsyncMock(return_value=(finalizer_response, grounding_trace)),
+            ),
             patch.object(
                 interview_service,
                 "get_settings",

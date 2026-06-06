@@ -1,182 +1,165 @@
 ---
 phase: 05-agentic-grounding
-verified: 2026-06-05T02:01:44Z
+verified: 2026-06-06T16:08:32Z
 status: gaps_found
-score: 7/10 must-haves verified
+score: 8/10 must-haves verified
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found
-  previous_score: 7/9
+  previous_score: 7/10
   gaps_closed:
-    - "Reasoning failures do not bypass the grounded reasoning path by auto-confirming from raw vector hits."
-    - "Embedding and matching workers now keep single-owner stage claims while slow work is in flight."
-  gaps_remaining: []
-  regressions:
-    - "Detect and segment workers still release their row claim before slow work, so the Phase 05 per-meal hard-cap guarantee is not true end-to-end."
-    - "MATCHING meals with zero segment rows still move to REASONING with no live worker consuming that state, so meals can hang until janitor recovery."
-    - "Finalizer source_type validation still coerces unknown values to HOME, which can suppress packaged/restaurant grounding."
+    - "Detect and segment workers now keep single-owner stage claims while slow work is in flight."
+    - "MATCHING meals with zero segment rows now fail instead of being parked in REASONING."
+    - "Finalizer-facing source_type validation now rejects unknown values instead of coercing them to HOME."
+    - "Post-interview all-degraded finalizer runs now fail closed instead of saving completed empty rows."
+  gaps_remaining:
+    - "Reasoning-stage all-degraded finalizer runs can still persist MealProcessingStatus.COMPLETED."
+    - "Telegram confirmation handlers can still send success for empty or failed meal finalizations."
+  regressions: []
 gaps:
-  - truth: "Hard per-meal grounding/cost caps survive concurrent workers end-to-end"
+  - truth: "Reasoning-stage all-degraded finalizer runs cannot persist MealProcessingStatus.COMPLETED with empty best-effort nutrition rows."
     status: failed
-    reason: "Embedding and matching ownership is now durable, but detect and segment still commit before their slow external calls. A second worker can reacquire the same meal before the first worker finishes, which can duplicate downstream grounding work and break the per-meal hard-cap contract."
+    reason: "finalize_meal_from_reasoning() imports and runs the shared finalizer, but it does not apply the all-degraded policy that finalize_confirmed_interview() now applies. It passes degraded final_resolution rows into apply_final_meal_resolution() with meal_status=MealProcessingStatus.COMPLETED."
     artifacts:
-      - path: "bot/polling.py"
-        issue: "poll_and_detect_food() commits the skip-locked claim before detect_food_photo() at lines 432-438."
-      - path: "bot/polling.py"
-        issue: "poll_and_segment_food() commits the skip-locked claim before segment_food_photo_with_retry() at lines 490-497."
+      - path: "app/services/reasoning_service.py"
+        issue: "Lines 2379-2389 collect _run_group_finalizers() outcomes, including DEGRADED outcomes; lines 2420-2424 always save final_segments with MealProcessingStatus.COMPLETED."
+      - path: "app/services/interview_service.py"
+        issue: "Lines 2013-2050 show degraded outcomes still carry writable best-effort final_resolution values; only the interview caller filters all-degraded runs before write."
     missing:
-      - "Keep detect-stage ownership durable until detect_food_photo() completes and the meal status advances."
-      - "Keep segment-stage ownership durable until segmentation and crop persistence complete and the meal status advances."
-      - "Add detect/segment duplicate-worker regressions similar to the existing embedding/matching ownership tests."
-  - truth: "The bounded grounding flow exits cleanly without leaving hanging meals in the live MATCHING/runtime path"
+      - "Apply the same all-finalizer-groups-degraded policy in finalize_meal_from_reasoning() before calling apply_final_meal_resolution()."
+      - "When all reasoning finalizer groups degrade, write no final segments and set MealProcessingStatus.FAILED with ALL_FINALIZER_GROUPS_DEGRADED reasoning state."
+      - "Add a reasoning-path regression where _run_group_finalizers() returns only DEGRADED audit states and assert COMPLETED is not used."
+  - truth: "Telegram/user-facing confirmation must not imply a meal was saved when finalization wrote no entries or failed closed."
     status: failed
-    reason: "When a MATCHING meal has no segment rows, poll_and_match_food_segments() transitions it to REASONING and continues, but no worker selects REASONING directly. The meal then relies on later janitor recovery instead of exiting cleanly."
+    reason: "The meal confirmation handlers deactivate the interview and send Meal confirmation saved. without checking finalized result meal_entries or the meal processing_status. Existing bot tests still assert success for empty finalization results."
     artifacts:
-      - path: "bot/polling.py"
-        issue: "The zero-segment branch at lines 855-857 sets MealProcessingStatus.REASONING and returns."
-      - path: "bot/polling.py"
-        issue: "No poller in bot/polling.py selects MealProcessingStatus.REASONING as an input state."
+      - path: "bot/handlers.py"
+        issue: "Callback confirmation lines 749-763, text confirmation lines 841-853, and auto-ready confirmation lines 1006-1018 all send success after _finalize_interview_confirmation() without checking empty meal_entries or failed meal status."
+      - path: "tests/test_bot_contract.py"
+        issue: "Lines 570-590 and 2275-2296 explicitly assert Meal confirmation saved. when finalize_confirmed_interview() returns empty meal_entries."
     missing:
-      - "Fail or recover zero-segment MATCHING meals immediately instead of parking them in REASONING."
-      - "Add a regression proving the zero-segment MATCHING path cannot strand a meal."
-  - truth: "Packaged/restaurant grounding intent is preserved or rejected explicitly rather than coerced into HOME"
-    status: failed
-    reason: "The finalizer schemas still normalize unknown source_type values through normalize_source_type(), which converts them to HOME. build_grounding_prep() only triggers on PACKAGED or RESTAURANT, so malformed finalizer output can silently suppress required grounding."
-    artifacts:
-      - path: "app/services/interview_schema.py"
-        issue: "ConfirmationItem and FinalizedGroupResult both call normalize_source_type() at lines 82-85 and 315-318."
-      - path: "app/services/grounding_stub.py"
-        issue: "normalize_source_type() coerces unknown values to HOME and build_grounding_prep() returns None for HOME at lines 9-20."
-    missing:
-      - "Make source_type validation strict for finalizer-facing schemas: reject unknown values instead of coercing them."
-      - "Add explicit tests that invalid source_type values fail validation rather than becoming HOME."
+      - "Centralize a finalization-result check that treats MealProcessingStatus.FAILED or empty meal_entries as a non-success response for meal interviews."
+      - "Do not deactivate the interview as successful or send Meal confirmation saved. when finalization failed closed or produced no entries."
+      - "Update bot contract tests so empty/failed finalizations expect the blocker/on-hold copy, not a success message."
+human_verification:
+  - test: "Live post-fix confirmation of a packaged or restaurant meal that previously all-degraded."
+    expected: "If grounding cannot produce verified nutrition, the bot reports that the meal was not safely saved and no completed empty diary rows are created."
+    why_human: "The current static verification found blocking code paths; after fixes, a live Telegram/Langfuse/Postgres run is still needed to validate provider behavior and user-facing wording."
 ---
 
 # Phase 05: Agentic Grounding Verification Report
 
-**Phase Goal:** The reasoning stage and post-interview re-grounding stage can invoke SearXNG and Firecrawl as tools when the LLM needs brand or restaurant nutrition data; every tool call is bounded, traced, and the loop cannot run away on cost.
-**Verified:** 2026-06-05T02:01:44Z
+**Phase Goal:** Agentic grounding finalizer path closes Phase 05 requirements by using grounded evidence, deterministic provenance, bounded finalizer output, and fail-closed behavior.
+**Verified:** 2026-06-06T16:08:32Z
 **Status:** gaps_found
-**Re-verification:** Yes — after prior gap closure work
+**Re-verification:** Yes - after 05-11 finalizer schema ownership changes and code review findings
 
-**MVP Mode Note:** ROADMAP marks Phase 5 as `mvp`, but `gsd-sdk query user-story.validate` still reports the stored goal is not a valid `As a..., I want..., so that...` user story. Verification therefore uses the roadmap success criteria plus plan-frontmatter must-haves, as in the prior report.
+**MVP Mode Note:** ROADMAP marks Phase 5 as `mvp`, but `gsd-sdk query user-story.validate` reports the stored goal is not a valid `As a..., I want..., so that...` user story. Verification therefore uses the roadmap success criteria plus plan-frontmatter must-haves.
 
 ## Goal Achievement
-
-## User Flow Coverage
-
-| Step | Expected | Evidence in codebase | Status |
-| --- | --- | --- | --- |
-| Reasoning-stage packaged/restaurant flow can invoke tools before save | Ready-to-write reasoning groups route through the shared bounded group finalizer instead of writing directly | `app/services/reasoning_service.py:2330-2427` builds finalizer inputs, calls `_run_group_finalizers()`, then saves through `apply_final_meal_resolution()` | ✓ VERIFIED |
-| Post-interview packaged/restaurant flow can invoke tools and save through the same authoritative path | `finalize_confirmed_interview()` uses the same bounded finalizer loop and authoritative save transaction | `app/services/interview_service.py:1352-1410`, `1551-1705` | ✓ VERIFIED |
-| Tool loop is bounded and degraded exits save best-effort with `is_verified=false` | Per-loop max calls, wall-clock timeout, remaining HTTP timeout, degraded-save audit state, and no-visual-learning guard exist | `app/services/grounding_service.py:23-62,113-165`; `app/services/interview_service.py:1387-1409,1674-1705`; targeted tests passed | ✓ VERIFIED |
-| Per-meal cost cap and no-hang guarantees hold in the live runtime | No duplicate workers or stranded meals can bypass the hard cap | Embedding/matching are fixed, but detect/segment still release claims early and zero-segment MATCHING meals still strand into REASONING | ✗ FAILED |
 
 ### Observable Truths
 
 | # | Truth | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | Reasoning-complete groups route through the shared bounded grounding finalizer before save | ✓ VERIFIED | `app/services/reasoning_service.py:2367-2427` uses `_build_group_finalizer_inputs()`, `_run_group_finalizers()`, and `apply_final_meal_resolution()`. |
-| 2 | Post-interview finalization uses the same bounded grounding finalizer and single authoritative save path | ✓ VERIFIED | `app/services/interview_service.py:1352-1410` and `1551-1705` use the same grouped finalizer flow and save boundary. |
-| 3 | Reasoning-model failure stays fail-closed even with a strong vector hit | ✓ VERIFIED | `run_reasoning_request()` preserves failed state through `_fallback_food_groups_from_match_results()` at `app/services/reasoning_service.py:1517-1545,2031-2041`; regression tests `tests/test_reasoning_flow.py:828-900` passed. |
-| 4 | Per-loop bounds are implemented across model turns and Firecrawl HTTP calls | ✓ VERIFIED | `GroundingLoopState` enforces `MAX_TOOL_CALLS`, duplicate-call stop, and wall-clock timeout in `app/services/grounding_service.py:23-62`; HTTP timeout uses remaining loop time at `113-119`. |
-| 5 | Firecrawl scrape is limited to URLs returned by prior search results in the same loop | ✓ VERIFIED | `GroundingService.scrape()` rejects non-allowlisted URLs at `app/services/grounding_service.py:145-152`; covered by `tests/test_grounding_service.py:99-165`. |
-| 6 | Tool-call trace fields are appended to `MealSegment.ai_reasoning` and remain human-readable | ✓ VERIFIED | Live finalizer output persists `snippet_excerpts`, `provenance`, and `source_url`; verified by `tests/test_interview_flow.py:1477-1612`. |
-| 7 | Degraded grounded outcomes commit best-effort with `is_verified=false` and do not learn visuals | ✓ VERIFIED | Degraded saves are emitted via `_degraded_group_finalizer_outcome()` and saved with `DEGRADED_SAVED`; visual learning remains disabled (`tests/test_interview_flow.py:1614-1703`). |
-| 8 | Hard per-meal grounding/cost caps survive concurrent workers end-to-end | ✗ FAILED | `poll_and_detect_food()` commits before `detect_food_photo()` at `bot/polling.py:432-438`, and `poll_and_segment_food()` commits before `segment_food_photo_with_retry()` at `490-497`. |
-| 9 | The live MATCHING/runtime path exits cleanly without hanging meals | ✗ FAILED | `poll_and_match_food_segments()` moves zero-segment meals to `REASONING` at `bot/polling.py:855-857`, but no worker selects `MealProcessingStatus.REASONING` directly. |
-| 10 | Finalizer source typing preserves or explicitly rejects packaged/restaurant identity instead of coercing it to HOME | ✗ FAILED | `app/services/interview_schema.py:82-85,315-318` calls `normalize_source_type()`, and `app/services/grounding_stub.py:9-20` converts unknown values to `HOME`; a probe showed invalid `source_type=\"takeout?\"` becomes `HOME`. |
+| 1 | Finalizer model schema contains only model-owned identity, quantity, nutrition, confidence, and selected evidence references | VERIFIED | `FinalizedGroupResult` exposes food/nutrition fields plus `selected_source_ids`; it no longer exposes `is_verified`, `provenance`, `source_url`, or `grounding_trace` in `app/services/interview_schema.py:224-248`. |
+| 2 | Service-owned verification, provenance, source URL, and grounding trace are derived deterministically by the app | VERIFIED | `_derive_finalizer_provenance()` and `_service_owned_grounding_trace()` derive metadata from same-loop selected sources in `app/services/interview_service.py:1788-1907`. |
+| 3 | Packaged and restaurant verified success requires selected source IDs from the same finalizer loop | VERIFIED | `_derive_finalizer_provenance()` requires selected evidence for PACKAGED/RESTAURANT or source-origin grounding and rejects unknown IDs through `_validate_selected_evidence_ids()` in `app/services/interview_service.py:1788-1875`. |
+| 4 | Complete HOME nutrition can promote through service-derived model_knowledge provenance | VERIFIED | No selected evidence is required for HOME, but confidence must be present and above threshold before `model_knowledge` provenance is returned in `app/services/interview_service.py:1828-1842`. |
+| 5 | Finalizer output has a high finite cap, not the old 4096 cap or an unbounded budget | VERIFIED | `FINALIZER_OUTPUT_MAX_TOKENS=12000` is defined and validated above 4096 in `app/config.py:27,74-79`, and passed into chat completion at `app/services/interview_service.py:467`. |
+| 6 | Post-interview all-degraded finalizer runs do not persist completed empty rows | VERIFIED | `finalize_confirmed_interview()` detects all `DEGRADED` finalizer groups, switches to `MealProcessingStatus.FAILED`, and writes no final segments at `app/services/interview_service.py:1497-1515`. |
+| 7 | Reasoning-stage all-degraded finalizer runs do not persist completed empty rows | FAILED | `finalize_meal_from_reasoning()` collects `_run_group_finalizers()` outcomes and always calls `apply_final_meal_resolution(..., meal_status=MealProcessingStatus.COMPLETED)` at `app/services/reasoning_service.py:2379-2424`. |
+| 8 | Telegram confirmation does not send success for empty or failed finalizations | FAILED | `bot/handlers.py:749-763`, `841-853`, and `1006-1018` send `"Meal confirmation saved."` without checking `meal_entries` or failed meal status; `tests/test_bot_contract.py:570-590` and `2275-2296` still assert success for empty results. |
+| 9 | Previous worker ownership and no-hang runtime gaps remain closed | VERIFIED | Detect and segment now hold the `skip_locked` transaction through slow work, and zero-segment MATCHING transitions to `FAILED` in `bot/polling.py`; matching tests include single-worker claim regressions. |
+| 10 | Finalizer-facing source typing preserves or rejects packaged/restaurant identity | VERIFIED | `ConfirmationItem` and `FinalizedGroupResult` use `parse_authoritative_source_type()` in `app/services/interview_schema.py:82-85,325-328`; invalid values now raise instead of normalizing to HOME. |
 
-**Score:** 7/10 truths verified
+**Score:** 8/10 truths verified
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 | --- | --- | --- | --- |
-| `app/services/reasoning_service.py` | Reasoning-stage handoff into shared bounded finalizer without fail-open fallback | ✓ VERIFIED | Shared finalizer path is wired; previous fail-open fallback gap is closed. |
-| `app/services/interview_service.py` | Shared bounded grounding finalizer, degraded-save routing, trace merge, and authoritative save handoff | ✓ VERIFIED | Inline grouped finalization, degraded-save audit state, and authoritative save path are present. |
-| `app/services/grounding_service.py` | App-owned search/scrape loop budget, duplicate-call tracking, allowlist, and remaining-time HTTP timeout | ✓ VERIFIED | Core loop budget and allowlist behavior are implemented and tested. |
-| `app/services/interview_schema.py` | Strict finalizer-facing schema for source/portion/trace fields | ⚠ PARTIAL | Portion bucket is strict, but unknown `source_type` values still coerce to `HOME`. |
-| `app/services/meal_resolution_service.py` | Singular authoritative persistence of grounded provenance, quantities, verification state, and visual-learning guard | ✓ VERIFIED | Final save path persists grounded outputs and only learns visuals for verified foods. |
-| `app/services/matching_service.py` | Verified-only similarity corpus and candidate snapshot persistence | ✓ VERIFIED | Query filters to `FoodItem.is_verified`; candidate snapshots persist, though not all provenance metadata is preserved. |
-| `bot/polling.py` | Live runtime wiring with durable ownership and no stranded Phase 05 paths | ⚠ PARTIAL | Embedding/matching ownership is durable now, but detect/segment ownership is not and zero-segment MATCHING still strands to REASONING. |
-| `tests/test_reasoning_flow.py` | Regression coverage for fail-closed reasoning fallback and reasoning-stage finalizer routing | ✓ VERIFIED | Strong-vector failed-reasoning regressions exist and passed. |
-| `tests/test_match_flow.py` | Regression coverage for durable EMBEDDING ownership and authoritative grounded save behavior | ✓ VERIFIED | Single-owner EMBEDDING regression exists and passed. |
-| `tests/test_bot_contract.py` | Runtime-level regression coverage for durable MATCHING ownership and no duplicate completion side effects | ✓ VERIFIED | Single-owner MATCHING regression exists and passed. |
-| `tests/test_interview_flow.py` | Inline grounding trace and degraded-save coverage | ✓ VERIFIED | Trace persistence and degraded-save behaviors are covered and passed. |
-| `tests/test_grounding_service.py` | Allowlist, timeout, cap, and duplicate-call coverage | ✓ VERIFIED | Grounding service contract tests passed. |
+| `app/config.py` | High finite finalizer output cap | VERIFIED | `FINALIZER_OUTPUT_MAX_TOKENS=12000` exists and rejects values at or below 4096. |
+| `app/services/interview_schema.py` | Draft-only finalizer schema without model-authored service metadata | VERIFIED | Model-facing fields are narrowed and strict authoritative source typing is present. |
+| `app/services/interview_service.py` | Evidence registry, deterministic provenance, output cap wiring, post-interview all-degraded fail-closed policy | PARTIAL | Core schema/provenance/cap/post-interview policy exists, but stale dead helpers still reference removed fields. |
+| `app/services/reasoning_service.py` | Reasoning-stage finalizer path with same fail-closed all-degraded policy | FAILED | Shared finalizer is wired, but all-degraded reasoning outcomes still complete. |
+| `bot/handlers.py` | User-facing confirmation honors failed/empty finalization result | FAILED | Success reply is unconditional on meal finalization quality for meal confirmations. |
+| `bot/messages.py` | Failure/on-hold copy exists for unsafe saves | VERIFIED | `format_grounding_blocker_message(..., saved_as_unverified=False)` provides appropriate wording. |
+| `tests/test_interview_schema.py` | Schema regression for removed service-owned fields | VERIFIED | Tests assert finalizer schema excludes operational/service-owned fields and includes `selected_source_ids`. |
+| `tests/test_interview_flow.py` | Finalizer promotion, source registry, malformed output, and post-interview all-degraded coverage | VERIFIED | Tests cover the post-interview path and selected-source promotion. |
+| `tests/test_match_flow.py` | Reasoning-stage shared finalizer routing coverage | PARTIAL | Existing tests cover successful reasoning finalization, but not all-degraded fail-closed behavior. |
+| `tests/test_bot_contract.py` | Bot confirmation contract for failed/empty finalization | FAILED | Current tests bless success for empty finalization results. |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 | --- | --- | --- | --- | --- |
-| `app/services/reasoning_service.py` | `app/services/interview_service.py` | Ready-to-write reasoning groups use the shared bounded group finalizer | ✓ WIRED | `finalize_meal_from_reasoning()` calls `_run_group_finalizers()` at `app/services/reasoning_service.py:2370-2389`. |
-| `app/services/interview_service.py` | `app/services/grounding_service.py` | Bounded loop passes remaining budget into `search()` / `scrape()` | ✓ WIRED | `_bounded_group_finalizer_response()` and `GroundingService._request_timeout_s()` cooperate on remaining-time budgets. |
-| `app/services/interview_service.py` | `app/services/meal_resolution_service.py` | Finalized/degraded group resolutions flow through the unchanged authoritative save transaction | ✓ WIRED | `finalize_confirmed_interview()` and `finalize_meal_from_reasoning()` both call `apply_final_meal_resolution()`. |
-| `app/services/grounding_service.py` | Firecrawl HTTP calls | Loop budget -> per-request timeout | ✓ WIRED | `timeout=self._request_timeout_s(loop_state=loop_state)` in `search()` and `scrape()`. |
-| `app/services/interview_schema.py` | `app/services/grounding_stub.py` | Finalizer `source_type` drives `build_grounding_prep()` eligibility | ✗ NOT_WIRED | Unknown `source_type` values are normalized to `HOME`, so malformed packaged/restaurant output can silently skip grounding. |
-| `bot/polling.py` | Slow detect/segment stage work | `skip_locked` claim remains durable until stage completion | ✗ NOT_WIRED | Detect and segment release the claim before the expensive call starts. |
-| `bot/polling.py` | Live consumer for `MealProcessingStatus.REASONING` | Zero-segment MATCHING edge case still exits cleanly | ✗ NOT_WIRED | No worker selects `REASONING`; the zero-segment branch parks the meal there. |
+| `group_finalizer_response_format()` | `FinalizedGroupResult` | Pydantic schema | WIRED | Response format now points at the draft-only schema with `selected_source_ids`. |
+| `_bounded_group_finalizer_response()` | LLM finalizer call | `max_tokens=FINALIZER_OUTPUT_MAX_TOKENS` | WIRED | Finalizer chat completion uses the finite output cap. |
+| Finalizer tool loop | source registry | `search`/`scrape` trace capture | WIRED | Service trace includes `source_registry`; selected IDs resolve through `_validate_selected_evidence_ids()`. |
+| `finalize_confirmed_interview()` | `apply_final_meal_resolution()` | all-degraded policy before write | WIRED | All-degraded post-interview writes `FAILED` with no final segments. |
+| `finalize_meal_from_reasoning()` | `apply_final_meal_resolution()` | all-degraded policy before write | NOT_WIRED | Reasoning caller always passes `MealProcessingStatus.COMPLETED`. |
+| `bot.handlers` | user success reply | finalization result inspection | NOT_WIRED | Empty or failed finalization results are not checked before success copy. |
 
 ### Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 | --- | --- | --- | --- | --- |
-| `app/services/reasoning_service.py` | `final_segments` for reasoning-complete groups | grouped reasoning output -> `_build_group_finalizer_inputs()` -> `_run_group_finalizers()` -> `apply_final_meal_resolution()` | Yes | ✓ FLOWING |
-| `app/services/interview_service.py` | grounded nutrition, provenance, and trace fields | finalizer JSON -> `FinalizedGroupResult` -> `final_resolution_from_confirmation()` -> authoritative save | Yes | ✓ FLOWING |
-| `app/services/grounding_service.py` | allowlisted URLs and remaining timeout | loop state -> `search()` / `scrape()` | Yes | ✓ FLOWING |
-| `bot/polling.py` | stage ownership for slow detect/segment work | `FOR UPDATE SKIP LOCKED` row claim | No durable claim survives the early commit | ✗ DISCONNECTED |
-| `app/services/interview_schema.py` | finalizer `source_type` -> grounding eligibility | `normalize_source_type()` -> `build_grounding_prep()` | No; invalid values become `HOME`, which suppresses grounding | ✗ HOLLOW |
+| `app/services/interview_schema.py` | finalizer draft fields | LLM response schema | Yes | FLOWING - narrowed draft schema excludes service-owned fields. |
+| `app/services/interview_service.py` | `selected_source_ids` -> provenance/source_url/trace | same-loop `source_registry` | Yes | FLOWING - packaged/restaurant success derives citations from registry entries. |
+| `app/services/interview_service.py` | all-degraded post-interview finalizer groups | `_run_group_finalizers()` audit states | Yes | FLOWING - maps to FAILED and no final segments. |
+| `app/services/reasoning_service.py` | all-degraded reasoning finalizer groups | `_run_group_finalizers()` audit states | No | HOLLOW - audit state is recorded, but write policy ignores all-degraded status and completes. |
+| `bot/handlers.py` | finalization result `meal_entries` / meal status | `_finalize_interview_confirmation()` | No | DISCONNECTED - helper can extract entries, but success branches do not gate on empty/failed results. |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 | --- | --- | --- | --- |
-| Phase 05 regression slice for fail-closed reasoning and durable EMBEDDING/MATCHING ownership | `rtk docker run --rm -v "$PWD":/app -w /app mealttracker-plan05-test python -m unittest tests.test_reasoning_flow tests.test_match_flow tests.test_bot_contract -q` | Passed, `113` tests | ✓ PASS |
-| Grounding contract + interview trace/degraded-save slice | `rtk docker run --rm -v "$PWD":/app -w /app mealttracker-plan05-test python -m unittest tests.test_reasoning_contract tests.test_grounding_service tests.test_interview_flow -q` | Passed, `74` tests | ✓ PASS |
-| Invalid finalizer source type is rejected instead of coerced | `rtk docker run --rm -v "$PWD":/app -w /app mealttracker-plan05-test python -c '...'` | Output: `{\"confirmation_source_type\": \"HOME\", \"final_source_type\": \"HOME\"}` for input `source_type=\"takeout?\"` | ✗ FAIL |
+| MVP goal format guard | `rtk gsd-sdk query user-story.validate --story "$PHASE_GOAL" --raw` | Returned `valid: false` with missing `As a`, `I want`, and `so that` clauses | PASS |
+| 05-11 artifact contract | `rtk gsd-sdk query verify.artifacts .planning/phases/05-agentic-grounding/05-11-PLAN.md --raw` | `all_passed: true`, 4/4 artifacts passed existence/substance checks | PASS |
+| Targeted unittest slices | `rtk python3 -m unittest ... -q` | Host `python3` unittest invocations produced no output for 40s and were terminated; no passing result recorded | SKIP |
+| Probe discovery | `find scripts -path '*/tests/probe-*.sh' -type f` plus phase doc grep | No conventional `probe-*.sh` scripts or executable phase probes found | SKIP |
 
 ### Probe Execution
 
 | Probe | Command | Result | Status |
 | --- | --- | --- | --- |
-| Conventional phase probes | `find scripts -path '*/tests/probe-*.sh' -type f` | No Phase 05 `probe-*.sh` scripts found and no plan declared one | ? SKIP |
+| Conventional phase probes | `find scripts -path '*/tests/probe-*.sh' -type f` | No probe scripts found; phase docs mention live probes/UAT but no `probe-*.sh` artifact exists | SKIP |
 
 ### Requirements Coverage
 
 | Requirement | Source Plan | Description | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| `GROUND-01` | 05-01, 05-02, 05-03, 05-04, 05-05, 05-06 | Reasoning and post-interview stages can call search/fetch tools when brand/restaurant nutrition needs grounding | ✗ BLOCKED | Positive tool paths exist, but invalid finalizer `source_type` still coerces to `HOME`, which can suppress required packaged/restaurant grounding. |
-| `GROUND-02` | 05-01, 05-02, 05-03, 05-04, 05-05, 05-06 | Tool loop is bounded: max iterations, wall-clock timeout, per-meal cost cap, URL allowlist | ✗ BLOCKED | Per-loop cap/timeout/allowlist are implemented, but detect/segment ownership is still not durable end-to-end and zero-segment MATCHING meals can hang. |
-| `GROUND-03` | 05-01, 05-02, 05-03, 05-04, 05-05 | Tool-call trace (queries, URLs, snippets) is appended to `MealSegment.ai_reasoning` | ✓ SATISFIED | Live trace persistence is covered by `tests/test_interview_flow.py:1477-1612` and present in the finalizer code path. |
-| `REASON-04` | 05-01 | Reasoning trace is written to `MealSegment.ai_reasoning` for audit | ✓ SATISFIED | Phase 05 appends grounding trace into the existing reasoning audit structure rather than replacing it. |
-| `INTERVIEW-03` | 05-01, 05-02 | Interview answers trigger re-grounding with tools to populate nutrition | ✓ SATISFIED | `finalize_confirmed_interview()` uses the shared bounded grounded finalizer and populates nutrition/provenance fields. |
-| `INTERVIEW-04` | 05-02 | If post-interview confidence stays low, commit best-effort with `is_verified=false` | ✓ SATISFIED | Degraded-save path persists `INTERVIEW_BEST_EFFORT`, `is_verified=false`, and disables visual learning. |
-| `MATCH-04` | 05-02, 05-03 | Confirmed identifications create `FoodVisual` rows so the visual vocabulary grows | ✓ SATISFIED | Verified outcomes still create visuals through `apply_final_meal_resolution()`; degraded/unverified saves are blocked. |
+| `GROUND-01` | ROADMAP / 05 plans | Reasoning and post-interview stages can call SearXNG and Firecrawl tools for brand/restaurant nutrition | BLOCKED | Tool/finalizer path is wired, but the reasoning-stage all-degraded path can still mark a failed grounding run as completed. |
+| `GROUND-02` | ROADMAP / 05 plans | Tool loop is bounded: max iterations, wall-clock timeout, per-meal cost cap, URL allowlist, clean exit | BLOCKED | Loop bounds and previous worker no-hang gaps are fixed, but reasoning all-degraded clean-exit policy and Telegram failure surface are incomplete. |
+| `GROUND-03` | ROADMAP / 05 plans | Tool-call trace is appended to `MealSegment.ai_reasoning` | SATISFIED | Service-owned trace fields are derived from loop state and selected source IDs; trace persistence tests cover snippets/provenance/source URL. |
 
-**Orphaned requirements:** None found. All requirement IDs declared in Phase 05 plan frontmatter were accounted for above.
+**Orphaned requirements:** None found for Phase 05. Phase 6 is the only later roadmap phase and covers bot surface/daily summary, but it does not explicitly own Phase 05 finalizer fail-closed behavior; no current blocker is deferred.
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 | --- | --- | --- | --- | --- |
-| `bot/polling.py` | 433 | Detect worker commits before `detect_food_photo()` | 🛑 BLOCKER | A second worker can reacquire the same meal before detect finishes, undermining end-to-end per-meal cap guarantees. |
-| `bot/polling.py` | 490 | Segment worker commits before `segment_food_photo_with_retry()` | 🛑 BLOCKER | A second worker can duplicate segmentation/crop creation and later duplicate downstream grounding work. |
-| `bot/polling.py` | 856 | Zero-segment MATCHING branch parks the meal in `REASONING` | 🛑 BLOCKER | No live worker consumes `REASONING` directly, so the meal hangs until janitor recovery instead of exiting cleanly. |
-| `app/services/interview_schema.py` | 82 | Finalizer-facing `source_type` validation normalizes through `normalize_source_type()` | 🛑 BLOCKER | Malformed packaged/restaurant output can be rewritten to `HOME` instead of failing. |
-| `app/services/interview_schema.py` | 315 | `FinalizedGroupResult.source_type` repeats the same coercion | 🛑 BLOCKER | The live grounded finalizer can silently suppress required grounding. |
-| `app/services/matching_service.py` | 66 | Candidate snapshots omit `source_type`, `brand_name`, and `restaurant_name` that downstream code attempts to read | ⚠ WARNING | Production snapshots are thinner than several downstream reuse paths assume; this is still a provenance/identity robustness risk. |
-| `bot/polling.py` | 446 | Detect-stage exceptions are only logged, not failed closed immediately | ⚠ WARNING | Meals can linger in `DETECTING` until janitor recovery rather than failing immediately. |
+| `app/services/reasoning_service.py` | 2424 | `MealProcessingStatus.COMPLETED` hardcoded after shared finalizer outcomes | BLOCKER | All-degraded reasoning finalizer runs can complete with best-effort empty nutrition rows. |
+| `bot/handlers.py` | 763, 853, 1018 | Unconditional `"Meal confirmation saved."` after finalization | BLOCKER | User can be told a meal was saved even when finalization produced no entries or failed closed. |
+| `tests/test_bot_contract.py` | 590, 2296 | Tests assert success for empty finalization results | BLOCKER | Test suite preserves the wrong user-facing contract. |
+| `app/services/interview_service.py` | 1935, 1937 | Dead helper references removed `FinalizedGroupResult.source_url` and `.grounding_trace` fields | WARNING | `rg` shows no callers, so this is not live today, but any future reuse will raise `AttributeError`. |
+
+### Human Verification Required
+
+### 1. Live Packaged/Restaurant All-Degraded Confirmation
+
+**Test:** After the blockers are fixed, run a live Telegram confirmation for a packaged or restaurant meal whose finalizer cannot produce verified nutrition.
+**Expected:** The meal does not become `COMPLETED` with empty nutrition rows, and the bot clearly reports that the meal was not safely saved.
+**Why human:** Provider behavior, Telegram wording, Langfuse trace shape, and Postgres rows need a real end-to-end run.
 
 ### Gaps Summary
 
-Phase 05 is not complete. The prior verification gaps are genuinely closed: failed reasoning no longer auto-confirms from raw vector hits, and the Phase 05-owned EMBEDDING/MATCHING workers now keep single-owner claims while slow work is in flight. The shared bounded grounding finalizer, degraded-save path, allowlist enforcement, remaining-time HTTP timeout propagation, and live trace persistence are all present and backed by passing targeted tests.
+Phase 05 is still not complete. The 05-11 schema ownership work is mostly real: the model-facing finalizer schema is draft-only, source IDs drive deterministic provenance, the high finite output cap is present, strict source typing is fixed, and the post-interview all-degraded path now fails closed.
 
-The phase still misses three goal-level truths in the live runtime. First, the hard per-meal cap is not true end-to-end because DETECTING and SEGMENTING still release their row claim before the expensive stage call. Second, the MATCHING zero-segment branch still parks meals in `REASONING` with no live consumer, which violates the “no hanging meals” promise and depends on janitor recovery instead of a clean exit. Third, finalizer-facing `source_type` validation still coerces unknown values to `HOME`; because `build_grounding_prep()` only grounds PACKAGED or RESTAURANT flows, malformed finalizer output can silently suppress required grounding.
-
-I did not count review finding CR-01 as a verification gap. The review recommended fail-closed behavior for grounded finalizer failures, but the Phase 05 roadmap contract explicitly requires the opposite: bounded loop exit with best-effort commit and `is_verified=false`. The current degraded-save behavior matches the phase contract.
+Two blockers remain. The reasoning finalizer caller did not adopt the all-degraded policy, so auto-finalization from reasoning can still save degraded fallback rows as `COMPLETED`. Separately, Telegram confirmation handlers still send success and close the interview without checking whether finalization wrote entries or failed; the bot tests explicitly assert that wrong behavior for empty results. The stale helper that references removed finalizer fields is a warning because it is dead code, but it should be removed or updated while closing the blockers.
 
 ---
 
-_Verified: 2026-06-05T02:01:44Z_
+_Verified: 2026-06-06T16:08:32Z_
 _Verifier: the agent (gsd-verifier)_

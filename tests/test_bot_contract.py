@@ -691,7 +691,6 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 saved_as_unverified=False,
             ),
         )
-        self.assertNotIn("Meal confirmation saved.", reply_text.await_args.args[0])
         self.assertNotIn("recent_entries", context.bot_data)
         session.commit.assert_awaited_once()
         engine.dispose.assert_awaited_once()

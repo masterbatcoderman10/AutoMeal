@@ -2569,6 +2569,132 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "DEGRADED")
 
+    async def test_finalize_confirmed_interview_fails_closed_when_every_group_degrades(self) -> None:
+        from app.services import interview_service
+
+        meal = SimpleNamespace(
+            id="meal-all-finalizer-groups-degraded",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={
+                "meal_reasoning": {
+                    "food_groups": [
+                        {
+                            "group_id": "group-bar",
+                            "group_label": "protein bar",
+                            "question_kind": "SOURCE_ORIGIN",
+                            "primary_segment_id": "seg-bar-1",
+                            "segment_ids": ["seg-bar-1"],
+                        },
+                        {
+                            "group_id": "group-curry",
+                            "group_label": "chicken curry",
+                            "question_kind": "DETAIL",
+                            "primary_segment_id": "seg-curry-1",
+                            "segment_ids": ["seg-curry-1"],
+                        },
+                        {
+                            "group_id": "group-bread",
+                            "group_label": "flatbread",
+                            "question_kind": "IDENTITY",
+                            "primary_segment_id": "seg-bread-1",
+                            "segment_ids": ["seg-bread-1"],
+                        },
+                    ]
+                }
+            },
+            last_stage_started_at=None,
+        )
+        segments = [
+            SimpleNamespace(id="seg-bar-1", cropped_image_url="/data/uploads/crops/seg-bar-1.jpg", embedding=[0.1]),
+            SimpleNamespace(id="seg-curry-1", cropped_image_url="/data/uploads/crops/seg-curry-1.jpg", embedding=[0.2]),
+            SimpleNamespace(id="seg-bread-1", cropped_image_url="/data/uploads/crops/seg-bread-1.jpg", embedding=[0.3]),
+        ]
+        confirmation_items = [
+            {
+                "group_id": "group-bar",
+                "primary_segment_id": "seg-bar-1",
+                "segment_id": "seg-bar-1",
+                "segment_ids": ["seg-bar-1"],
+                "name": "Acme Protein Bar",
+                "source_type": "PACKAGED",
+                "brand_name": "Acme",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "quantity_display": "1 bar",
+            },
+            {
+                "group_id": "group-curry",
+                "primary_segment_id": "seg-curry-1",
+                "segment_id": "seg-curry-1",
+                "segment_ids": ["seg-curry-1"],
+                "name": "Chicken curry",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "quantity_display": "1 bowl",
+            },
+            {
+                "group_id": "group-bread",
+                "primary_segment_id": "seg-bread-1",
+                "segment_id": "seg-bread-1",
+                "segment_ids": ["seg-bread-1"],
+                "name": "Flatbread",
+                "source_type": "HOME",
+                "portion_bucket": "STANDARD",
+                "approval_status": "CORRECTED",
+                "quantity_display": "1 piece",
+            },
+        ]
+        llm_client = SimpleNamespace(
+            chat_completion=AsyncMock(
+                return_value={"choices": [{"message": {"content": "{\"bad\":true}"}}]}
+            )
+        )
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=1,
+                    FINALIZER_MODEL="google/gemini-3-flash-preview",
+                    FINALIZER_OUTPUT_MAX_TOKENS=12000,
+                ),
+                create=True,
+            ),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
+        ):
+            await interview_service.finalize_confirmed_interview(
+                session=AsyncMock(),
+                meal=meal,
+                confirmation_items=confirmation_items,
+                segments=segments,
+            )
+
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.FAILED)
+        self.assertEqual(captured["final_segments"], [])
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_status"),
+            "ALL_FINALIZER_GROUPS_DEGRADED",
+        )
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_failure", {}).get("category"),
+            "all_finalizer_groups_degraded",
+        )
+        self.assertTrue(
+            all(group["status"] == "DEGRADED" for group in captured["reasoning_state_json"]["finalizer_groups"])
+        )
+
     async def test_finalize_confirmed_interview_degrades_when_finalizer_emits_invalid_authoritative_source_type(self) -> None:
         from app.services import interview_service
 

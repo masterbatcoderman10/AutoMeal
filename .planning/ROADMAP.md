@@ -261,7 +261,9 @@ Eleven phases transform a blank repo into a fully operational personal meal trac
 
 **Plans**: 12 plans
 Plans:
+
 - [ ] 05-12-PLAN.md — gap closure for reasoning all-degraded fail-closed behavior and Telegram empty/failed finalization copy
+
 **Phase note**: Verify Firecrawl resource envelope on Mac mini before shipping: run 5 sequential Chromium fetches under Docker memory limits and confirm OOM does not occur. If headroom is insufficient, switch to `devflowinc/firecrawl-simple` during this phase.
 
 ---

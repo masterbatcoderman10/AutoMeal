@@ -44,6 +44,15 @@ class InterviewConfigContractTests(unittest.TestCase):
 
         self.assertNotIn("FINALIZER_MAX_TOKENS", fields)
 
+    def test_settings_expose_high_finite_finalizer_output_cap(self) -> None:
+        from app.config import Settings
+
+        fields = Settings.model_fields
+
+        self.assertIn("FINALIZER_OUTPUT_MAX_TOKENS", fields)
+        self.assertEqual(fields["FINALIZER_OUTPUT_MAX_TOKENS"].default, 12000)
+        self.assertGreater(fields["FINALIZER_OUTPUT_MAX_TOKENS"].default, 4096)
+
 
 class InterviewSchemaContractTests(unittest.TestCase):
     def test_schema_module_exposes_strict_contract_and_response_format(self) -> None:

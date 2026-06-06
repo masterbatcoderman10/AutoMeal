@@ -1490,7 +1490,7 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_segment.food.calories, 240.0)
         self.assertIn("acme.example/protein-bar", final_segment.food.llm_reasoning or "")
 
-    async def test_bounded_group_finalizer_response_leaves_max_tokens_unset(self) -> None:
+    async def test_bounded_group_finalizer_response_uses_high_finite_output_cap(self) -> None:
         from app.services import interview_service
 
         group_input = interview_service.GroupFinalizerInput(
@@ -1530,6 +1530,7 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
             GROUNDING_MAX_TOOL_CALLS=6,
             GROUNDING_WALL_CLOCK_TIMEOUT_S=90.0,
             GROUNDING_TOOL_TIMEOUT_S=12.5,
+            FINALIZER_OUTPUT_MAX_TOKENS=12000,
         )
 
         await interview_service._bounded_group_finalizer_response(  # noqa: SLF001
@@ -1540,7 +1541,8 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         )
 
         call_kwargs = llm_client.chat_completion.await_args.kwargs
-        self.assertNotIn("max_tokens", call_kwargs)
+        self.assertEqual(call_kwargs["max_tokens"], 12000)
+        self.assertGreater(call_kwargs["max_tokens"], 4096)
 
     async def test_finalize_confirmed_interview_rejects_truncated_retry_null_macro_success(self) -> None:
         from app.services import interview_service

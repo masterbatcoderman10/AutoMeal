@@ -1,0 +1,156 @@
+---
+phase: 05-agentic-grounding
+plan: 12
+subsystem: agentic-grounding
+tags: [finalizer, grounding, telegram, tdd, regression]
+
+requires:
+  - phase: 05-agentic-grounding
+    provides: "05-11 finalizer schema ownership and post-interview all-degraded fail-closed policy"
+provides:
+  - "Reasoning-stage all-degraded finalizer runs fail closed with no final segments"
+  - "Telegram meal confirmation success copy is gated on saved meal entries and non-FAILED meal status"
+  - "Phase 05 targeted regression suite evidence for the two verification blockers"
+affects: [phase-05, reasoning-finalizer, telegram-confirmation, grounding-fail-closed]
+
+tech-stack:
+  added: []
+  patterns:
+    - "Shared all-degraded finalizer policy is reused across reasoning and post-interview writes"
+    - "Meal interview success replies require non-empty meal_entries and non-FAILED meal status"
+    - "Unsafe meal finalization keeps the meal interview active and sends grounding blocker copy"
+
+key-files:
+  created:
+    - ".planning/phases/05-agentic-grounding/05-12-SUMMARY.md"
+  modified:
+    - "app/services/reasoning_service.py"
+    - "app/services/interview_service.py"
+    - "bot/handlers.py"
+    - "tests/test_match_flow.py"
+    - "tests/test_bot_contract.py"
+
+key-decisions:
+  - "Reasoning finalizer all-DEGRADED outcomes now use the same FAILED/no-final-segments policy as post-interview finalization."
+  - "Meal confirmation success is defined by saved meal_entries plus meal status not being FAILED; /fix branches remain unchanged."
+  - "Generated __pycache__ files were deleted during verification when the container reused stale bytecode from the mounted worktree."
+
+patterns-established:
+  - "Use `_meal_finalization_succeeded()` before deactivating meal interviews or writing recent-entry context."
+  - "Use `format_grounding_blocker_message(..., saved_as_unverified=False)` for empty or failed meal finalization results."
+
+requirements-completed: [GROUND-01, GROUND-02, GROUND-03]
+
+duration: 16min
+completed: 2026-06-06
+---
+
+# Phase 05 Plan 12: Verification Gap Closure Summary
+
+**Fail-closed reasoning finalizers and truthful Telegram confirmation copy for unsafe finalization results**
+
+## Performance
+
+- **Duration:** 16 min
+- **Started:** 2026-06-06T16:53:39Z
+- **Completed:** 2026-06-06T17:09:14Z
+- **Tasks:** 3
+- **Files modified:** 5 source/test files plus this summary
+
+## Accomplishments
+
+- Added a reasoning-path regression proving all-DEGRADED finalizer outcomes cannot write completed final segments.
+- Updated `finalize_meal_from_reasoning()` to write `MealProcessingStatus.FAILED`, `final_segments=[]`, `grounding_status=ALL_FINALIZER_GROUPS_DEGRADED`, and `grounding_failure.category=all_finalizer_groups_degraded`.
+- Removed the stale uncalled `_finalizer_has_grounded_url()` / `_trace_has_url_evidence()` helper pair that referenced removed finalizer fields.
+- Added bot contract regressions for empty typed-confirm finalization, empty auto-ready finalization, and FAILED callback finalization.
+- Added a shared Telegram meal-finalization success guard before meal interview deactivation, recent-entry context writes, and success copy.
+
+## Task Commits
+
+Each task was committed atomically:
+
+1. **Task 1 RED: reasoning all-degraded regression** - `f243836` (test)
+2. **Task 1 GREEN: reasoning all-degraded fail-closed policy** - `c6a415e` (feat)
+3. **Task 2 RED: bot finalization guard regressions** - `36d1018` (test)
+4. **Task 2 GREEN: Telegram meal-finalization result guard** - `7c40169` (feat)
+5. **Task 3 acceptance cleanup: bot success literal grep** - `26a3e33` (test)
+
+## Files Created/Modified
+
+- `app/services/reasoning_service.py` - Reuses `_all_finalizer_groups_degraded()` and passes FAILED/no final segments to the final meal write path.
+- `app/services/interview_service.py` - Removed stale dead helper code referencing removed `FinalizedGroupResult` fields.
+- `bot/handlers.py` - Adds `_meal_finalization_succeeded()` and `_meal_finalization_blocker_message()` and applies them to callback, typed confirm, and auto-ready meal confirmation branches.
+- `tests/test_match_flow.py` - Adds the reasoning all-degraded regression.
+- `tests/test_bot_contract.py` - Adds empty/FAILED finalization regressions and keeps success-copy literals only in successful-save expectations.
+- `.planning/phases/05-agentic-grounding/05-12-SUMMARY.md` - Captures this gap-closure execution.
+
+## Decisions Made
+
+- The post-interview all-degraded finalizer policy from 05-11 is the single policy for reasoning-stage finalization too.
+- Telegram `/fix` confirmation behavior was left unchanged; the new guard applies only to meal interviews.
+- Empty `meal_entries` and `MealProcessingStatus.FAILED` are treated as unsafe meal finalization results even if the finalizer returned an object.
+
+## Deviations from Plan
+
+### Auto-fixed Issues
+
+**1. [Rule 3 - Blocking] Cleared stale generated bytecode during verification**
+- **Found during:** Task 1 and Task 2 verification
+- **Issue:** The mounted container reused stale `__pycache__` files and temporarily reported old source behavior, including a stale parser/import state.
+- **Fix:** Removed specific generated `.pyc` files under `app/`, `bot/`, and `tests/` before rerunning affected verification commands. No source behavior was changed for this issue.
+- **Files modified:** None committed; generated bytecode only.
+- **Verification:** Reruns imported the current source and passed.
+- **Committed in:** Not applicable.
+
+**2. [Rule 3 - Blocking] Removed a blocker-test success literal that violated grep acceptance**
+- **Found during:** Task 3
+- **Issue:** The empty-finalization blocker regression included `assertNotIn("Meal confirmation saved.", ...)`, which made the required grep command match an empty-result test even though the assertion was negative.
+- **Fix:** Removed the redundant negative assertion because the test already asserts the exact blocker message.
+- **Files modified:** `tests/test_bot_contract.py`
+- **Verification:** `rtk rg -n "Meal confirmation saved\\." tests/test_bot_contract.py` now returns only successful-save expectations.
+- **Committed in:** `26a3e33`
+
+---
+
+**Total deviations:** 2 auto-fixed blocking issues
+**Impact on plan:** Both fixes were limited to verification correctness. No package installs, schema migrations, service rewrites, or prior Phase 05 plan/summary changes were made.
+
+## Issues Encountered
+
+- Containerized tests emit expected error logs from existing mocked polling failure tests while still returning `OK`.
+- Stale mounted bytecode recurred after rapid edits; generated `__pycache__` files were deleted explicitly, not with `git clean`.
+- Per user instruction, `.planning/STATE.md`, `.planning/ROADMAP.md`, and `.planning/REQUIREMENTS.md` were not updated.
+
+## Verification
+
+Passed:
+
+- `rtk docker run --rm -v "$PWD":/app -w /app mealttracker-plan05-test python -m unittest tests.test_match_flow -q` - 32 tests passed after the expected RED failure and GREEN fix.
+- `rtk docker run --rm -v "$PWD":/app -w /app mealttracker-plan05-test python -m unittest tests.test_bot_contract -q` - 71 tests passed after Task 2 GREEN.
+- `rtk docker run --rm -v "$PWD":/app -w /app mealttracker-plan05-test python -m unittest tests.test_match_flow tests.test_bot_contract -q` - 103 tests passed on the committed final state.
+- `rtk docker run --rm -v "$PWD":/app -w /app mealttracker-plan05-test python -m unittest tests.test_reasoning_contract tests.test_reasoning_flow tests.test_grounding_service tests.test_interview_flow tests.test_match_flow tests.test_bot_contract -q` - 205 tests passed on the committed final state.
+- `rtk rg -n "Meal confirmation saved\\." tests/test_bot_contract.py` - returned only successful-save expectations at lines 351, 451, and 534.
+
+## Known Stubs
+
+None. Stub-pattern scan hits were existing type defaults, test fixtures, and normal empty collection initialization; no UI/rendered placeholder or unwired data source was introduced.
+
+## Threat Flags
+
+None. This plan changed existing finalization trust-boundary handling and tests under the plan's threat model; it did not introduce new endpoints, auth paths, file access patterns, package installs, or schema migrations.
+
+## User Setup Required
+
+None for code. Live verification remains a `/gsd-verify-work` follow-up after the merged branch is redeployed to the main stack.
+
+## Next Phase Readiness
+
+The two Phase 05 verification blockers are closed in automated tests. Live validation should now confirm a packaged or restaurant meal whose finalizer all-degrades produces no completed empty diary rows, sends non-success Telegram copy, and persists `ALL_FINALIZER_GROUPS_DEGRADED`.
+
+## Self-Check: PASSED
+
+Verified the summary and all modified files exist, and verified all task commits recorded in this summary are present in git history.
+
+---
+*Phase: 05-agentic-grounding*
+*Completed: 2026-06-06*

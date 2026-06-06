@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     GROUNDING_MODEL: str = "google/gemini-3.1-flash-lite"
     GROUNDING_FALLBACK_MODEL: str = "google/gemini-3-flash-preview"
     FINALIZER_GROUP_PARALLELISM: int = 4
+    FINALIZER_OUTPUT_MAX_TOKENS: int = 12000
     FIRECRAWL_BASE_URL: str = "http://firecrawl-api:3002"
     FIRECRAWL_API_KEY: str = ""
     SEARXNG_BASE_URL: str = "http://searxng:8080"
@@ -68,6 +69,13 @@ class Settings(BaseSettings):
     def _validate_finalizer_group_parallelism(cls, value: int) -> int:
         if value < 1:
             raise ValueError("FINALIZER_GROUP_PARALLELISM must be at least 1")
+        return value
+
+    @field_validator("FINALIZER_OUTPUT_MAX_TOKENS")
+    @classmethod
+    def _validate_finalizer_output_max_tokens(cls, value: int) -> int:
+        if value <= 4096:
+            raise ValueError("FINALIZER_OUTPUT_MAX_TOKENS must stay above the old 4096-token cap")
         return value
 
     @field_validator("GROUNDING_SEARCH_LIMIT", "GROUNDING_MAX_TOOL_CALLS")

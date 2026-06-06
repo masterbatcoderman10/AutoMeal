@@ -464,6 +464,7 @@ async def _bounded_group_finalizer_response(
                 tools=tools,
                 tool_choice="auto",
                 parallel_tool_calls=False,
+                max_tokens=int(getattr(settings, "FINALIZER_OUTPUT_MAX_TOKENS", 12000)),
                 extra_body=_tool_loop_extra_body(),
                 timeout=_tool_timeout_s(
                     loop_state=loop_state,

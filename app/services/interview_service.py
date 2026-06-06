@@ -648,6 +648,11 @@ def _first_degraded_grounding_failure(finalizer_groups: list[Mapping[str, Any]] 
     return {}
 
 
+def _all_finalizer_groups_degraded(finalizer_groups: list[Mapping[str, Any]] | None) -> bool:
+    groups = [group for group in finalizer_groups or [] if isinstance(group, Mapping)]
+    return bool(groups) and all(str(group.get("status") or "").upper() == "DEGRADED" for group in groups)
+
+
 def get_interview_roadmap() -> list[str]:
     return list(INTERVIEW_ROADMAP)
 
@@ -1489,23 +1494,32 @@ async def finalize_confirmed_interview(
     if not degraded_failure:
         degraded_failure = _first_degraded_grounding_failure(finalizer_groups)
     degraded_inline_save = force_degraded_save or bool(degraded_failure)
+    all_finalizer_groups_degraded = _all_finalizer_groups_degraded(finalizer_groups)
+    meal_status = MealProcessingStatus.COMPLETED
+    grounding_status = "DEGRADED_SAVED" if degraded_inline_save else None
+    final_segments_for_write = final_segments
+    if all_finalizer_groups_degraded:
+        meal_status = MealProcessingStatus.FAILED
+        grounding_status = "ALL_FINALIZER_GROUPS_DEGRADED"
+        final_segments_for_write = []
+        degraded_failure = {
+            **degraded_failure,
+            "category": "all_finalizer_groups_degraded",
+            "reason": "Every finalizer group degraded; no verified nutrition was saved.",
+        }
 
     result = await apply_final_meal_resolution(
         session=session,
         meal=meal,
-        final_segments=final_segments,
-        meal_status=MealProcessingStatus.COMPLETED,
+        final_segments=final_segments_for_write,
+        meal_status=meal_status,
         reasoning_state_json=_build_finalization_reasoning_state(
             meal=meal,
             confirmation_items=finalized_confirmation_items,
             best_effort=best_effort,
             interview_state=interview_state,
             finalizer_groups=finalizer_groups,
-            grounding_status=(
-                "DEGRADED_SAVED"
-                if degraded_inline_save
-                else None
-            ),
+            grounding_status=grounding_status,
             grounding_failure=degraded_failure or None,
         ),
     )

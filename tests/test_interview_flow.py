@@ -1656,31 +1656,16 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         finalizer_group = captured["reasoning_state_json"]["finalizer_groups"][0]
         self.assertNotEqual(finalizer_group["status"], "SUCCEEDED")
         self.assertEqual(finalizer_group["status"], "DEGRADED")
-        self.assertEqual(captured["reasoning_state_json"].get("grounding_status"), "DEGRADED_SAVED")
-
-        final_segment = captured["final_segments"][0]
-        self.assertNotEqual(
-            (
-                captured["meal_status"],
-                final_segment.identification_method,
-                final_segment.food.calories,
-                final_segment.food.protein_g,
-                final_segment.food.carbs_g,
-                final_segment.food.fat_g,
-                final_segment.food.fiber_g,
-            ),
-            (
-                MealProcessingStatus.COMPLETED,
-                "INTERVIEW",
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.FAILED)
+        self.assertEqual(captured["final_segments"], [])
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_status"),
+            "ALL_FINALIZER_GROUPS_DEGRADED",
         )
-        self.assertFalse(final_segment.create_food_visual)
-        self.assertFalse(final_segment.visual_learning_eligible)
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_failure", {}).get("category"),
+            "all_finalizer_groups_degraded",
+        )
 
     def test_successful_finalizer_allows_home_model_knowledge_complete_nutrition(self) -> None:
         from app.services import interview_service
@@ -2336,12 +2321,13 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 segments=[segment],
             )
 
-        final_segment = captured["final_segments"][0]
         self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "DEGRADED")
-        self.assertFalse(final_segment.food.is_verified)
-        self.assertTrue(final_segment.food.needs_grounding)
-        grounding_trace = final_segment.segment_ai_reasoning["grounding_trace"]
-        self.assertNotIn("source_url", grounding_trace)
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.FAILED)
+        self.assertEqual(captured["final_segments"], [])
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_status"),
+            "ALL_FINALIZER_GROUPS_DEGRADED",
+        )
 
     async def test_finalize_confirmed_interview_degrades_legacy_malformed_trace_and_source_url_fields(self) -> None:
         from app.services import interview_service
@@ -2472,11 +2458,13 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 segments=[segment],
             )
 
-        final_segment = captured["final_segments"][0]
         self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "DEGRADED")
-        self.assertFalse(final_segment.food.is_verified)
-        self.assertTrue(final_segment.food.needs_grounding)
-        self.assertNotIn("source_url", final_segment.segment_ai_reasoning["grounding_trace"])
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.FAILED)
+        self.assertEqual(captured["final_segments"], [])
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_status"),
+            "ALL_FINALIZER_GROUPS_DEGRADED",
+        )
 
     async def test_finalize_confirmed_interview_records_inline_grounding_failure_as_degraded_save(self) -> None:
         from app.services import interview_service
@@ -2556,16 +2544,15 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 segments=[segment],
             )
 
-        final_segment = captured["final_segments"][0]
-        self.assertEqual(final_segment.identification_method, "INTERVIEW_BEST_EFFORT")
-        self.assertFalse(final_segment.food.is_verified)
-        self.assertTrue(final_segment.food.needs_grounding)
-        self.assertFalse(final_segment.create_food_visual)
-        self.assertFalse(final_segment.visual_learning_eligible)
-        self.assertEqual(captured["reasoning_state_json"].get("grounding_status"), "DEGRADED_SAVED")
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.FAILED)
+        self.assertEqual(captured["final_segments"], [])
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_status"),
+            "ALL_FINALIZER_GROUPS_DEGRADED",
+        )
         self.assertEqual(
             captured["reasoning_state_json"].get("grounding_failure", {}).get("category"),
-            "tool_execution",
+            "all_finalizer_groups_degraded",
         )
         self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "DEGRADED")
 
@@ -2802,14 +2789,15 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 segments=[segment],
             )
 
-        final_segment = captured["final_segments"][0]
-        self.assertEqual(final_segment.identification_method, "INTERVIEW_BEST_EFFORT")
-        self.assertTrue(final_segment.food.needs_grounding)
-        self.assertFalse(final_segment.food.is_verified)
-        self.assertEqual(captured["reasoning_state_json"].get("grounding_status"), "DEGRADED_SAVED")
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.FAILED)
+        self.assertEqual(captured["final_segments"], [])
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_status"),
+            "ALL_FINALIZER_GROUPS_DEGRADED",
+        )
         self.assertEqual(
             captured["reasoning_state_json"].get("grounding_failure", {}).get("category"),
-            "tool_execution",
+            "all_finalizer_groups_degraded",
         )
         self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "DEGRADED")
 
@@ -2945,10 +2933,15 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 segments=[segment],
             )
 
-        self.assertEqual(captured["reasoning_state_json"].get("grounding_status"), "DEGRADED_SAVED")
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.FAILED)
+        self.assertEqual(captured["final_segments"], [])
+        self.assertEqual(
+            captured["reasoning_state_json"].get("grounding_status"),
+            "ALL_FINALIZER_GROUPS_DEGRADED",
+        )
         self.assertEqual(
             captured["reasoning_state_json"].get("grounding_failure", {}).get("category"),
-            "timeout",
+            "all_finalizer_groups_degraded",
         )
         self.assertEqual(
             captured["reasoning_state_json"].get("grounding_failure", {}).get("loop_stop_reason"),

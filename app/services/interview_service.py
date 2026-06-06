@@ -1927,31 +1927,6 @@ def _group_input_requires_online_grounding(group_input: GroupFinalizerInput) -> 
     )
 
 
-def _finalizer_has_grounded_url(
-    *,
-    parsed: FinalizedGroupResult,
-    grounding_trace: Mapping[str, Any] | None,
-) -> bool:
-    if _optional_text(parsed.source_url):
-        return True
-    if parsed.grounding_trace is not None:
-        parsed_trace = parsed.grounding_trace.model_dump(mode="json", exclude_none=True)
-        if _trace_has_url_evidence(parsed_trace):
-            return True
-    return _trace_has_url_evidence(grounding_trace)
-
-
-def _trace_has_url_evidence(trace: Mapping[str, Any] | None) -> bool:
-    if not isinstance(trace, Mapping):
-        return False
-    if _optional_text(trace.get("source_url")):
-        return True
-    return any(
-        _optional_text(url)
-        for url in trace.get("fetched_urls") or []
-    )
-
-
 def _promote_finalizer_draft(
     *,
     original_item: Mapping[str, Any],

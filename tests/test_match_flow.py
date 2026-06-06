@@ -920,6 +920,123 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_segments[0].food.canonical_name, "White Khubz / Pita")
         self.assertTrue(result["finalized"])
 
+    async def test_reasoning_all_degraded_finalizers_fail_closed_without_final_segments(self) -> None:
+        from app.services import reasoning_service
+
+        segment = SimpleNamespace(
+            id="segment-protein-bar-1",
+            label="protein bar",
+            cropped_image_url="/data/uploads/crops/protein-bar-1.jpg",
+            embedding=[0.41] * EMBEDDING_DIMENSION,
+        )
+        meal = SimpleNamespace(
+            id="meal-reasoning-all-degraded",
+            processing_status=MealProcessingStatus.REASONING,
+            reasoning_state_json=None,
+            last_stage_started_at=None,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        candidate = {
+            "candidate_id": "candidate-protein-bar",
+            "food_item_id": "food-protein-bar",
+            "label": "Protein Bar",
+            "identity_confidence": 0.98,
+            "quantity_confidence": 0.93,
+            "match_consistency_confidence": 0.95,
+            "missing_evidence": [],
+            "nutrition_impact": 0.03,
+            "portion_bucket": "STANDARD",
+            "source": "PACKAGED",
+        }
+        reasoning_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-reasoning-all-degraded",
+            "decision_rationale": "ready to write but finalizer grounding degraded",
+            "gate_reason": "",
+            "segment_count": 1,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-protein-bar",
+                    "group_label": "Protein Bar",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-protein-bar-1",
+                    "segment_ids": ["segment-protein-bar-1"],
+                    "selected_candidate_id": "candidate-protein-bar",
+                    "top_3": [candidate, candidate, candidate],
+                }
+            ],
+        }
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        def _degraded_finalizer_outcomes(group_inputs):
+            outcomes = []
+            for group_input in group_inputs:
+                item = dict(group_input.confirmation_item)
+                resolution = reasoning_service.final_resolution_from_confirmation(
+                    item=item,
+                    segment=group_input.segment,
+                    aliases=["Protein Bar"],
+                    trace_id=group_input.trace_id,
+                )
+                outcomes.append(
+                    SimpleNamespace(
+                        final_resolution=resolution,
+                        finalized_confirmation_item=item,
+                        audit_state={
+                            "group_id": group_input.group_id,
+                            "status": "DEGRADED",
+                            "grounding_failure": {
+                                "category": "tool_execution",
+                                "reason": "bounded grounding produced no verified nutrition",
+                            },
+                        },
+                    )
+                )
+            return outcomes
+
+        with patch.object(
+            reasoning_service,
+            "apply_final_meal_resolution",
+            new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _degraded_finalizer_outcomes(kwargs["group_inputs"])),
+        ):
+            result = await reasoning_service.finalize_meal_from_reasoning(
+                session=session,
+                meal=meal,
+                segments=[segment],
+                match_results=[],
+                reasoning_payload=reasoning_payload,
+            )
+
+        self.assertTrue(result["finalized"])
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.FAILED)
+        self.assertEqual(captured["final_segments"], [])
+        reasoning_state_json = captured["reasoning_state_json"]
+        self.assertEqual(reasoning_state_json["grounding_status"], "ALL_FINALIZER_GROUPS_DEGRADED")
+        self.assertEqual(
+            reasoning_state_json["grounding_failure"]["category"],
+            "all_finalizer_groups_degraded",
+        )
+
     async def test_grouped_auto_confirm_preserves_specific_vector_candidate_over_generic_group_label(self) -> None:
         from app.services import reasoning_service
 

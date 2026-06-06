@@ -10,7 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from app.config import get_settings
-from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog
+from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog, MealProcessingStatus
 from app.services import interview_service, interview_turn_manager
 from app.services import correction_service
 
@@ -23,6 +23,7 @@ from bot.callback_data import (
     resolve_callback_token,
 )
 from bot.messages import (
+    format_grounding_blocker_message,
     format_interview_confirmation_message,
     format_recent_fix_targets,
     format_start_message,
@@ -287,6 +288,36 @@ def _finalized_meal_entries(finalized: dict) -> list:
     if isinstance(result, Mapping):
         return list(result.get("meal_entries", []))
     return list(getattr(result, "meal_entries", []) or [])
+
+
+def _meal_finalization_succeeded(finalized: Mapping[str, object] | None) -> bool:
+    if not isinstance(finalized, Mapping):
+        return False
+    if not _finalized_meal_entries(dict(finalized)):
+        return False
+    meal = finalized.get("meal")
+    status = getattr(meal, "processing_status", None)
+    if status == MealProcessingStatus.FAILED or str(status) == MealProcessingStatus.FAILED.value:
+        return False
+    return True
+
+
+def _meal_finalization_blocker_message(finalized: Mapping[str, object] | None) -> str:
+    finalized_mapping = dict(finalized or {}) if isinstance(finalized, Mapping) else {}
+    meal = finalized_mapping.get("meal")
+    meal_id = str(getattr(meal, "id", "") or finalized_mapping.get("meal_id") or "")
+    status = getattr(meal, "processing_status", None)
+    if status == MealProcessingStatus.FAILED or str(status) == MealProcessingStatus.FAILED.value:
+        blocker = "meal finalization failed closed"
+    elif not _finalized_meal_entries(finalized_mapping):
+        blocker = "finalization produced no saved meal entries"
+    else:
+        blocker = "finalization result was unavailable"
+    return format_grounding_blocker_message(
+        meal_id,
+        blocker=blocker,
+        saved_as_unverified=False,
+    )
 
 
 async def _finalize_interview_confirmation(*, session, interview: InterviewSession) -> dict | None:
@@ -746,6 +777,13 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     else:
                         await message.reply_text(correction_service.format_fix_summary(result))
                 return
+            if not _meal_finalization_succeeded(finalized):
+                session.add(interview)
+                await session.commit()
+                message = update.callback_query.message
+                if message is not None:
+                    await message.reply_text(_meal_finalization_blocker_message(finalized))
+                return
             interview.is_active = False
             session.add(interview)
             await session.commit()
@@ -837,6 +875,11 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             await update.message.reply_text("No changes detected, so I kept the existing entry.")
                         else:
                             await update.message.reply_text(correction_service.format_fix_summary(result))
+                        return
+                    if not _meal_finalization_succeeded(finalized):
+                        session.add(interview)
+                        await session.commit()
+                        await update.message.reply_text(_meal_finalization_blocker_message(finalized))
                         return
                     interview.is_active = False
                     session.add(interview)
@@ -1002,6 +1045,11 @@ async def _handle_meal_interview_turn(*, session, interview: InterviewSession, s
         finalized = await _finalize_interview_confirmation(session=session, interview=interview)
         if finalized is None:
             await update.message.reply_text("I could not find that meal to confirm.")
+            return
+        if not _meal_finalization_succeeded(finalized):
+            session.add(interview)
+            await session.commit()
+            await update.message.reply_text(_meal_finalization_blocker_message(finalized))
             return
         interview.is_active = False
         session.add(interview)

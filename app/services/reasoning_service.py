@@ -12,7 +12,12 @@ from inspect import isawaitable
 from app.config import get_settings
 from app.models import MealLog, MealSegment, MealProcessingStatus
 from app.services import image_service, tracing_service
-from app.services.interview_service import _build_group_finalizer_inputs, _run_group_finalizers, final_resolution_from_confirmation
+from app.services.interview_service import (
+    _all_finalizer_groups_degraded,
+    _build_group_finalizer_inputs,
+    _run_group_finalizers,
+    final_resolution_from_confirmation,
+)
 from app.services.llm_client import get_llm_client
 from app.services.meal_resolution_service import (
     FinalSegmentResolution,
@@ -2413,15 +2418,27 @@ async def finalize_meal_from_reasoning(
     reasoning_state_json["completed_at"] = datetime.now(UTC).isoformat()
     if finalizer_groups:
         reasoning_state_json["finalizer_groups"] = finalizer_groups
-    if degraded_failure:
+    all_finalizer_groups_degraded = _all_finalizer_groups_degraded(finalizer_groups)
+    meal_status = MealProcessingStatus.COMPLETED
+    final_segments_for_write = final_segments
+    if all_finalizer_groups_degraded:
+        meal_status = MealProcessingStatus.FAILED
+        final_segments_for_write = []
+        reasoning_state_json["grounding_status"] = "ALL_FINALIZER_GROUPS_DEGRADED"
+        reasoning_state_json["grounding_failure"] = {
+            **degraded_failure,
+            "category": "all_finalizer_groups_degraded",
+            "reason": "Every finalizer group degraded; no verified nutrition was saved.",
+        }
+    elif degraded_failure:
         reasoning_state_json["grounding_status"] = "DEGRADED_SAVED"
         reasoning_state_json["grounding_failure"] = degraded_failure
 
     resolved = await apply_final_meal_resolution(
         session=session,
         meal=meal,
-        final_segments=final_segments,
-        meal_status=MealProcessingStatus.COMPLETED,
+        final_segments=final_segments_for_write,
+        meal_status=meal_status,
         reasoning_state_json=reasoning_state_json,
         now=datetime.now(UTC),
     )

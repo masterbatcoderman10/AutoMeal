@@ -176,10 +176,9 @@ class ReasoningContractTests(unittest.TestCase):
         )
         self.assertEqual(constituent_schema["properties"]["source_url"]["type"], ["string", "null"])
 
-    def test_group_finalizer_response_format_persists_live_trace_and_provenance_fields(self) -> None:
+    def test_group_finalizer_response_format_uses_draft_only_source_ids(self) -> None:
         from app.services.interview_schema import (
             FinalizedGroupResult,
-            GroundingTracePayload,
             group_finalizer_response_format,
         )
         from app.services.reasoning_schema import grounding_result_response_format
@@ -188,14 +187,14 @@ class ReasoningContractTests(unittest.TestCase):
         live_response_format = group_finalizer_response_format()
         live_schema_text = json.dumps(live_response_format)
 
-        self.assertIn("provenance", FinalizedGroupResult.model_fields)
-        self.assertIn("source_url", FinalizedGroupResult.model_fields)
-        self.assertIn("snippet_excerpts", GroundingTracePayload.model_fields)
-        self.assertIn("provenance", GroundingTracePayload.model_fields)
-        self.assertIn("source_url", GroundingTracePayload.model_fields)
-        self.assertIn('"snippet_excerpts"', live_schema_text)
-        self.assertIn('"provenance"', live_schema_text)
-        self.assertIn('"source_url"', live_schema_text)
+        self.assertNotIn("provenance", FinalizedGroupResult.model_fields)
+        self.assertNotIn("source_url", FinalizedGroupResult.model_fields)
+        self.assertNotIn("grounding_trace", FinalizedGroupResult.model_fields)
+        self.assertIn("selected_source_ids", FinalizedGroupResult.model_fields)
+        self.assertIn("confidence", FinalizedGroupResult.model_fields)
+        self.assertIn('"selected_source_ids"', live_schema_text)
+        self.assertNotIn('"grounding_trace"', live_schema_text)
+        self.assertNotIn('"source_url"', live_schema_text)
         self.assertEqual(
             set(grounded_schema["properties"]["constituents"]["items"]["properties"]["provenance"]["enum"]),
             {"searched", "model_knowledge"},

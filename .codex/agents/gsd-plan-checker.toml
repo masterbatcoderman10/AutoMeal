@@ -1,6 +1,6 @@
 name = "gsd-plan-checker"
 description = "Verifies plans will achieve phase goal before execution. Goal-backward analysis of plan quality. Spawned by $gsd-plan-phase orchestrator."
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = '''

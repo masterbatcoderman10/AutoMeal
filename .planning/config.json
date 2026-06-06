@@ -8,24 +8,24 @@
   "model_profile_overrides": {
     "codex": {
       "opus": {
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "reasoning_effort": "high"
       },
       "sonnet": {
-        "model": "gpt-5.3-codex-spark",
-        "reasoning_effort": "xhigh",
-        "fallback_model": "gpt-5.4",
+        "model": "gpt-5.5",
+        "reasoning_effort": "high",
+        "fallback_model": "gpt-5.5",
         "fallback_reasoning_effort": "high"
       }
     }
   },
   "model_overrides": {
     "gsd-executor": {
-      "model": "gpt-5.4",
-      "reasoning_effort": "high"
+      "model": "gpt-5.5",
+      "reasoning_effort": "xhigh"
     },
     "gsd-code-fixer": {
-      "model": "gpt-5.4",
+      "model": "gpt-5.5",
       "reasoning_effort": "high"
     }
   },

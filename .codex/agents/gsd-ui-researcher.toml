@@ -1,6 +1,6 @@
 name = "gsd-ui-researcher"
 description = "Produces UI-SPEC.md design contract for frontend phases. Reads upstream artifacts, detects design system state, asks only unanswered questions. Spawned by $gsd-ui-phase orchestrator."
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = '''

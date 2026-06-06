@@ -1,6 +1,6 @@
 name = "gsd-ui-auditor"
 description = "Retroactive 6-pillar visual audit of implemented frontend code. Produces scored UI-REVIEW.md. Spawned by $gsd-ui-review orchestrator."
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = '''

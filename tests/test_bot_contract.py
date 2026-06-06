@@ -132,6 +132,35 @@ class MessageTemplateTests(unittest.TestCase):
         self.assertNotIn("embedding", message)
         self.assertNotIn("cropped_image_url", message)
 
+    def test_match_completion_message_flags_degraded_save_without_nutrition(self) -> None:
+        from bot.messages import CompletionItem, format_match_completion_message
+
+        message = format_match_completion_message(
+            [
+                CompletionItem(
+                    food_name="Chicken Karahi",
+                    portion_bucket="STANDARD",
+                    identification_method="INTERVIEW",
+                    is_verified=False,
+                ),
+                CompletionItem(
+                    food_name="Bran Flatbread",
+                    portion_bucket="STANDARD",
+                    identification_method="INTERVIEW",
+                    is_verified=False,
+                ),
+            ]
+        )
+
+        lines = message.splitlines()
+        self.assertEqual(
+            lines[0],
+            "Meal saved, but I couldn't finalize nutrition yet. I logged the items without nutrition and marked them unverified.",
+        )
+        self.assertEqual(lines[2], "Chicken Karahi | ~standard portion | method=INTERVIEW | verified=false")
+        self.assertEqual(lines[3], "Nutrition: unavailable")
+        self.assertNotIn("Total |", message)
+
     def test_recent_fix_targets_message_exposes_shortcuts(self) -> None:
         from bot.messages import format_recent_fix_targets
 
@@ -2443,7 +2472,7 @@ class SettingsContractTests(unittest.TestCase):
 
         self.assertIn("FINALIZER_MODEL", fields)
         self.assertIn("FINALIZER_GROUP_PARALLELISM", fields)
-        self.assertEqual(fields["FINALIZER_MODEL"].default, "google/gemini-3.1-flash-lite")
+        self.assertEqual(fields["FINALIZER_MODEL"].default, "google/gemini-3-flash-preview")
         self.assertEqual(fields["FINALIZER_GROUP_PARALLELISM"].default, 4)
 
     def test_finalizer_group_parallelism_must_be_positive(self) -> None:

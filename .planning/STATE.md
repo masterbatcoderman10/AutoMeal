@@ -120,6 +120,8 @@ None yet.
 | 2026-06-01 | 260601-uj5-remove-meal-reasoning-token-limits-entir | Removed primary `meal_reasoning` output/thinking token caps, kept parser repair bounded, and restarted API/bot. |
 | 2026-06-01 | 260601-ulg-remove-meal-reasoning-parser-repair-path | Removed the secondary `meal_reasoning` parser-repair LLM path and restarted API/bot. |
 | 2026-06-03 | 260603-9oy-update-reasoning-prompt-from-pasted-text | Replaced the runtime meal-reasoning prompt with the pasted text, normalized legacy source-policy aliases, enforced deterministic source-question routing for zero/fewer-than-five/same-source/ambiguous-source match paths, and restarted API/bot. |
+| 2026-06-05 | 260605-cgm-update-subagent-model-routing-defaults-t | Updated GSD/Codex subagent routing to default to `gpt-5.5` with `high` effort, with `gsd-executor` set to `xhigh`. |
+| 2026-06-06 | 260606-nxt-remove-finalizer-max-tokens-limit-rebuil | Removed the finalizer `max_tokens` cap entirely, rebuilt/recreated `api` and `bot`, and verified the live finalizer path is uncapped. |
 
 ### Blockers/Concerns
 

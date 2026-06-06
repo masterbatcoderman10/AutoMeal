@@ -1478,7 +1478,7 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_segment.food.calories, 240.0)
         self.assertIn("acme.example/protein-bar", final_segment.food.llm_reasoning or "")
 
-    async def test_bounded_group_finalizer_response_uses_settings_finalizer_max_tokens(self) -> None:
+    async def test_bounded_group_finalizer_response_leaves_max_tokens_unset(self) -> None:
         from app.services import interview_service
 
         group_input = interview_service.GroupFinalizerInput(
@@ -1515,7 +1515,6 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         settings = SimpleNamespace(
-            FINALIZER_MAX_TOKENS=4321,
             GROUNDING_MAX_TOOL_CALLS=6,
             GROUNDING_WALL_CLOCK_TIMEOUT_S=90.0,
             GROUNDING_TOOL_TIMEOUT_S=12.5,
@@ -1529,8 +1528,7 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
         )
 
         call_kwargs = llm_client.chat_completion.await_args.kwargs
-        self.assertEqual(call_kwargs["max_tokens"], settings.FINALIZER_MAX_TOKENS)
-        self.assertNotEqual(call_kwargs["max_tokens"], interview_service.FINALIZER_MAX_TOKENS)
+        self.assertNotIn("max_tokens", call_kwargs)
 
     async def test_finalize_confirmed_interview_rejects_truncated_retry_null_macro_success(self) -> None:
         from app.services import interview_service
@@ -1625,7 +1623,6 @@ class InterviewPersistencePrepTests(unittest.IsolatedAsyncioTestCase):
                 return_value=SimpleNamespace(
                     FINALIZER_GROUP_PARALLELISM=1,
                     FINALIZER_MODEL="google/gemini-3.1-flash-lite",
-                    FINALIZER_MAX_TOKENS=4096,
                 ),
                 create=True,
             ),

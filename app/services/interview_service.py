@@ -48,7 +48,6 @@ INTERVIEW_ROADMAP = (
 SESSION_MODE_MEAL = "MEAL_INTERVIEW"
 SESSION_MODE_FIX = "ENTRY_FIX"
 FINALIZER_MAX_ATTEMPTS = 2
-FINALIZER_MAX_TOKENS = 4096
 SOURCE_POLICY_NONE = ""
 SOURCE_POLICY_ASK_GENERIC = "ask_generic"
 SOURCE_POLICY_ASK_AFFIRMATION = "ask_affirmation"
@@ -383,7 +382,6 @@ async def _bounded_group_finalizer_response(
                 tool_choice="auto",
                 parallel_tool_calls=False,
                 extra_body=_tool_loop_extra_body(),
-                max_tokens=int(getattr(settings, "FINALIZER_MAX_TOKENS", 4096)),
                 timeout=_tool_timeout_s(
                     loop_state=loop_state,
                     default_timeout_s=budget.tool_timeout_s,
@@ -1596,7 +1594,7 @@ async def _finalize_group_input(
     settings: Any,
 ) -> GroupFinalizerOutcome:
     attempts: list[dict[str, Any]] = []
-    model_name = str(getattr(settings, "FINALIZER_MODEL", "google/gemini-3.1-flash-lite"))
+    model_name = str(getattr(settings, "FINALIZER_MODEL", "google/gemini-3-flash-preview"))
     last_error: Exception | None = None
     grounding_failure: dict[str, Any] | None = None
 

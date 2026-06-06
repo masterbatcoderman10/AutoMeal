@@ -6,9 +6,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from pydantic import ValidationError
-
-
 def _load_module_or_fail(testcase: unittest.TestCase, module_name: str):
     spec = importlib.util.find_spec(module_name)
     testcase.assertIsNotNone(spec, f"Missing module: {module_name}")
@@ -35,30 +32,15 @@ class InterviewConfigContractTests(unittest.TestCase):
 
         self.assertIn("FINALIZER_MODEL", fields)
         self.assertIn("FINALIZER_GROUP_PARALLELISM", fields)
-        self.assertEqual(fields["FINALIZER_MODEL"].default, "google/gemini-3.1-flash-lite")
+        self.assertEqual(fields["FINALIZER_MODEL"].default, "google/gemini-3-flash-preview")
         self.assertEqual(fields["FINALIZER_GROUP_PARALLELISM"].default, 4)
 
-    def test_settings_expose_validated_finalizer_max_tokens(self) -> None:
+    def test_settings_do_not_expose_finalizer_max_tokens(self) -> None:
         from app.config import Settings
 
         fields = Settings.model_fields
 
-        self.assertIn("FINALIZER_MAX_TOKENS", fields)
-        self.assertGreaterEqual(fields["FINALIZER_MAX_TOKENS"].default, 4096)
-
-        required_settings = {
-            "DATABASE_URL": "postgresql+asyncpg://user:pass@db/app",
-            "INGEST_SECRET": "secret",
-            "TELEGRAM_BOT_TOKEN": "token",
-            "TELEGRAM_CHAT_ID": "123",
-            "OPENROUTER_API_KEY": "key",
-            "LANGFUSE_PUBLIC_KEY": "pk",
-            "LANGFUSE_SECRET_KEY": "sk",
-            "LANGFUSE_BASE_URL": "https://langfuse.example",
-        }
-
-        with self.assertRaises(ValidationError):
-            Settings(**required_settings, FINALIZER_MAX_TOKENS=2047)
+        self.assertNotIn("FINALIZER_MAX_TOKENS", fields)
 
 
 class InterviewSchemaContractTests(unittest.TestCase):

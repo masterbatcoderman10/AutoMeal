@@ -1,5 +1,5 @@
 ---
-status: planned
+status: complete
 phase: 05-agentic-grounding
 source:
   - 05-01-SUMMARY.md
@@ -14,7 +14,7 @@ source:
   - 05-10-SUMMARY.md
   - 05-11-PLAN.md
 started: 2026-06-06T11:57:55Z
-updated: 2026-06-06T14:55:15Z
+updated: 2026-06-07T10:05:04Z
 ---
 
 ## Current Test
@@ -62,6 +62,12 @@ blocked: 0
     - "Observations `3f7dd041fbac2a131e511763715eb414`, `78e2e3348a34d800ccfe8d59937a8c9b`, and `963114ccc9b175fba205bcc3be764feb`: model outputs contained complete nutrition but omitted `is_verified`, `provenance`, and trace fields, so the service rejected them and degraded the groups."
   conclusion: "The repeated-number traces are best explained by model/provider output degeneration under an unbounded operational schema, not by prompt injection. The state mis-sync comes from making the model author deterministic service fields and then discarding otherwise useful nutrition when those fields are absent."
   planned_closure: "05-11-PLAN.md"
+
+## Closure Verification
+
+- closed_by: "05-11-SUMMARY.md, 05-12-SUMMARY.md, 05-HUMAN-UAT.md"
+  verified: "2026-06-07T10:05:04Z"
+  evidence: "Clean-state Phase 05 human UAT passed: deployed-stack meal `58dcb286-a8da-4060-a542-52901ccf096c` persisted `FAILED` with `ALL_FINALIZER_GROUPS_DEGRADED`, zero diary rows, and zero food items; targeted Phase 05 suites passed."
 
 ## Gaps
 

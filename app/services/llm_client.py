@@ -53,21 +53,32 @@ class OpenRouterClient:
         messages: list[dict[str, Any]],
         response_format: dict[str, Any] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
         extra_body: dict[str, Any] | None = None,
         max_tokens: int | None = None,
         temperature: float = 0.3,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         request: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "response_format": response_format,
-            "tools": tools,
-            "extra_body": extra_body,
             "temperature": temperature,
         }
+        if response_format is not None:
+            request["response_format"] = response_format
+        if tools is not None:
+            request["tools"] = tools
+        if tool_choice is not None:
+            request["tool_choice"] = tool_choice
+        if parallel_tool_calls is not None:
+            request["parallel_tool_calls"] = parallel_tool_calls
+        if extra_body is not None:
+            request["extra_body"] = extra_body
         if max_tokens is not None:
             request["max_tokens"] = max_tokens
-        response = await self._chat_client.chat.completions.create(**request)
+        client = self._chat_client.with_options(timeout=timeout) if timeout is not None else self._chat_client
+        response = await client.chat.completions.create(**request)
         return response.model_dump()
 
     async def embed_multimodal(

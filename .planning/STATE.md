@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: "Phase 04.5 shipped — PR #4"
-stopped_at: Phase 4.5 UAT complete
-last_updated: "2026-06-03T08:31:44.800Z"
-last_activity: 2026-06-03
+status: "Phase 05 shipped - PR #5"
+stopped_at: Phase 05 verification gaps found after 05-11
+last_updated: "2026-06-07T11:18:31.948Z"
+last_activity: 2026-06-07
 progress:
   total_phases: 11
   completed_phases: 8
-  total_plans: 40
-  completed_plans: 38
+  total_plans: 55
+  completed_plans: 49
   percent: 73
 ---
 
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-05-24)
 
 ## Current Position
 
-Phase: 04.5 (source-aware-clarification-expansion) — COMPLETE
-Plan: 3 of 3
-Status: Phase 04.5 shipped — PR #4
-Last activity: 2026-06-03
+Phase: 05 (agentic-grounding) — EXECUTING
+Plan: 1 of 12
+Status: Phase 05 shipped - PR #5
+Last activity: 2026-06-07
 
 Progress: [██████████] 100%
 
@@ -120,6 +120,8 @@ None yet.
 | 2026-06-01 | 260601-uj5-remove-meal-reasoning-token-limits-entir | Removed primary `meal_reasoning` output/thinking token caps, kept parser repair bounded, and restarted API/bot. |
 | 2026-06-01 | 260601-ulg-remove-meal-reasoning-parser-repair-path | Removed the secondary `meal_reasoning` parser-repair LLM path and restarted API/bot. |
 | 2026-06-03 | 260603-9oy-update-reasoning-prompt-from-pasted-text | Replaced the runtime meal-reasoning prompt with the pasted text, normalized legacy source-policy aliases, enforced deterministic source-question routing for zero/fewer-than-five/same-source/ambiguous-source match paths, and restarted API/bot. |
+| 2026-06-05 | 260605-cgm-update-subagent-model-routing-defaults-t | Updated GSD/Codex subagent routing to default to `gpt-5.5` with `high` effort, with `gsd-executor` set to `xhigh`. |
+| 2026-06-06 | 260606-nxt-remove-finalizer-max-tokens-limit-rebuil | Removed the finalizer `max_tokens` cap entirely, rebuilt/recreated `api` and `bot`, and verified the live finalizer path is uncapped. |
 
 ### Blockers/Concerns
 
@@ -128,6 +130,7 @@ None yet.
 - Phase 3: Gemini Embedding 2 cross-modal alignment on food must be verified with calibration script before building match logic.
 - Phase 4: Confidence calibration prompt patterns for multi-signal gating on Gemini 3 Flash are sparsely documented — plan a mini-research pass before implementing the gate.
 - Phase 04.5 source-aware clarification — UAT complete; source questions, packaged/home persistence, and grounding-handoff idempotency verified.
+- Phase 05 verification gaps after 05-11: reasoning-stage all-degraded finalizer runs can still persist `MealProcessingStatus.COMPLETED`; Telegram confirmation handlers can still send success for empty or failed finalizations.
 - Phase 5: Firecrawl resource envelope on Mac mini needs verification before shipping (5 sequential fetches under Docker mem limits).
 - Phase 6: Mac mini sleep prevention (`pmset -a sleep 0`) must be confirmed before declaring Phase 6 complete.
 
@@ -146,6 +149,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-06-03T08:20:00.000Z
-Stopped at: Phase 4.5 UAT complete
-Resume file: .planning/phases/04.5-source-aware-clarification-expansion/04.5-UAT.md
+Last session: 2026-06-06T16:10:00Z
+Stopped at: Phase 05 verification gaps found after 05-11
+Resume file: .planning/phases/05-agentic-grounding/05-VERIFICATION.md

@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 
-
 def _load_module_or_fail(testcase: unittest.TestCase, module_name: str):
     spec = importlib.util.find_spec(module_name)
     testcase.assertIsNotNone(spec, f"Missing module: {module_name}")
@@ -35,8 +34,24 @@ class InterviewConfigContractTests(unittest.TestCase):
 
         self.assertIn("FINALIZER_MODEL", fields)
         self.assertIn("FINALIZER_GROUP_PARALLELISM", fields)
-        self.assertEqual(fields["FINALIZER_MODEL"].default, "google/gemini-3.1-flash-lite")
+        self.assertEqual(fields["FINALIZER_MODEL"].default, "google/gemini-3-flash-preview")
         self.assertEqual(fields["FINALIZER_GROUP_PARALLELISM"].default, 4)
+
+    def test_settings_do_not_expose_finalizer_max_tokens(self) -> None:
+        from app.config import Settings
+
+        fields = Settings.model_fields
+
+        self.assertNotIn("FINALIZER_MAX_TOKENS", fields)
+
+    def test_settings_expose_high_finite_finalizer_output_cap(self) -> None:
+        from app.config import Settings
+
+        fields = Settings.model_fields
+
+        self.assertIn("FINALIZER_OUTPUT_MAX_TOKENS", fields)
+        self.assertEqual(fields["FINALIZER_OUTPUT_MAX_TOKENS"].default, 12000)
+        self.assertGreater(fields["FINALIZER_OUTPUT_MAX_TOKENS"].default, 4096)
 
 
 class InterviewSchemaContractTests(unittest.TestCase):
@@ -128,6 +143,30 @@ class InterviewSchemaContractTests(unittest.TestCase):
                 }
             )
 
+    def test_confirmation_item_rejects_invalid_authoritative_source_type(self) -> None:
+        schema_module = _load_module_or_fail(self, "app.services.interview_schema")
+        if schema_module is None:
+            return
+
+        confirmation_item = getattr(schema_module, "ConfirmationItem", None)
+        self.assertIsNotNone(confirmation_item)
+        if confirmation_item is None:
+            return
+
+        with self.assertRaises(ValidationError):
+            confirmation_item.model_validate(
+                {
+                    "group_id": "group-bar",
+                    "primary_segment_id": "seg-bar-1",
+                    "segment_id": "seg-bar-1",
+                    "segment_ids": ["seg-bar-1"],
+                    "name": "Protein Bar",
+                    "source_type": "takeout?",
+                    "portion_bucket": "STANDARD",
+                    "approval_status": "CORRECTED",
+                }
+            )
+
     def test_group_finalizer_schema_exposes_strict_save_ready_contract(self) -> None:
         schema_module = _load_module_or_fail(self, "app.services.interview_schema")
         if schema_module is None:
@@ -171,6 +210,53 @@ class InterviewSchemaContractTests(unittest.TestCase):
         quantity_schema = schema["properties"]["quantity_json"]["anyOf"][0]
         self.assertFalse(quantity_schema["additionalProperties"])
         self.assertIn("portion_bucket", quantity_schema["required"])
+
+    def test_group_finalizer_response_format_is_model_owned_draft_only(self) -> None:
+        schema_module = _load_module_or_fail(self, "app.services.interview_schema")
+        if schema_module is None:
+            return
+
+        response_format = schema_module.group_finalizer_response_format()
+        schema = response_format["json_schema"]["schema"]
+        forbidden_model_fields = {
+            "is_verified",
+            "provenance",
+            "source_url",
+            "grounding_trace",
+            "tool_calls_used",
+            "iteration_count",
+            "queries",
+            "fetched_urls",
+            "stop_reason",
+        }
+
+        def _collect_property_names(node: object) -> set[str]:
+            if isinstance(node, dict):
+                collected = set((node.get("properties") or {}).keys())
+                for value in node.values():
+                    collected.update(_collect_property_names(value))
+                return collected
+            if isinstance(node, list):
+                collected: set[str] = set()
+                for value in node:
+                    collected.update(_collect_property_names(value))
+                return collected
+            return set()
+
+        property_names = _collect_property_names(schema)
+
+        self.assertTrue(schema["additionalProperties"] is False)
+        self.assertTrue(forbidden_model_fields.isdisjoint(property_names))
+        self.assertIn("selected_source_ids", property_names)
+        for nutrition_key in (
+            "serving_size_g",
+            "calories",
+            "protein_g",
+            "carbs_g",
+            "fat_g",
+            "fiber_g",
+        ):
+            self.assertIn(nutrition_key, property_names)
 
     def test_group_finalizer_parser_requires_save_ready_fields(self) -> None:
         schema_module = _load_module_or_fail(self, "app.services.interview_schema")
@@ -253,6 +339,12 @@ class InterviewSchemaContractTests(unittest.TestCase):
         with self.assertRaises(schema_module.InterviewTurnValidationError):
             schema_module.parse_group_finalizer_result(
                 {**valid_payload, "top_3": []},
+                expected_group_id="group-chicken",
+            )
+
+        with self.assertRaises(schema_module.InterviewTurnValidationError):
+            schema_module.parse_group_finalizer_result(
+                {**valid_payload, "source_type": "takeout?"},
                 expected_group_id="group-chicken",
             )
 

@@ -12,11 +12,17 @@ from inspect import isawaitable
 from app.config import get_settings
 from app.models import MealLog, MealSegment, MealProcessingStatus
 from app.services import image_service, tracing_service
+from app.services.interview_service import (
+    _all_finalizer_groups_degraded,
+    _build_group_finalizer_inputs,
+    _run_group_finalizers,
+    final_resolution_from_confirmation,
+)
+from app.services.llm_client import get_llm_client
 from app.services.meal_resolution_service import (
     FinalSegmentResolution,
     ResolvedFoodInput,
     apply_final_meal_resolution,
-    build_grouped_final_segment_resolutions,
 )
 from app.services.reasoning_schema import (
     coerce_reasoning_response,
@@ -427,6 +433,16 @@ def _end_trace(trace: Any, *, output: Mapping[str, Any] | dict[str, Any]) -> Non
     end = getattr(trace, "end", None)
     if callable(end):
         end(output=dict(output))
+
+
+def append_grounding_trace(
+    *,
+    reasoning_payload: Mapping[str, Any],
+    grounding_trace: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = dict(reasoning_payload)
+    merged["grounding_trace"] = dict(grounding_trace)
+    return merged
 
 
 def _normalized_group_result(
@@ -1318,7 +1334,10 @@ def evaluate_reasoning_gate(*, reasoning_payload: Mapping[str, Any] | dict[str, 
             "food_groups": [],
         }
 
-    if any(group["group_state"] == _REVIEW_STATE for group in food_groups):
+    if any(group["group_state"] == _FAILED_UNCLEAR_STATE for group in food_groups):
+        meal_action = _FAILED_UNCLEAR_STATE
+        meal_state = _FAILED_UNCLEAR_STATE
+    elif any(group["group_state"] == _REVIEW_STATE for group in food_groups):
         meal_action = _REVIEW_STATE
         meal_state = _REVIEW_STATE
     else:
@@ -1496,7 +1515,17 @@ def _attach_deterministic_group_context(
 
 def _fallback_food_groups_from_match_results(
     match_results: list[tuple[MealSegment, Any]],
+    *,
+    meal_state: str | None = None,
+    action: str | None = None,
 ) -> list[dict[str, Any]]:
+    failure_state = (
+        _FAILED_UNCLEAR_STATE
+        if meal_state == _FAILED_UNCLEAR_STATE or action == _FAILED_UNCLEAR_STATE
+        else _REVIEW_STATE
+        if meal_state == _REVIEW_STATE or action == _REVIEW_STATE
+        else None
+    )
     fallback_groups: list[dict[str, Any]] = []
     for index, (segment, result) in enumerate(match_results, start=1):
         top_three = _normalize_top_three(result) if _vector_candidates_allowed_for_reasoning(result) else []
@@ -1509,19 +1538,38 @@ def _fallback_food_groups_from_match_results(
             {
                 "group_id": f"group-{index}",
                 "group_label": label or f"food group {index}",
-                "group_action": "AUTO_CONFIRM",
-                "group_state": "READY_TO_WRITE",
+                "group_action": failure_state or "AUTO_CONFIRM",
+                "group_state": failure_state or "READY_TO_WRITE",
                 "primary_segment_id": segment_id,
                 "segment_ids": [segment_id],
                 "selected_candidate_id": selected_candidate_id,
                 "visual_evidence": [],
                 "missing_evidence": [],
-                "decision_rationale": "Synthesized from segment match candidates",
-                "gate_reason": "",
+                "decision_rationale": (
+                    "Preserved vector candidates for review after reasoning failure"
+                    if failure_state
+                    else "Synthesized from segment match candidates"
+                ),
+                "gate_reason": (
+                    "reasoning failure preserved cached candidates for review"
+                    if failure_state
+                    else ""
+                ),
                 "top_3": top_three,
             }
-        )
+    )
     return fallback_groups
+
+
+def _has_reasoning_eligible_match_candidates(
+    match_results: list[tuple[MealSegment, Any]],
+) -> bool:
+    for _segment, result in match_results:
+        if not _vector_candidates_allowed_for_reasoning(result):
+            continue
+        if _normalize_top_three(result):
+            return True
+    return False
 
 
 def _segment_group_snapshot(
@@ -1915,11 +1963,18 @@ async def _run_reasoning_model(
 
         parsed = _parse_reasoning_message(response)
         if isinstance(parsed, Mapping):
+            raw_action = _coerce_str(parsed.get("action"), "action")
+            raw_meal_state = _coerce_str(parsed.get("meal_state"), "meal_state")
             deterministic_payload = _attach_deterministic_group_context(
                 parsed,
                 match_results=match_results,
             )
             normalized = coerce_reasoning_response(deterministic_payload)
+            if not normalized.get("food_groups"):
+                if raw_action:
+                    normalized["_fallback_action"] = raw_action
+                if raw_meal_state:
+                    normalized["_fallback_meal_state"] = raw_meal_state
             normalized["trace_id"] = _normalize_trace_id_from_payload(
                 normalized,
                 trace_metadata,
@@ -1979,7 +2034,16 @@ async def run_reasoning_request(
         trace_metadata = {"trace_id": None, "cached_tokens": None}
 
     if not parsed.get("food_groups") and match_results:
-        parsed["food_groups"] = _fallback_food_groups_from_match_results(match_results)
+        fallback_action = str(parsed.get("_fallback_action") or parsed.get("action") or "")
+        fallback_meal_state = str(parsed.get("_fallback_meal_state") or parsed.get("meal_state") or "")
+        if not _has_reasoning_eligible_match_candidates(match_results):
+            fallback_action = ""
+            fallback_meal_state = ""
+        parsed["food_groups"] = _fallback_food_groups_from_match_results(
+            match_results,
+            meal_state=fallback_meal_state,
+            action=fallback_action,
+        )
         parsed["food_group_count"] = len(parsed["food_groups"])
 
     parsed = coerce_reasoning_response(parsed)
@@ -2220,6 +2284,54 @@ def _word_count(value: str) -> int:
     return len(re.findall(r"[A-Za-z0-9]+", value))
 
 
+def _reasoning_confirmation_item(group: Mapping[str, Any]) -> dict[str, Any]:
+    normalized_group = dict(group)
+    top_one = _normalize_top_three(normalized_group)[0] if _normalize_top_three(normalized_group) else {}
+    primary_segment_id = (
+        _coerce_str(normalized_group.get("primary_segment_id"), "primary_segment_id")
+        or _coerce_str(normalized_group.get("segment_id"), "segment_id")
+        or "segment-unknown"
+    )
+    segment_ids = _coerce_string_list(normalized_group.get("segment_ids")) or [primary_segment_id]
+    if primary_segment_id not in segment_ids:
+        segment_ids.append(primary_segment_id)
+    canonical_name = (
+        _coerce_str(normalized_group.get("group_label"), "group_label")
+        or _coerce_str(top_one.get("label"), "label")
+        or "unlabeled food"
+    )
+    source_type = (
+        _coerce_str(top_one.get("source_type"), "source_type")
+        or _coerce_str(top_one.get("source"), "source")
+        or ""
+    ).upper()
+    brand_name = _coerce_str(top_one.get("brand_name"), "brand_name")
+    restaurant_name = _coerce_str(top_one.get("restaurant_name"), "restaurant_name")
+    if source_type not in {"HOME", "PACKAGED", "RESTAURANT"}:
+        if brand_name:
+            source_type = "PACKAGED"
+        elif restaurant_name:
+            source_type = "RESTAURANT"
+        else:
+            source_type = "HOME"
+    quantity_json = _coerce_quantity_json(top_one)
+    return {
+        "group_id": _coerce_str(normalized_group.get("group_id"), "group_id") or "group-unknown",
+        "primary_segment_id": primary_segment_id,
+        "segment_id": primary_segment_id,
+        "segment_ids": segment_ids,
+        "name": canonical_name,
+        "source_type": source_type,
+        "portion_bucket": _normalize_portion_bucket(top_one.get("portion_bucket")),
+        "approval_status": "APPROVED",
+        "quantity_display": _coerce_terse_quantity_display(top_one),
+        "quantity_json": quantity_json,
+        "food_item_id": _coerce_str(top_one.get("food_item_id"), "food_item_id"),
+        "brand_name": brand_name,
+        "restaurant_name": restaurant_name,
+    }
+
+
 async def finalize_meal_from_reasoning(
     *,
     session,
@@ -2257,26 +2369,77 @@ async def finalize_meal_from_reasoning(
             if isinstance(group, Mapping)
         ]
     )
-    final_segments = build_grouped_final_segment_resolutions(
-        food_groups=grouped_food_groups,
+    confirmation_items = [_reasoning_confirmation_item(group) for group in grouped_food_groups]
+    settings = get_settings()
+    llm_client = get_llm_client()
+    finalizer_inputs = _build_group_finalizer_inputs(
+        meal=meal,
+        confirmation_items=confirmation_items,
+        interview_state=None,
         segments=segments,
-        match_results=match_results,
-        trace_id=_coerce_str(result.get("trace_id"), "trace_id"),
     )
-    if not final_segments:
-        final_segments = []
-        for segment in segments:
-            result_match = next((match for seg, match in match_results if seg.id == segment.id), None)
-            if result_match is None:
-                result_match = result
-            final_segments.append(_build_resolution_from_result(segment=segment, result=result_match))
+    finalizer_groups: list[dict[str, Any]] = []
+    finalized_confirmation_items = [dict(item) for item in confirmation_items]
+    if finalizer_inputs:
+        finalizer_outcomes = await _run_group_finalizers(
+            group_inputs=finalizer_inputs,
+            llm_client=llm_client,
+            settings=settings,
+        )
+        final_segments = [outcome.final_resolution for outcome in finalizer_outcomes]
+        finalized_confirmation_items = [
+            dict(outcome.finalized_confirmation_item)
+            for outcome in finalizer_outcomes
+        ]
+        finalizer_groups = [dict(outcome.audit_state) for outcome in finalizer_outcomes]
+    else:
+        segments_by_id = {str(getattr(segment, "id", "")): segment for segment in segments}
+        final_segments = [
+            final_resolution_from_confirmation(
+                item=item,
+                segment=segments_by_id.get(str(item.get("segment_id"))),
+                aliases=[str(item.get("name") or "unlabeled food")],
+                trace_id=_coerce_str(result.get("trace_id"), "trace_id"),
+            )
+            for item in confirmation_items
+        ]
+
+    degraded_failure = next(
+        (
+            dict(group.get("grounding_failure") or {})
+            for group in finalizer_groups
+            if isinstance(group, Mapping) and isinstance(group.get("grounding_failure"), Mapping)
+        ),
+        {},
+    )
+    reasoning_state_json = dict(result.get("meal_reasoning") or {})
+    reasoning_state_json["completed_by"] = "reasoning_service"
+    reasoning_state_json["confirmation_items"] = finalized_confirmation_items
+    reasoning_state_json["completed_at"] = datetime.now(UTC).isoformat()
+    if finalizer_groups:
+        reasoning_state_json["finalizer_groups"] = finalizer_groups
+    all_finalizer_groups_degraded = _all_finalizer_groups_degraded(finalizer_groups)
+    meal_status = MealProcessingStatus.COMPLETED
+    final_segments_for_write = final_segments
+    if all_finalizer_groups_degraded:
+        meal_status = MealProcessingStatus.FAILED
+        final_segments_for_write = []
+        reasoning_state_json["grounding_status"] = "ALL_FINALIZER_GROUPS_DEGRADED"
+        reasoning_state_json["grounding_failure"] = {
+            **degraded_failure,
+            "category": "all_finalizer_groups_degraded",
+            "reason": "Every finalizer group degraded; no verified nutrition was saved.",
+        }
+    elif degraded_failure:
+        reasoning_state_json["grounding_status"] = "DEGRADED_SAVED"
+        reasoning_state_json["grounding_failure"] = degraded_failure
 
     resolved = await apply_final_meal_resolution(
         session=session,
         meal=meal,
-        final_segments=final_segments,
-        meal_status=MealProcessingStatus.COMPLETED,
-        reasoning_state_json=result.get("meal_reasoning"),
+        final_segments=final_segments_for_write,
+        meal_status=meal_status,
+        reasoning_state_json=reasoning_state_json,
         now=datetime.now(UTC),
     )
 
@@ -2287,6 +2450,7 @@ async def finalize_meal_from_reasoning(
 
     return {
         **result,
+        "meal_reasoning": reasoning_state_json,
         "meal_resolution": resolved,
         "finalized": True,
         "completed_by": "reasoning_service",
@@ -2298,4 +2462,5 @@ __all__ = [
     "run_reasoning_request",
     "persist_reasoning_results",
     "finalize_meal_from_reasoning",
+    "append_grounding_trace",
 ]

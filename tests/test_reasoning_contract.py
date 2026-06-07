@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from typing import Any
 
@@ -123,6 +124,81 @@ class ReasoningContractTests(unittest.TestCase):
         }
         for field in expected_fields:
             self.assertIn(field, required_fields)
+
+    def test_reasoning_contract_supports_constituents_and_serving_count(self) -> None:
+        from app.services.reasoning_schema import reasoning_response_format
+
+        response_format = reasoning_response_format()
+        group_schema = response_format["json_schema"]["schema"]["properties"]["food_groups"]["items"]
+
+        self.assertIn("constituents", group_schema["properties"])
+        self.assertIn("serving_count", group_schema["properties"])
+        self.assertIn("constituents", group_schema["required"])
+        self.assertIn("serving_count", group_schema["required"])
+
+        constituent_schema = group_schema["properties"]["constituents"]["items"]
+        self.assertEqual(constituent_schema["type"], "object")
+        self.assertFalse(constituent_schema["additionalProperties"])
+        self.assertEqual(set(constituent_schema["required"]), set(constituent_schema["properties"]))
+        self.assertEqual(
+            set(constituent_schema["properties"]["unit_type"]["enum"]),
+            {"count", "grams"},
+        )
+
+    def test_grounding_result_response_format_is_strict_and_provenance_aware(self) -> None:
+        from app.services.reasoning_schema import grounding_result_response_format
+
+        response_format = grounding_result_response_format()
+        schema = response_format["json_schema"]["schema"]
+
+        self.assertEqual(schema["type"], "object")
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertEqual(
+            set(schema["properties"]["stop_reason"]["enum"]),
+            {
+                "COMPLETED",
+                "MAX_TOOL_CALLS",
+                "WALL_CLOCK_TIMEOUT",
+                "ALLOWLIST_REJECTED",
+                "DUPLICATE_TOOL_CALL",
+                "TOOL_ERROR",
+            },
+        )
+
+        constituent_schema = schema["properties"]["constituents"]["items"]
+        self.assertEqual(constituent_schema["type"], "object")
+        self.assertFalse(constituent_schema["additionalProperties"])
+        self.assertEqual(set(constituent_schema["required"]), set(constituent_schema["properties"]))
+        self.assertEqual(
+            set(constituent_schema["properties"]["provenance"]["enum"]),
+            {"searched", "model_knowledge"},
+        )
+        self.assertEqual(constituent_schema["properties"]["source_url"]["type"], ["string", "null"])
+
+    def test_group_finalizer_response_format_uses_draft_only_source_ids(self) -> None:
+        from app.services.interview_schema import (
+            FinalizedGroupResult,
+            group_finalizer_response_format,
+        )
+        from app.services.reasoning_schema import grounding_result_response_format
+
+        grounded_schema = grounding_result_response_format()["json_schema"]["schema"]
+        live_response_format = group_finalizer_response_format()
+        live_schema_text = json.dumps(live_response_format)
+
+        self.assertNotIn("provenance", FinalizedGroupResult.model_fields)
+        self.assertNotIn("source_url", FinalizedGroupResult.model_fields)
+        self.assertNotIn("grounding_trace", FinalizedGroupResult.model_fields)
+        self.assertIn("selected_source_ids", FinalizedGroupResult.model_fields)
+        self.assertIn("confidence", FinalizedGroupResult.model_fields)
+        self.assertIn('"selected_source_ids"', live_schema_text)
+        self.assertNotIn('"grounding_trace"', live_schema_text)
+        self.assertNotIn('"source_url"', live_schema_text)
+        self.assertEqual(
+            set(grounded_schema["properties"]["constituents"]["items"]["properties"]["provenance"]["enum"]),
+            {"searched", "model_knowledge"},
+        )
 
     def test_unknown_action_routes_to_needs_schema_review(self) -> None:
         from app.services.reasoning_schema import coerce_reasoning_response

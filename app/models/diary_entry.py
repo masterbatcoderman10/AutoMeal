@@ -25,6 +25,7 @@ class DiaryEntry(Base):
         ForeignKey("meal_segments.id"),
         nullable=True,
     )
+    # Compatibility-only mirror for older readers; quantity_json is the authoritative source.
     portion_bucket: Mapped[str] = mapped_column(String(32), nullable=False)
     identification_method: Mapped[str] = mapped_column(String(32), nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

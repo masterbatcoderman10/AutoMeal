@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
-from app.models import DiaryEntry, FoodVisual, MealLog, MealSegment
+from app.models import DiaryEntry, FoodItem, FoodVisual, MealLog, MealSegment
 from app.services import embedding_service, image_service
 from app.services.llm_client import OpenRouterClient
 
@@ -132,8 +132,9 @@ async def _best_food_visual_matches(
     distance_expr = cosine_distance(FoodVisual.embedding, query_embedding)
     statement = (
         select(FoodVisual, distance_expr.label("distance"))
+        .join(FoodVisual.food_item)
         .options(selectinload(FoodVisual.food_item))
-        .where(FoodVisual.is_invalidated.is_(False))
+        .where(FoodVisual.is_invalidated.is_(False), FoodItem.is_verified.is_(True))
         .order_by(distance_expr)
         .limit(3)
     )

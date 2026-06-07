@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Mapping
 import copy
 import uuid
 
@@ -15,6 +15,7 @@ from app.models import (
     FoodItem,
     FoodVisual,
     MealLog,
+    MealSegment,
     MealProcessingStatus,
     PortionBucket,
 )
@@ -50,6 +51,7 @@ class ResolvedFoodInput:
 class FinalSegmentResolution:
     food: ResolvedFoodInput
     segment_id: str | None = None
+    segment_ai_reasoning: dict[str, Any] | None = None
     segment_cropped_image_url: str | None = None
     segment_embedding: list[float] | None = None
     portion_bucket: str | PortionBucket = PortionBucket.STANDARD
@@ -258,6 +260,19 @@ def _coerce_portion_bucket(bucket: str | PortionBucket) -> PortionBucket:
         raise MealResolutionError(f"invalid portion_bucket: {bucket}") from exc
 
 
+def _resolved_portion_bucket(
+    bucket: str | PortionBucket,
+    *,
+    quantity_json: Mapping[str, Any] | None,
+) -> PortionBucket:
+    quantity_bucket = _normalize_text(
+        quantity_json.get("portion_bucket") if isinstance(quantity_json, Mapping) else None
+    )
+    if quantity_bucket is not None:
+        return _coerce_portion_bucket(quantity_bucket)
+    return _coerce_portion_bucket(bucket)
+
+
 def _coerce_embedding(embedding: object | None) -> list[float] | None:
     if embedding is None:
         return None
@@ -451,6 +466,19 @@ async def apply_final_meal_resolution(
             food=resolution.food,
         )
 
+        if resolution.segment_id is not None:
+            segment = await session.get(MealSegment, resolution.segment_id)
+            if segment is not None:
+                if resolution.segment_ai_reasoning is not None:
+                    segment.ai_reasoning = copy.deepcopy(resolution.segment_ai_reasoning)
+                segment.quantity_json = copy.deepcopy(resolution.quantity_json)
+                segment.quantity_display = _normalize_text(resolution.quantity_display)
+
+        resolved_bucket = _resolved_portion_bucket(
+            resolution.portion_bucket,
+            quantity_json=resolution.quantity_json,
+        )
+
         if resolution.existing_diary_entry_id is not None:
             existing = await session.get(DiaryEntry, resolution.existing_diary_entry_id)
             if existing is None:
@@ -464,7 +492,7 @@ async def apply_final_meal_resolution(
             existing.food_item_id = resolved_food.id
             existing.food_item = resolved_food
             existing.segment_id = _normalize_text(resolution.segment_id)
-            existing.portion_bucket = str(_coerce_portion_bucket(resolution.portion_bucket).value)
+            existing.portion_bucket = str(resolved_bucket.value)
             existing.identification_method = _normalize_text(resolution.identification_method) or existing.identification_method
             existing.is_verified = (
                 bool(resolution.entry_is_verified)
@@ -495,7 +523,7 @@ async def apply_final_meal_resolution(
                 meal_log_id=meal.id,
                 food_item_id=resolved_food.id,
                 segment_id=_normalize_text(resolution.segment_id),
-                portion_bucket=str(_coerce_portion_bucket(resolution.portion_bucket).value),
+                portion_bucket=str(resolved_bucket.value),
                 identification_method=_normalize_text(resolution.identification_method) or "AUTO_CONFIRM",
                 is_verified=bool(resolved_food.is_verified),
                 quantity_json=copy.deepcopy(resolution.quantity_json),
@@ -515,7 +543,12 @@ async def apply_final_meal_resolution(
                 ) or "identity correction"
 
         embedding = _coerce_embedding(resolution.segment_embedding)
-        if resolution.create_food_visual and embedding is not None:
+        should_create_food_visual = (
+            bool(resolution.create_food_visual)
+            and bool(resolution.visual_learning_eligible)
+            and bool(resolved_food.is_verified)
+        )
+        if should_create_food_visual and embedding is not None:
             if resolution.segment_cropped_image_url is None:
                 raise MealResolutionError(
                     "segment_cropped_image_url is required when create_food_visual is true and embedding exists"

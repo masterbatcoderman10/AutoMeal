@@ -40,9 +40,9 @@
 
 ### Ground
 
-- [ ] **GROUND-01**: Reasoning stage and post-interview stage can call `searxng_search` and `firecrawl_fetch` as tools when the LLM needs brand/restaurant nutrition data
-- [ ] **GROUND-02**: Tool loop is bounded: `max_iterations=6`, 90 s wall-clock timeout, per-meal cost cap, URL allowlist
-- [ ] **GROUND-03**: Tool-call trace (queries, URLs, snippets) is appended to `MealSegment.ai_reasoning`
+- [x] **GROUND-01**: Reasoning stage and post-interview stage can call `searxng_search` and `firecrawl_fetch` as tools when the LLM needs brand/restaurant nutrition data
+- [x] **GROUND-02**: Tool loop is bounded: `max_iterations=6`, 90 s wall-clock timeout, per-meal cost cap, URL allowlist
+- [x] **GROUND-03**: Tool-call trace (queries, URLs, snippets) is appended to `MealSegment.ai_reasoning`
 
 ### Interview
 
@@ -135,9 +135,9 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 | REASON-03 | Phase 4 | Complete |
 | REASON-04 | Phase 4 | Complete |
 | PIPELINE-01 | Phase 4 | Complete |
-| GROUND-01 | Phase 5 | Pending |
-| GROUND-02 | Phase 5 | Pending |
-| GROUND-03 | Phase 5 | Pending |
+| GROUND-01 | Phase 5 | Complete |
+| GROUND-02 | Phase 5 | Complete |
+| GROUND-03 | Phase 5 | Complete |
 | INTERVIEW-01 | Phase 4 | Complete |
 | INTERVIEW-02 | Phase 4 | Complete |
 | INTERVIEW-03 | Phase 4 | Complete |
@@ -159,6 +159,7 @@ Phase mapping populated by roadmapper on 2026-05-24. Status updated as phases co
 | INFRA-05 | Phase 1 | Complete |
 
 **Coverage:**
+
 - v1 requirements: 40 total
 - Mapped to phases: 40
 - Unmapped: 0 (complete)

@@ -10,7 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from app.config import get_settings
-from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog
+from app.models import DiaryEntry, InterviewMessage, InterviewSession, MealLog, MealProcessingStatus
 from app.services import interview_service, interview_turn_manager
 from app.services import correction_service
 
@@ -23,8 +23,7 @@ from bot.callback_data import (
     resolve_callback_token,
 )
 from bot.messages import (
-    format_grounding_in_progress_message,
-    format_grounding_pending_message,
+    format_grounding_blocker_message,
     format_interview_confirmation_message,
     format_recent_fix_targets,
     format_start_message,
@@ -284,16 +283,41 @@ def _update_confirmation_state(state: dict, confirmation_items: list[dict]) -> d
     return updated
 
 
-def _finalized_grounding_required(finalized: dict) -> bool:
-    result = finalized.get("result")
-    return isinstance(result, Mapping) and bool(result.get("grounding_required"))
-
-
 def _finalized_meal_entries(finalized: dict) -> list:
     result = finalized.get("result")
     if isinstance(result, Mapping):
         return list(result.get("meal_entries", []))
     return list(getattr(result, "meal_entries", []) or [])
+
+
+def _meal_finalization_succeeded(finalized: Mapping[str, object] | None) -> bool:
+    if not isinstance(finalized, Mapping):
+        return False
+    if not _finalized_meal_entries(dict(finalized)):
+        return False
+    meal = finalized.get("meal")
+    status = getattr(meal, "processing_status", None)
+    if status == MealProcessingStatus.FAILED or str(status) == MealProcessingStatus.FAILED.value:
+        return False
+    return True
+
+
+def _meal_finalization_blocker_message(finalized: Mapping[str, object] | None) -> str:
+    finalized_mapping = dict(finalized or {}) if isinstance(finalized, Mapping) else {}
+    meal = finalized_mapping.get("meal")
+    meal_id = str(getattr(meal, "id", "") or finalized_mapping.get("meal_id") or "")
+    status = getattr(meal, "processing_status", None)
+    if status == MealProcessingStatus.FAILED or str(status) == MealProcessingStatus.FAILED.value:
+        blocker = "meal finalization failed closed"
+    elif not _finalized_meal_entries(finalized_mapping):
+        blocker = "finalization produced no saved meal entries"
+    else:
+        blocker = "finalization result was unavailable"
+    return format_grounding_blocker_message(
+        meal_id,
+        blocker=blocker,
+        saved_as_unverified=False,
+    )
 
 
 async def _finalize_interview_confirmation(*, session, interview: InterviewSession) -> dict | None:
@@ -397,47 +421,6 @@ def _remember_recent_entry_context(
     )
     bot_data["recent_entries"] = recent_entries
     return recent_entries
-
-
-def _mark_grounding_pending(interview: InterviewSession) -> None:
-    payload = dict(interview.current_prompt_payload or {})
-    payload["roadmap_step"] = "GROUNDING_PENDING"
-    payload["grounding_handoff_pending"] = True
-    payload["grounding_required"] = True
-    payload["grounding_status"] = "PENDING_HANDOFF"
-    interview.current_prompt_payload = payload
-    interview.state_key = "GROUNDING_PENDING"
-    interview.is_active = True
-
-
-def _mark_grounding_handoff_acknowledged(interview: InterviewSession, *, meal: MealLog | None = None) -> None:
-    now = datetime.now(UTC)
-    payload = dict(interview.current_prompt_payload or {})
-    payload["roadmap_step"] = "GROUNDING_PENDING"
-    payload["grounding_handoff_pending"] = False
-    payload["grounding_required"] = True
-    payload["grounding_status"] = "HANDOFF_ACKNOWLEDGED"
-    payload["grounding_handoff_completed_at"] = now.isoformat()
-    payload["grounding_consumer"] = "bot_confirm_handler"
-    payload["grounding_last_updated_at"] = now.isoformat()
-    interview.current_prompt_payload = payload
-    interview.state_key = "GROUNDING_PENDING"
-    interview.is_active = True
-
-    if meal is None:
-        return
-    meal.reasoning_state_json = interview_service.build_grounding_reasoning_state(
-        confirmation_items=interview_service.confirmation_items_from_state(
-            dict(getattr(meal, "reasoning_state_json", None) or {})
-        ),
-        status="HANDOFF_ACKNOWLEDGED",
-        prior_state=getattr(meal, "reasoning_state_json", None),
-        updated_at=now,
-        extra={
-            "handoff_acknowledged_at": now.isoformat(),
-            "handoff_consumer": "bot_confirm_handler",
-        },
-    )
 
 
 def _is_deterministic_meal_interview(state: Mapping[str, object]) -> bool:
@@ -794,15 +777,12 @@ async def interview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     else:
                         await message.reply_text(correction_service.format_fix_summary(result))
                 return
-            if _finalized_grounding_required(finalized):
-                _mark_grounding_handoff_acknowledged(interview, meal=finalized.get("meal"))
+            if not _meal_finalization_succeeded(finalized):
                 session.add(interview)
-                if finalized.get("meal") is not None:
-                    session.add(finalized["meal"])
                 await session.commit()
                 message = update.callback_query.message
                 if message is not None:
-                    await message.reply_text(format_grounding_pending_message(finalized["meal"].id))
+                    await message.reply_text(_meal_finalization_blocker_message(finalized))
                 return
             interview.is_active = False
             session.add(interview)
@@ -851,9 +831,6 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(retry_message or "Got it. I'll update the meal confirmation.")
                 return
             state = _interview_state(interview)
-            if state.get("roadmap_step") == "GROUNDING_PENDING":
-                await update.message.reply_text(format_grounding_in_progress_message(interview.meal_log_id))
-                return
             mode = str(state.get("session_mode") or interview_service.SESSION_MODE_MEAL)
             if state.get("roadmap_step") != "CONFIRMATION" and _is_deterministic_meal_interview(state):
                 await _handle_deterministic_meal_text(
@@ -899,13 +876,10 @@ async def interview_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         else:
                             await update.message.reply_text(correction_service.format_fix_summary(result))
                         return
-                    if _finalized_grounding_required(finalized):
-                        _mark_grounding_handoff_acknowledged(interview, meal=finalized.get("meal"))
+                    if not _meal_finalization_succeeded(finalized):
                         session.add(interview)
-                        if finalized.get("meal") is not None:
-                            session.add(finalized["meal"])
                         await session.commit()
-                        await update.message.reply_text(format_grounding_pending_message(finalized["meal"].id))
+                        await update.message.reply_text(_meal_finalization_blocker_message(finalized))
                         return
                     interview.is_active = False
                     session.add(interview)
@@ -1072,13 +1046,10 @@ async def _handle_meal_interview_turn(*, session, interview: InterviewSession, s
         if finalized is None:
             await update.message.reply_text("I could not find that meal to confirm.")
             return
-        if _finalized_grounding_required(finalized):
-            _mark_grounding_handoff_acknowledged(interview, meal=finalized.get("meal"))
+        if not _meal_finalization_succeeded(finalized):
             session.add(interview)
-            if finalized.get("meal") is not None:
-                session.add(finalized["meal"])
             await session.commit()
-            await update.message.reply_text(format_grounding_pending_message(finalized["meal"].id))
+            await update.message.reply_text(_meal_finalization_blocker_message(finalized))
             return
         interview.is_active = False
         session.add(interview)

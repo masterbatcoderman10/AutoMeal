@@ -211,11 +211,31 @@ def _sum_known_totals(items: list[CompletionItem]) -> list[str]:
     return totals
 
 
+def _saved_without_nutrition(items: list[CompletionItem]) -> bool:
+    if not items:
+        return False
+    for item in items:
+        if item.is_verified:
+            return False
+        if any(
+            value is not None
+            for value in (item.calories, item.protein_g, item.carbs_g, item.fat_g)
+        ):
+            return False
+    return True
+
+
 def format_match_completion_message(items: list[CompletionItem]) -> str:
     if not items:
         return "Meal completed and logged."
 
     lines: list[str] = []
+    if _saved_without_nutrition(items):
+        lines.append(
+            "Meal saved, but I couldn't finalize nutrition yet. "
+            "I logged the items without nutrition and marked them unverified."
+        )
+        lines.append("")
     for item in items:
         lines.append(
             f"{item.food_name} | {_portion_phrase(item.portion_bucket)} | "

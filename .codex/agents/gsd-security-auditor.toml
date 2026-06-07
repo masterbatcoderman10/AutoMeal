@@ -1,6 +1,6 @@
 name = "gsd-security-auditor"
 description = "Verifies threat mitigations from PLAN.md threat model exist in implemented code. Produces SECURITY.md. Spawned by $gsd-secure-phase."
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = '''

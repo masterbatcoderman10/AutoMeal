@@ -33,8 +33,6 @@ from bot.callback_data import (
 from bot.messages import (
     CompletionItem,
     format_ack_message,
-    format_grounding_blocker_message,
-    format_grounding_pending_message,
     format_interview_reminder_message,
     format_match_completion_message,
     format_recent_fix_targets,
@@ -59,34 +57,6 @@ async def _poll_sleep(delay: float) -> None:
     await asyncio.sleep(delay)
 
 
-def _grounding_confirmation_items(state: object) -> list[dict]:
-    if not isinstance(state, dict):
-        return []
-    items = state.get("confirmation_items")
-    if not isinstance(items, list):
-        return []
-    return [dict(item) for item in items if isinstance(item, dict)]
-
-
-def _grounding_confirmation_items_by_segment(state: object) -> dict[str, dict]:
-    confirmation_items: dict[str, dict] = {}
-    for item in _grounding_confirmation_items(state):
-        segment_ids: list[str] = []
-        raw_segment_ids = item.get("segment_ids")
-        if isinstance(raw_segment_ids, list):
-            for raw_segment_id in raw_segment_ids:
-                segment_id = str(raw_segment_id or "").strip()
-                if segment_id and segment_id not in segment_ids:
-                    segment_ids.append(segment_id)
-        for field_name in ("segment_id", "primary_segment_id"):
-            segment_id = str(item.get(field_name) or "").strip()
-            if segment_id and segment_id not in segment_ids:
-                segment_ids.append(segment_id)
-        for segment_id in segment_ids:
-            confirmation_items.setdefault(segment_id, item)
-    return confirmation_items
-
-
 def _normalize_portion_bucket(value: str | None) -> str:
     if not isinstance(value, str):
         return "STANDARD"
@@ -94,357 +64,6 @@ def _normalize_portion_bucket(value: str | None) -> str:
     if normalized in {"SMALL", "STANDARD", "LARGE"}:
         return normalized
     return "STANDARD"
-
-
-def _is_grounding_pending_session(interview: InterviewSession) -> bool:
-    payload = dict(interview.current_prompt_payload or {})
-    return interview.state_key == "GROUNDING_PENDING" or payload.get("roadmap_step") == "GROUNDING_PENDING"
-
-
-def _build_grounding_candidate_context(item: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(item, Mapping):
-        return {}
-    portion_bucket = _normalize_portion_bucket(item.get("portion_bucket"))
-    quantity_display = item.get("quantity_display")
-    quantity_payload = {
-        "portion_bucket": portion_bucket,
-    }
-    if isinstance(quantity_display, str) and quantity_display.strip():
-        quantity_payload["display"] = quantity_display.strip()
-        quantity_payload["quantity_label"] = quantity_display.strip()
-    context = {
-        "food_item_id": item.get("food_item_id"),
-        "source": item.get("source_type"),
-        "source_type": item.get("source_type"),
-        "brand_name": item.get("brand_name"),
-        "restaurant_name": item.get("restaurant_name"),
-        "portion_bucket": portion_bucket,
-        "quantity_payload": quantity_payload,
-    }
-    return {key: value for key, value in context.items() if value is not None}
-
-
-def _build_grounding_candidate_payload(
-    *,
-    segment_id: str,
-    item: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    if not isinstance(item, Mapping):
-        return None
-    name = item.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return None
-    payload = {
-        "candidate_id": str(item.get("food_item_id") or segment_id),
-        "label": name.strip(),
-        "identity_confidence": 1.0,
-        "quantity_confidence": 1.0,
-        "match_consistency_confidence": 1.0,
-        "visual_evidence": [f"interview-confirmed candidate for {segment_id}"],
-        "missing_evidence": [],
-        "specificity": "high",
-        "nutrition_relevance": "high",
-        "decision_rationale": "Candidate reconstructed from confirmed interview context.",
-        "nutrition_impact": 0.0,
-    }
-    payload.update(_build_grounding_candidate_context(item))
-    return payload
-
-
-def _grounding_candidates_for_segment(
-    *,
-    segment: MealSegment,
-    confirmation_item: Mapping[str, Any] | None,
-) -> list[dict[str, Any]]:
-    snapshot = getattr(segment, "match_candidates_json", None)
-    candidates = []
-    if isinstance(snapshot, Mapping):
-        snapshot_candidates = snapshot.get("top_3")
-        if isinstance(snapshot_candidates, list):
-            for candidate in snapshot_candidates:
-                if not isinstance(candidate, Mapping):
-                    continue
-                merged = dict(candidate)
-                for key, value in _build_grounding_candidate_context(confirmation_item).items():
-                    merged.setdefault(key, value)
-                candidates.append(merged)
-    if candidates:
-        return candidates[:3]
-    fallback = _build_grounding_candidate_payload(
-        segment_id=str(getattr(segment, "id", "")),
-        item=confirmation_item,
-    )
-    return [fallback] if fallback is not None else []
-
-
-def _rebuild_grounding_match_results(
-    *,
-    meal: MealLog,
-    segments: list[MealSegment],
-) -> tuple[list[tuple[MealSegment, matching_service.SegmentMatchResult]], list[str]]:
-    if not segments:
-        return [], ["no-segments"]
-    state = getattr(meal, "reasoning_state_json", None)
-    confirmation_items = _grounding_confirmation_items_by_segment(state)
-    expected_segment_ids = set(confirmation_items)
-    rebuilt: list[tuple[MealSegment, matching_service.SegmentMatchResult]] = []
-    missing_segments: list[str] = []
-    seen_segment_ids: set[str] = set()
-    for segment in segments:
-        segment_id = str(getattr(segment, "id", ""))
-        if expected_segment_ids and segment_id not in expected_segment_ids:
-            continue
-        if segment_id:
-            seen_segment_ids.add(segment_id)
-        candidates = _grounding_candidates_for_segment(
-            segment=segment,
-            confirmation_item=confirmation_items.get(segment_id),
-        )
-        if not candidates:
-            missing_segments.append(segment_id or "unknown-segment")
-            continue
-        top_candidate = dict(candidates[0])
-        threshold = matching_service.MATCH_THRESHOLD
-        snapshot = getattr(segment, "match_candidates_json", None)
-        if isinstance(snapshot, Mapping):
-            raw_threshold = snapshot.get("match_threshold")
-            if isinstance(raw_threshold, (int, float)):
-                threshold = float(raw_threshold)
-        similarity = float(top_candidate.get("identity_confidence") or 0.0)
-        rebuilt.append(
-            (
-                segment,
-                matching_service.SegmentMatchResult(
-                    food_visual_id=str(top_candidate.get("candidate_id") or segment_id or "grounding"),
-                    food_item_id=(
-                        str(top_candidate.get("food_item_id"))
-                        if top_candidate.get("food_item_id") is not None
-                        else None
-                    ),
-                    similarity=similarity,
-                    food_visual=None,
-                    query_embedding=(
-                        list(segment.embedding)
-                        if isinstance(getattr(segment, "embedding", None), list)
-                        else []
-                    ),
-                    is_match=similarity >= threshold,
-                    is_below_threshold=similarity < threshold,
-                    match_threshold=threshold,
-                    candidate_payloads=candidates,
-                ),
-            )
-        )
-    for segment_id in sorted(expected_segment_ids - seen_segment_ids):
-        missing_segments.append(segment_id or "unknown-segment")
-    return rebuilt, missing_segments
-
-
-def _merge_post_interview_reasoning_state(
-    *,
-    prior_state: Mapping[str, Any] | None,
-    finalization: Mapping[str, Any] | None,
-    current_state: Mapping[str, Any] | None,
-    status: str,
-    updated_at: datetime,
-    extra: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    merged = interview_service.build_grounding_reasoning_state(
-        confirmation_items=_grounding_confirmation_items(prior_state),
-        status=status,
-        prior_state=prior_state,
-        updated_at=updated_at,
-        extra=extra,
-    )
-    for payload in (current_state, finalization):
-        if not isinstance(payload, Mapping):
-            continue
-        for key in ("meal_reasoning", "segment_reasoning", "ready_for_final_write", "persisted_at"):
-            if key in payload:
-                merged[key] = payload[key]
-    if isinstance(finalization, Mapping):
-        merged["grounding_finalized"] = bool(finalization.get("finalized"))
-        completed_by = finalization.get("completed_by")
-        if completed_by is not None:
-            merged["grounding_completed_by"] = completed_by
-    return merged
-
-
-def _set_grounding_interview_status(
-    *,
-    interview: InterviewSession,
-    status: str,
-    updated_at: datetime,
-    active: bool,
-    consumer: str,
-) -> None:
-    payload = dict(interview.current_prompt_payload or {})
-    payload["grounding_handoff_pending"] = False
-    payload["grounding_required"] = active
-    payload["grounding_status"] = status
-    payload["grounding_consumer"] = consumer
-    payload["grounding_last_updated_at"] = updated_at.isoformat()
-    payload["roadmap_step"] = "GROUNDING_PENDING" if active else "GROUNDING_COMPLETED"
-    if active:
-        payload["grounding_stage_started_at"] = updated_at.isoformat()
-    else:
-        payload["grounding_completed_at"] = updated_at.isoformat()
-    interview.current_prompt_payload = payload
-    interview.state_key = "GROUNDING_PENDING" if active else "GROUNDING_COMPLETED"
-    interview.is_active = active
-
-
-def _classify_grounding_failure(error: Exception, *, fallback_category: str = "tool_execution") -> dict[str, Any]:
-    message = str(error or "").strip()
-    lowered = message.casefold()
-    category = fallback_category
-    blocker = "the grounding tools failed"
-    retryable = False
-    status_code: int | None = None
-
-    if isinstance(error, httpx.HTTPStatusError):
-        status_code = int(error.response.status_code) if error.response is not None else None
-        if status_code == 429 or "quota" in lowered or "limit" in lowered or "rate" in lowered:
-            category = "provider_quota"
-            blocker = "the provider quota was exceeded"
-        elif status_code in {401, 403}:
-            category = "provider_auth"
-            blocker = "provider authentication failed"
-        else:
-            category = "tool_execution"
-            blocker = "the grounding provider returned an unexpected error"
-    elif isinstance(error, RateLimitError):
-        status_code = int(error.status_code) if getattr(error, "status_code", None) is not None else None
-        category = "provider_quota"
-        blocker = "the provider quota was exceeded"
-        retryable = True
-    elif isinstance(error, AuthenticationError):
-        status_code = int(error.status_code) if getattr(error, "status_code", None) is not None else None
-        category = "provider_auth"
-        blocker = "provider authentication failed"
-    elif isinstance(error, APIConnectionError):
-        category = "network"
-        blocker = "a network request failed"
-        retryable = True
-    elif isinstance(error, APIStatusError):
-        status_code = int(error.status_code) if getattr(error, "status_code", None) is not None else None
-        if status_code == 429 or "quota" in lowered or "limit" in lowered or "rate" in lowered:
-            category = "provider_quota"
-            blocker = "the provider quota was exceeded"
-            retryable = True
-        elif status_code in {401, 403}:
-            category = "provider_auth"
-            blocker = "provider authentication failed"
-        else:
-            category = "tool_execution"
-            blocker = "the grounding provider returned an unexpected error"
-    elif isinstance(
-        error,
-        (
-            httpx.ConnectError,
-            httpx.ReadError,
-            httpx.ReadTimeout,
-            httpx.WriteError,
-            httpx.WriteTimeout,
-            httpx.TimeoutException,
-            httpx.NetworkError,
-        ),
-    ):
-        category = "network"
-        blocker = "a network request failed"
-        retryable = True
-    elif "tool" in lowered or "firecrawl" in lowered or "searxng" in lowered:
-        category = "tool_execution"
-        blocker = "one of the grounding tools failed"
-        retryable = True
-    elif fallback_category == "missing_context":
-        category = "missing_context"
-        blocker = "the confirmed meal context was incomplete"
-
-    failure = {
-        "category": category,
-        "message": blocker,
-        "retryable": retryable,
-    }
-    if status_code is not None:
-        failure["status_code"] = status_code
-    return failure
-
-
-async def _apply_grounding_failure_policy(
-    *,
-    session: AsyncSession,
-    meal: MealLog,
-    interview: InterviewSession,
-    segments: list[MealSegment],
-    failure: Mapping[str, Any],
-    bot,
-    settings,
-) -> None:
-    confirmation_items = _grounding_confirmation_items(getattr(meal, "reasoning_state_json", None))
-    now = datetime.now(UTC)
-    can_degraded_save = bool(confirmation_items)
-    blocker = str(failure.get("message") or "the grounding tools failed")
-
-    if can_degraded_save:
-        await interview_service.finalize_confirmed_interview(
-            session=session,
-            meal=meal,
-            confirmation_items=confirmation_items,
-            segments=segments,
-            best_effort=True,
-            interview_state=dict(interview.current_prompt_payload or {}),
-            force_degraded_save=True,
-            degraded_grounding_failure=failure,
-        )
-        _set_grounding_interview_status(
-            interview=interview,
-            status="DEGRADED_SAVED",
-            updated_at=now,
-            active=False,
-            consumer="poll_post_interview_grounding",
-        )
-        session.add(interview)
-        await session.commit()
-        await bot.send_message(
-            chat_id=settings.TELEGRAM_CHAT_ID,
-            text=format_grounding_blocker_message(
-                meal.id,
-                blocker=blocker,
-                saved_as_unverified=True,
-            ),
-        )
-        return
-
-    meal.processing_status = MealProcessingStatus.INTERVIEWING
-    meal.reasoning_state_json = _merge_post_interview_reasoning_state(
-        prior_state=getattr(meal, "reasoning_state_json", None),
-        finalization=None,
-        current_state=getattr(meal, "reasoning_state_json", None),
-        status="HOLD_REQUIRED",
-        updated_at=now,
-        extra={"grounding_failure": dict(failure)},
-    )
-    _set_grounding_interview_status(
-        interview=interview,
-        status="HOLD_REQUIRED",
-        updated_at=now,
-        active=True,
-        consumer="poll_post_interview_grounding",
-    )
-    session.add(meal)
-    session.add(interview)
-    await session.commit()
-    await bot.send_message(
-        chat_id=settings.TELEGRAM_CHAT_ID,
-        text=format_grounding_blocker_message(
-            meal.id,
-            blocker=blocker,
-            saved_as_unverified=False,
-        ),
-    )
-
-
 async def _run_reasoning_pipeline(
     *,
     llm_client,
@@ -470,74 +89,6 @@ async def _run_reasoning_pipeline(
         reasoning_payload=reasoning_result,
     )
     return reasoning_result, finalization
-
-
-def _segment_for_confirmation_item(
-    item: Mapping[str, Any],
-    *,
-    segments_by_id: Mapping[str, MealSegment],
-) -> MealSegment | None:
-    candidate_ids: list[str] = []
-    for key in ("primary_segment_id", "segment_id"):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            candidate_ids.append(value.strip())
-    raw_segment_ids = item.get("segment_ids")
-    if isinstance(raw_segment_ids, list):
-        candidate_ids.extend(str(value).strip() for value in raw_segment_ids if str(value).strip())
-    for segment_id in candidate_ids:
-        segment = segments_by_id.get(segment_id)
-        if segment is not None:
-            return segment
-    return None
-
-
-async def _finalize_grounding_from_confirmation(
-    *,
-    session: AsyncSession,
-    meal: MealLog,
-    segments: list[MealSegment],
-    confirmation_items: list[Mapping[str, Any]],
-    now: datetime,
-) -> dict[str, Any]:
-    segments_by_id = {str(segment.id): segment for segment in segments if str(getattr(segment, "id", "") or "")}
-    final_segments = [
-        interview_service.final_resolution_from_confirmation(
-            item=item,
-            segment=_segment_for_confirmation_item(item, segments_by_id=segments_by_id),
-            skip_grounding_handoff=True,
-        )
-        for item in confirmation_items
-    ]
-    reasoning_state = dict(getattr(meal, "reasoning_state_json", None) or {})
-    reasoning_state.update(
-        {
-            "completed_by": "poll_post_interview_grounding",
-            "confirmation_items": [dict(item) for item in confirmation_items],
-            "grounding_required": True,
-            "post_interview_grounding": True,
-            "grounding_status": "COMPLETED",
-            "grounding_finalized": True,
-            "ready_for_final_write": True,
-            "completed_at": now.isoformat(),
-        }
-    )
-    meal_resolution = await meal_resolution_service.apply_final_meal_resolution(
-        session=session,
-        meal=meal,
-        final_segments=final_segments,
-        meal_status=MealProcessingStatus.COMPLETED,
-        reasoning_state_json=reasoning_state,
-        now=now,
-    )
-    return {
-        "finalized": True,
-        "completed_by": "poll_post_interview_grounding",
-        "meal_resolution": meal_resolution,
-        "ready_for_final_write": True,
-        "persisted_at": now.isoformat(),
-    }
-
 
 def _transition_meal_status(meal: MealLog, status: MealProcessingStatus) -> None:
     meal.processing_status = status
@@ -814,7 +365,6 @@ async def poll_interview_reminders(bot, settings, poll_interval: float | None = 
                         select(InterviewSession)
                         .where(
                             InterviewSession.is_active.is_(True),
-                            InterviewSession.state_key != "GROUNDING_PENDING",
                             InterviewSession.last_reminder_at.is_(None),
                             InterviewSession.updated_at <= cutoff,
                         )
@@ -825,10 +375,6 @@ async def poll_interview_reminders(bot, settings, poll_interval: float | None = 
                     result = await session.execute(statement)
                     interview = result.scalar_one_or_none()
                     if interview is None:
-                        await session.rollback()
-                        await _poll_sleep(interval)
-                        continue
-                    if _is_grounding_pending_session(interview):
                         await session.rollback()
                         await _poll_sleep(interval)
                         continue
@@ -854,271 +400,6 @@ async def poll_interview_reminders(bot, settings, poll_interval: float | None = 
         await engine.dispose()
 
 
-async def poll_grounding_handoffs(bot, settings, poll_interval: float | None = None) -> None:
-    engine = create_async_engine(
-        settings.DATABASE_URL,
-        echo=False,
-        pool_pre_ping=True,
-    )
-    session_factory = async_sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autoflush=False,
-    )
-    interval = poll_interval or settings.BOT_POLL_INTERVAL
-
-    try:
-        while True:
-            try:
-                async with session_factory() as session:
-                    statement = (
-                        select(InterviewSession)
-                        .where(InterviewSession.is_active.is_(True))
-                        .order_by(InterviewSession.updated_at.asc())
-                        .limit(10)
-                        .with_for_update(skip_locked=True)
-                    )
-                    result = await session.execute(statement)
-                    interviews = list(result.scalars().all())
-                    interview = next(
-                        (
-                            candidate
-                            for candidate in interviews
-                            if dict(candidate.current_prompt_payload or {}).get("roadmap_step") == "GROUNDING_PENDING"
-                            and dict(candidate.current_prompt_payload or {}).get("grounding_handoff_pending")
-                        ),
-                        None,
-                    )
-                    if interview is None:
-                        await session.rollback()
-                        await _poll_sleep(interval)
-                        continue
-
-                    meal = await session.get(MealLog, interview.meal_log_id)
-                    now = datetime.now(UTC)
-                    payload = dict(interview.current_prompt_payload or {})
-                    await session.commit()
-                    await bot.send_message(
-                        chat_id=interview.chat_id,
-                        text=format_grounding_pending_message(interview.meal_log_id),
-                    )
-                    payload["grounding_handoff_pending"] = False
-                    payload["grounding_handoff_completed_at"] = now.isoformat()
-                    payload["grounding_status"] = "HANDOFF_ACKNOWLEDGED"
-                    interview.current_prompt_payload = payload
-                    interview.state_key = "GROUNDING_PENDING"
-                    interview.is_active = True
-                    if meal is not None:
-                        meal.reasoning_state_json = interview_service.build_grounding_reasoning_state(
-                            confirmation_items=_grounding_confirmation_items(
-                                getattr(meal, "reasoning_state_json", None)
-                            ),
-                            status="HANDOFF_ACKNOWLEDGED",
-                            prior_state=getattr(meal, "reasoning_state_json", None),
-                            updated_at=now,
-                            extra={
-                                "handoff_acknowledged_at": now.isoformat(),
-                                "handoff_consumer": "poll_grounding_handoffs",
-                            },
-                        )
-                        session.add(meal)
-                    await session.commit()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Error in poll_grounding_handoffs")
-            await _poll_sleep(interval)
-    finally:
-        await engine.dispose()
-
-
-async def poll_post_interview_grounding(
-    bot,
-    settings,
-    poll_interval: float | None = None,
-    bot_data: dict | None = None,
-) -> None:
-    engine = create_async_engine(
-        settings.DATABASE_URL,
-        echo=False,
-        pool_pre_ping=True,
-    )
-    session_factory = async_sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autoflush=False,
-    )
-    interval = poll_interval or settings.BOT_POLL_INTERVAL
-
-    try:
-        while True:
-            try:
-                async with session_factory() as session:
-                    statement = (
-                        select(InterviewSession)
-                        .where(InterviewSession.is_active.is_(True))
-                        .order_by(InterviewSession.updated_at.asc())
-                        .limit(10)
-                        .with_for_update(skip_locked=True)
-                    )
-                    result = await session.execute(statement)
-                    interviews = list(result.scalars().all())
-                    interview = next(
-                        (
-                            candidate
-                            for candidate in interviews
-                            if dict(candidate.current_prompt_payload or {}).get("roadmap_step") == "GROUNDING_PENDING"
-                            and not dict(candidate.current_prompt_payload or {}).get("grounding_handoff_pending")
-                            and dict(candidate.current_prompt_payload or {}).get("grounding_status")
-                            in {"HANDOFF_ACKNOWLEDGED", "AWAITING_GROUNDING", "RETRY_PENDING"}
-                        ),
-                        None,
-                    )
-                    if interview is None:
-                        await session.rollback()
-                        await _poll_sleep(interval)
-                        continue
-
-                    meal = await session.get(MealLog, interview.meal_log_id)
-                    if meal is None:
-                        await session.rollback()
-                        await _poll_sleep(interval)
-                        continue
-
-                    segment_result = await session.execute(
-                        select(MealSegment).where(MealSegment.meal_log_id == meal.id)
-                    )
-                    segments = list(segment_result.scalars().all())
-                    now = datetime.now(UTC)
-                    prior_state = dict(getattr(meal, "reasoning_state_json", None) or {})
-                    _transition_meal_status(meal, MealProcessingStatus.REASONING)
-                    meal.reasoning_state_json = _merge_post_interview_reasoning_state(
-                        prior_state=prior_state,
-                        finalization=None,
-                        current_state=getattr(meal, "reasoning_state_json", None),
-                        status="AWAITING_GROUNDING",
-                        updated_at=now,
-                        extra={
-                            "handoff_consumed_at": now.isoformat(),
-                            "handoff_consumer": "poll_post_interview_grounding",
-                        },
-                    )
-                    _set_grounding_interview_status(
-                        interview=interview,
-                        status="AWAITING_GROUNDING",
-                        updated_at=now,
-                        active=True,
-                        consumer="poll_post_interview_grounding",
-                    )
-                    session.add(meal)
-                    session.add(interview)
-                    match_results, missing_segments = _rebuild_grounding_match_results(
-                        meal=meal,
-                        segments=segments,
-                    )
-                    await session.commit()
-                    if missing_segments:
-                        await _apply_grounding_failure_policy(
-                            session=session,
-                            meal=meal,
-                            interview=interview,
-                            segments=segments,
-                            failure={
-                                "category": "missing_context",
-                                "message": "the confirmed meal context was incomplete",
-                                "missing_segments": missing_segments,
-                                "retryable": False,
-                            },
-                            bot=bot,
-                            settings=settings,
-                        )
-                        await _poll_sleep(interval)
-                        continue
-
-                    try:
-                        finalization = await _finalize_grounding_from_confirmation(
-                            session=session,
-                            meal=meal,
-                            segments=segments,
-                            confirmation_items=_grounding_confirmation_items(
-                                getattr(meal, "reasoning_state_json", None)
-                            ),
-                            now=datetime.now(UTC),
-                        )
-                    except Exception as exc:
-                        logger.exception("Error in poll_post_interview_grounding")
-                        await _apply_grounding_failure_policy(
-                            session=session,
-                            meal=meal,
-                            interview=interview,
-                            segments=segments,
-                            failure=_classify_grounding_failure(exc),
-                            bot=bot,
-                            settings=settings,
-                        )
-                        await _poll_sleep(interval)
-                        continue
-
-                    state_status = "COMPLETED" if finalization.get("finalized") else "RETRY_PENDING"
-                    result_timestamp = datetime.now(UTC)
-                    meal.reasoning_state_json = _merge_post_interview_reasoning_state(
-                        prior_state=prior_state,
-                        finalization=finalization,
-                        current_state=getattr(meal, "reasoning_state_json", None),
-                        status=state_status,
-                        updated_at=result_timestamp,
-                        extra={
-                            "grounding_last_attempt_at": result_timestamp.isoformat(),
-                            "grounding_consumer": "poll_post_interview_grounding",
-                        },
-                    )
-                    _set_grounding_interview_status(
-                        interview=interview,
-                        status=state_status,
-                        updated_at=result_timestamp,
-                        active=not finalization.get("finalized"),
-                        consumer="poll_post_interview_grounding",
-                    )
-                    session.add(meal)
-                    session.add(interview)
-                    await session.commit()
-
-                    if finalization.get("finalized"):
-                        completion_items = _completion_items_from_meal_resolution(
-                            match_results=match_results,
-                            meal_resolution=finalization.get("meal_resolution"),
-                        )
-                        try:
-                            text = format_match_completion_message(completion_items)
-                            recent_entries = _remember_recent_entry_context(
-                                bot_data,
-                                _recent_entries_from_meal_resolution(
-                                    meal_id=meal.id,
-                                    match_results=match_results,
-                                    meal_resolution=finalization.get("meal_resolution"),
-                                ),
-                                merge=False,
-                            )
-                            fix_targets = format_recent_fix_targets(recent_entries)
-                            if fix_targets:
-                                text = f"{text}\n\n{fix_targets}"
-                            await bot.send_message(
-                                chat_id=settings.TELEGRAM_CHAT_ID,
-                                text=text,
-                            )
-                        except Exception:
-                            logger.exception("Error sending grounded completion message")
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Error in poll_post_interview_grounding")
-            await _poll_sleep(interval)
-    finally:
-        await engine.dispose()
-
-
 async def poll_and_detect_food(bot, settings, poll_interval: float | None = None) -> None:
     engine = create_async_engine(
         settings.DATABASE_URL,
@@ -1136,6 +417,7 @@ async def poll_and_detect_food(bot, settings, poll_interval: float | None = None
 
     try:
         while True:
+            meal: MealLog | None = None
             try:
                 async with session_factory() as session:
                     statement = (
@@ -1149,7 +431,6 @@ async def poll_and_detect_food(bot, settings, poll_interval: float | None = None
                     meal = result.scalar_one_or_none()
 
                     if meal is not None:
-                        await session.commit()
                         decision = await detect_food_photo(
                             meal.image_url,
                             llm_client=llm_client,
@@ -1164,8 +445,17 @@ async def poll_and_detect_food(bot, settings, poll_interval: float | None = None
                 raise
             except Exception:
                 logger.exception("Error in poll_and_detect_food")
+                try:
+                    async with session_factory() as session:
+                        await session.rollback()
+                        if meal is not None:
+                            _transition_meal_status(meal, MealProcessingStatus.FAILED)
+                            await session.merge(meal)
+                            await session.commit()
+                except Exception:
+                    logger.exception("Error while marking meal as FAILED in detection")
 
-            await asyncio.sleep(interval)
+            await _poll_sleep(interval)
     finally:
         await engine.dispose()
 
@@ -1206,7 +496,6 @@ async def poll_and_segment_food(bot, settings, poll_interval: float | None = Non
                         await _poll_sleep(interval)
                         continue
 
-                    await session.commit()
                     segments = await segment_food_photo_with_retry(
                         meal.image_url,
                         llm_client=llm_client,
@@ -1322,7 +611,6 @@ async def poll_and_embed_food_segments(bot, settings, poll_interval: float | Non
                         await session.commit()
                         continue
 
-                    await session.commit()
                     for segment in segments:
                         segment.embedding = await matching_service.embed_segment_query_embedding(
                             segment=segment,
@@ -1573,11 +861,10 @@ async def poll_and_match_food_segments(bot, settings, poll_interval: float | Non
                     )
                     segments = list(segment_result.scalars().all())
                     if not segments:
-                        _transition_meal_status(meal, MealProcessingStatus.REASONING)
+                        _transition_meal_status(meal, MealProcessingStatus.FAILED)
                         await session.commit()
                         continue
 
-                    await session.commit()
                     match_sem = asyncio.Semaphore(_resolve_match_parallelism(settings))
                     match_results = await asyncio.gather(
                         *[

@@ -96,6 +96,47 @@ def _invoke_reasoning_writer(
 
 
 class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
+    def test_finalize_meal_from_reasoning_uses_shared_group_finalizer_path(self) -> None:
+        from app.services import interview_service, reasoning_service
+
+        finalize_source = inspect.getsource(reasoning_service.finalize_meal_from_reasoning)
+        bounded_source = inspect.getsource(interview_service._bounded_group_finalizer_response)  # noqa: SLF001
+
+        self.assertIn("_run_group_finalizers", finalize_source)
+        self.assertNotIn("build_grouped_final_segment_resolutions", finalize_source)
+        self.assertIn("_execute_grounding_tool", bounded_source)
+        self.assertIn("group_finalizer_response_format", bounded_source)
+        self.assertNotIn("tools=", inspect.getsource(reasoning_service._run_reasoning_model))
+
+    def test_append_grounding_trace_preserves_existing_reasoning_fields(self) -> None:
+        from app.services.reasoning_service import append_grounding_trace
+
+        reasoning_payload = {
+            "trace_id": "trace-grounding-1",
+            "group_id": "group-1",
+            "group_state": "READY_TO_WRITE",
+            "decision_rationale": "initial grouped reasoning",
+            "visual_evidence": ["visible curry"],
+        }
+        grounding_trace = {
+            "iteration_count": 2,
+            "queries": ["chicken curry nutrition"],
+            "fetched_urls": ["https://example.com/menu/chicken-curry"],
+            "stop_reason": "COMPLETED",
+        }
+
+        merged = append_grounding_trace(
+            reasoning_payload=reasoning_payload,
+            grounding_trace=grounding_trace,
+        )
+
+        self.assertEqual(merged["trace_id"], "trace-grounding-1")
+        self.assertEqual(merged["group_id"], "group-1")
+        self.assertEqual(merged["decision_rationale"], "initial grouped reasoning")
+        self.assertEqual(merged["grounding_trace"]["stop_reason"], "COMPLETED")
+        self.assertEqual(merged["grounding_trace"]["queries"], ["chicken curry nutrition"])
+        self.assertNotIn("grounding_trace", reasoning_payload)
+
     async def test_persists_reasoning_before_final_write(self) -> None:
         from app.services import reasoning_service
 
@@ -783,6 +824,81 @@ class ReasoningFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["meal_state"], "PENDING_INTERVIEW")
         self.assertEqual(result["food_groups"][0]["group_action"], "AFFIRMATION_REQUIRED")
         self.assertEqual(result["food_groups"][0]["gate_reason"], "no usable candidate labels were available")
+
+    def test_fallback_food_groups_from_match_results_do_not_become_save_ready_after_failed_reasoning(self) -> None:
+        from app.services import reasoning_service
+
+        segment = type("MealSegment", (), {"id": "segment-strong-hit", "label": "chicken curry"})()
+        candidate = {
+            **_candidate_payload(),
+            "candidate_id": "candidate-strong-hit",
+            "label": "chicken curry",
+            "identity_confidence": 0.99,
+            "match_consistency_confidence": 0.99,
+            "missing_evidence": [],
+        }
+
+        fallback_groups = reasoning_service._fallback_food_groups_from_match_results(  # noqa: SLF001
+            [(segment, type("Result", (), {"top_candidates": [candidate], "similarity": 0.99})())],
+            meal_state="FAILED_UNCLEAR",
+            action="FAILED_UNCLEAR",
+        )
+
+        self.assertEqual(len(fallback_groups), 1)
+        self.assertNotIn(fallback_groups[0]["group_action"], {"AUTO_CONFIRM", "AUTO_CONFIRM_LEARNED"})
+        self.assertNotEqual(fallback_groups[0]["group_state"], "READY_TO_WRITE")
+
+    async def test_run_reasoning_request_keeps_failed_reasoning_closed_even_with_strong_vector_hit(self) -> None:
+        from app.services import reasoning_service
+
+        meal = type("Meal", (), {"id": "meal-failed-strong-hit", "image_url": None})()
+        segment = type(
+            "MealSegment",
+            (),
+            {
+                "id": "segment-strong-hit",
+                "label": "chicken curry",
+                "bounding_box": [0.1, 0.1, 0.8, 0.8],
+                "cropped_image_url": None,
+            },
+        )()
+        candidate = {
+            **_candidate_payload(),
+            "candidate_id": "candidate-strong-hit",
+            "label": "chicken curry",
+            "identity_confidence": 0.99,
+            "match_consistency_confidence": 0.99,
+            "missing_evidence": [],
+        }
+        llm_client = type("LLM", (), {})()
+        llm_client.chat_completion = AsyncMock(
+            return_value={"choices": [{"message": {"content": "not json"}}]},
+        )
+        settings = type(
+            "Settings",
+            (),
+            {
+                "REASONING_MODEL": "reasoning-primary",
+                "REASONING_FALLBACK_MODEL": "reasoning-primary",
+                "REASONING_MATCH_THRESHOLD": 0.9,
+            },
+        )()
+
+        with patch.object(reasoning_service.tracing_service, "maybe_start_trace", return_value=nullcontext(None)):
+            result, _trace = await reasoning_service.run_reasoning_request(
+                llm_client=llm_client,
+                meal_id=meal.id,
+                meal=meal,
+                match_results=[(segment, type("Result", (), {"top_candidates": [candidate], "similarity": 0.99})())],
+                settings=settings,
+            )
+
+        self.assertEqual(result["meal_state"], "FAILED_UNCLEAR")
+        self.assertEqual(result["action"], "FAILED_UNCLEAR")
+        self.assertEqual(result["food_group_count"], 1)
+        self.assertNotIn(result["food_groups"][0]["group_action"], {"AUTO_CONFIRM", "AUTO_CONFIRM_LEARNED"})
+        self.assertNotEqual(result["food_groups"][0]["group_state"], "READY_TO_WRITE")
+        self.assertNotIn(result["meal_state"], {"READY_TO_WRITE", "PENDING_INTERVIEW"})
 
     def test_reasoning_parser_settings_are_removed_from_config(self) -> None:
         from app.config import Settings

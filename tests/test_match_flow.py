@@ -21,6 +21,56 @@ async def _noop_sleep(*_args, **_kwargs) -> None:
     return None
 
 
+def _echo_group_finalizer_outcomes(reasoning_service, group_inputs):
+    outcomes = []
+    for group_input in group_inputs:
+        item = dict(group_input.confirmation_item)
+        group_state = dict(group_input.group_state)
+        selected_candidate_id = str(group_state.get("selected_candidate_id") or "").strip()
+        top_candidates = [
+            dict(candidate)
+            for candidate in group_state.get("top_3") or []
+            if isinstance(candidate, dict)
+        ]
+        selected_candidate = next(
+            (
+                candidate
+                for candidate in top_candidates
+                if str(candidate.get("candidate_id") or "").strip() == selected_candidate_id
+            ),
+            {},
+        )
+        selected_source = str(
+            selected_candidate.get("source") or selected_candidate.get("source_type") or ""
+        ).strip()
+        if selected_source:
+            selected_label = str(selected_candidate.get("label") or "").strip()
+            if selected_label:
+                item["name"] = selected_label
+            selected_food_item_id = str(selected_candidate.get("food_item_id") or "").strip()
+            if selected_food_item_id:
+                item["food_item_id"] = selected_food_item_id
+            item["source_type"] = selected_source
+        else:
+            group_label = str(group_state.get("group_label") or "").strip()
+            if group_label:
+                item["name"] = group_label
+        resolution = reasoning_service.final_resolution_from_confirmation(
+            item=item,
+            segment=group_input.segment,
+            aliases=[str(item.get("name") or "unlabeled food")],
+            trace_id=group_input.trace_id,
+        )
+        outcomes.append(
+            SimpleNamespace(
+                final_resolution=resolution,
+                finalized_confirmation_item=item,
+                audit_state={"group_id": group_input.group_id, "status": "SUCCEEDED"},
+            )
+        )
+    return outcomes
+
+
 class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_cached_match_accepts_pgvector_numpy_embeddings(self) -> None:
         from app.services import matching_service
@@ -57,6 +107,23 @@ class MatchingServiceTests(unittest.IsolatedAsyncioTestCase):
 
         statement = session.execute.await_args.args[0]
         self.assertTrue(statement._with_options, "expected eager-loading options on match query")
+
+    async def test_cached_match_query_filters_to_verified_food_items(self) -> None:
+        from app.services import matching_service
+
+        segment = SimpleNamespace(id="segment-1", embedding=[0.12] * EMBEDDING_DIMENSION)
+        session = AsyncMock()
+        session.execute.return_value = Mock(first=Mock(return_value=None))
+
+        await matching_service.match_segment_with_cached_embedding(
+            segment=segment,
+            session=session,
+        )
+
+        statement = session.execute.await_args.args[0]
+        compiled = str(statement)
+        self.assertIn("food_items", compiled)
+        self.assertIn("is_verified", compiled)
 
     async def test_match_segment_uses_retrieval_query_embedding_and_sets_segment_vector(self) -> None:
         from app.services import matching_service
@@ -314,7 +381,125 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segment_one.embedding, [0.1] * matching_service.EMBEDDING_DIMENSION)
         self.assertEqual(segment_two.embedding, [0.2] * matching_service.EMBEDDING_DIMENSION)
         self.assertEqual(meal.processing_status, MealProcessingStatus.MATCHING)
-        self.assertEqual(session.commit.await_count, 2)
+        self.assertEqual(session.commit.await_count, 1)
+
+    async def test_poll_and_embed_keeps_single_worker_claim_while_embedding_is_in_flight_d11_d12(self) -> None:
+        from bot import polling
+        from app.services import matching_service
+
+        meal = SimpleNamespace(
+            id="meal-embed-claim",
+            processing_status=MealProcessingStatus.EMBEDDING,
+        )
+        segment = SimpleNamespace(
+            id="segment-1",
+            cropped_image_url="/data/uploads/crops/seg-1.jpg",
+            embedding=None,
+        )
+        engine = SimpleNamespace(dispose=AsyncMock())
+        embedding_started = asyncio.Event()
+        allow_embedding_finish = asyncio.Event()
+        duplicate_worker_entered = asyncio.Event()
+        embed_call_count = 0
+        claim_active = True
+
+        class FakeSession:
+            def __init__(self, worker_name: str) -> None:
+                self.worker_name = worker_name
+                self.execute_count = 0
+                self.claimed_meal = False
+                self.commit = AsyncMock(side_effect=self._commit)
+                self.rollback = AsyncMock()
+                self.merge = AsyncMock()
+
+            async def _commit(self) -> None:
+                nonlocal claim_active
+                if self.claimed_meal:
+                    claim_active = False
+
+            async def execute(self, _statement):
+                self.execute_count += 1
+                if self.execute_count == 1:
+                    if self.worker_name == "worker-1":
+                        self.claimed_meal = True
+                        return Mock(scalar_one_or_none=Mock(return_value=meal))
+                    if meal.processing_status == MealProcessingStatus.EMBEDDING and not claim_active:
+                        duplicate_worker_entered.set()
+                        self.claimed_meal = True
+                        return Mock(scalar_one_or_none=Mock(return_value=meal))
+                    return Mock(scalar_one_or_none=Mock(return_value=None))
+                if self.execute_count == 2:
+                    return Mock(
+                        scalars=Mock(
+                            return_value=Mock(
+                                all=Mock(return_value=[segment]),
+                            )
+                        )
+                    )
+                raise asyncio.CancelledError
+
+        class SessionContext:
+            def __init__(self, session: FakeSession) -> None:
+                self._session = session
+
+            async def __aenter__(self):
+                return self._session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        sessions = [FakeSession("worker-1"), FakeSession("worker-2")]
+        session_factory = Mock(side_effect=[SessionContext(session) for session in sessions])
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        async def _embed_segment(**_kwargs):
+            nonlocal embed_call_count
+            embed_call_count += 1
+            if embed_call_count > 1:
+                duplicate_worker_entered.set()
+            embedding_started.set()
+            await allow_embedding_finish.wait()
+            return [0.1] * matching_service.EMBEDDING_DIMENSION
+
+        async def _cancel_after_no_claim(_delay: float) -> None:
+            raise asyncio.CancelledError
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(polling, "get_llm_client", return_value=object()),
+            patch.object(
+                polling.matching_service,
+                "embed_segment_query_embedding",
+                side_effect=_embed_segment,
+            ),
+            patch.object(polling, "_poll_sleep", side_effect=_cancel_after_no_claim),
+        ):
+            worker_one = asyncio.create_task(
+                polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
+            )
+            await embedding_started.wait()
+            worker_two = asyncio.create_task(
+                polling.poll_and_embed_food_segments(bot, settings, poll_interval=0.01)
+            )
+            await asyncio.sleep(0)
+            allow_embedding_finish.set()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await worker_one
+            with self.assertRaises(asyncio.CancelledError):
+                await worker_two
+
+        self.assertFalse(
+            duplicate_worker_entered.is_set(),
+            "second worker should not reacquire the same EMBEDDING meal while worker one still owns it",
+        )
+        self.assertEqual(embed_call_count, 1)
+        self.assertEqual(meal.processing_status, MealProcessingStatus.MATCHING)
 
     async def test_poll_and_embed_marks_meal_without_segments_failed(self) -> None:
         from bot import polling
@@ -359,6 +544,48 @@ class EmbedWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(meal.processing_status, MealProcessingStatus.FAILED)
         session.commit.assert_awaited_once()
+
+    async def test_poll_and_match_marks_zero_segment_meal_failed_instead_of_stranding_it_in_reasoning(self) -> None:
+        from bot import polling
+
+        meal = SimpleNamespace(
+            id="meal-match-no-segments",
+            processing_status=MealProcessingStatus.MATCHING,
+        )
+        session = AsyncMock()
+        meal_result = Mock(scalar_one_or_none=Mock(return_value=meal))
+        segments_result = Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[]))))
+        session.execute.side_effect = [meal_result, segments_result, asyncio.CancelledError]
+        session.add = Mock()
+        session.add_all = Mock()
+        engine = SimpleNamespace(dispose=AsyncMock())
+
+        class SessionContext:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        session_factory = Mock(return_value=SessionContext())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        settings = SimpleNamespace(
+            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
+            TELEGRAM_CHAT_ID="999",
+            BOT_POLL_INTERVAL=3.0,
+        )
+
+        with (
+            patch.object(polling, "create_async_engine", return_value=engine),
+            patch.object(polling, "async_sessionmaker", return_value=session_factory),
+            patch.object(polling, "_poll_sleep", new=_noop_sleep),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await polling.poll_and_match_food_segments(bot, settings, poll_interval=0.01)
+
+        self.assertEqual(meal.processing_status, MealProcessingStatus.FAILED)
+        session.commit.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
 
 
 class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
@@ -441,10 +668,42 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return {"meal_entries": [], "food_visuals": [], "correction_events": []}
 
+        def _group_label_finalizer_outcomes(group_inputs):
+            outcomes = []
+            for group_input in group_inputs:
+                item = dict(group_input.confirmation_item)
+                item["name"] = "green chicken curry"
+                resolution = reasoning_service.final_resolution_from_confirmation(
+                    item=item,
+                    segment=group_input.segment,
+                    aliases=["green chicken curry"],
+                    trace_id=group_input.trace_id,
+                )
+                outcomes.append(
+                    SimpleNamespace(
+                        final_resolution=resolution,
+                        finalized_confirmation_item=item,
+                        audit_state={"group_id": group_input.group_id, "status": "SUCCEEDED"},
+                    )
+                )
+            return outcomes
+
         with patch.object(
             reasoning_service,
             "apply_final_meal_resolution",
             new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _echo_group_finalizer_outcomes(reasoning_service, kwargs["group_inputs"])),
         ):
             result = await reasoning_service.finalize_meal_from_reasoning(
                 session=session,
@@ -527,10 +786,42 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return {"meal_entries": [], "food_visuals": [], "correction_events": []}
 
+        def _group_label_finalizer_outcomes(group_inputs):
+            outcomes = []
+            for group_input in group_inputs:
+                item = dict(group_input.confirmation_item)
+                item["name"] = "green chicken curry"
+                resolution = reasoning_service.final_resolution_from_confirmation(
+                    item=item,
+                    segment=group_input.segment,
+                    aliases=["green chicken curry"],
+                    trace_id=group_input.trace_id,
+                )
+                outcomes.append(
+                    SimpleNamespace(
+                        final_resolution=resolution,
+                        finalized_confirmation_item=item,
+                        audit_state={"group_id": group_input.group_id, "status": "SUCCEEDED"},
+                    )
+                )
+            return outcomes
+
         with patch.object(
             reasoning_service,
             "apply_final_meal_resolution",
             new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _group_label_finalizer_outcomes(kwargs["group_inputs"])),
         ):
             result = await reasoning_service.finalize_meal_from_reasoning(
                 session=session,
@@ -604,6 +895,18 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             reasoning_service,
             "apply_final_meal_resolution",
             new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _echo_group_finalizer_outcomes(reasoning_service, kwargs["group_inputs"])),
         ):
             result = await reasoning_service.finalize_meal_from_reasoning(
                 session=session,
@@ -616,6 +919,123 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
         final_segments = captured["final_segments"]
         self.assertEqual(final_segments[0].food.canonical_name, "White Khubz / Pita")
         self.assertTrue(result["finalized"])
+
+    async def test_reasoning_all_degraded_finalizers_fail_closed_without_final_segments(self) -> None:
+        from app.services import reasoning_service
+
+        segment = SimpleNamespace(
+            id="segment-protein-bar-1",
+            label="protein bar",
+            cropped_image_url="/data/uploads/crops/protein-bar-1.jpg",
+            embedding=[0.41] * EMBEDDING_DIMENSION,
+        )
+        meal = SimpleNamespace(
+            id="meal-reasoning-all-degraded",
+            processing_status=MealProcessingStatus.REASONING,
+            reasoning_state_json=None,
+            last_stage_started_at=None,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        candidate = {
+            "candidate_id": "candidate-protein-bar",
+            "food_item_id": "food-protein-bar",
+            "label": "Protein Bar",
+            "identity_confidence": 0.98,
+            "quantity_confidence": 0.93,
+            "match_consistency_confidence": 0.95,
+            "missing_evidence": [],
+            "nutrition_impact": 0.03,
+            "portion_bucket": "STANDARD",
+            "source": "PACKAGED",
+        }
+        reasoning_payload = {
+            "action": "AUTO_CONFIRM",
+            "meal_state": "READY_TO_WRITE",
+            "trace_id": "trace-reasoning-all-degraded",
+            "decision_rationale": "ready to write but finalizer grounding degraded",
+            "gate_reason": "",
+            "segment_count": 1,
+            "food_group_count": 1,
+            "food_groups": [
+                {
+                    "group_id": "group-protein-bar",
+                    "group_label": "Protein Bar",
+                    "group_action": "AUTO_CONFIRM",
+                    "group_state": "READY_TO_WRITE",
+                    "primary_segment_id": "segment-protein-bar-1",
+                    "segment_ids": ["segment-protein-bar-1"],
+                    "selected_candidate_id": "candidate-protein-bar",
+                    "top_3": [candidate, candidate, candidate],
+                }
+            ],
+        }
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        def _degraded_finalizer_outcomes(group_inputs):
+            outcomes = []
+            for group_input in group_inputs:
+                item = dict(group_input.confirmation_item)
+                resolution = reasoning_service.final_resolution_from_confirmation(
+                    item=item,
+                    segment=group_input.segment,
+                    aliases=["Protein Bar"],
+                    trace_id=group_input.trace_id,
+                )
+                outcomes.append(
+                    SimpleNamespace(
+                        final_resolution=resolution,
+                        finalized_confirmation_item=item,
+                        audit_state={
+                            "group_id": group_input.group_id,
+                            "status": "DEGRADED",
+                            "grounding_failure": {
+                                "category": "tool_execution",
+                                "reason": "bounded grounding produced no verified nutrition",
+                            },
+                        },
+                    )
+                )
+            return outcomes
+
+        with patch.object(
+            reasoning_service,
+            "apply_final_meal_resolution",
+            new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _degraded_finalizer_outcomes(kwargs["group_inputs"])),
+        ):
+            result = await reasoning_service.finalize_meal_from_reasoning(
+                session=session,
+                meal=meal,
+                segments=[segment],
+                match_results=[],
+                reasoning_payload=reasoning_payload,
+            )
+
+        self.assertTrue(result["finalized"])
+        self.assertEqual(captured["meal_status"], MealProcessingStatus.FAILED)
+        self.assertEqual(captured["final_segments"], [])
+        reasoning_state_json = captured["reasoning_state_json"]
+        self.assertEqual(reasoning_state_json["grounding_status"], "ALL_FINALIZER_GROUPS_DEGRADED")
+        self.assertEqual(
+            reasoning_state_json["grounding_failure"]["category"],
+            "all_finalizer_groups_degraded",
+        )
 
     async def test_grouped_auto_confirm_preserves_specific_vector_candidate_over_generic_group_label(self) -> None:
         from app.services import reasoning_service
@@ -676,6 +1096,18 @@ class GroupedAutoConfirmWriteTests(unittest.IsolatedAsyncioTestCase):
             reasoning_service,
             "apply_final_meal_resolution",
             new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+        ), patch.object(
+            reasoning_service,
+            "get_settings",
+            return_value=SimpleNamespace(),
+        ), patch.object(
+            reasoning_service,
+            "get_llm_client",
+            return_value=AsyncMock(),
+        ), patch.object(
+            reasoning_service,
+            "_run_group_finalizers",
+            new=AsyncMock(side_effect=lambda **kwargs: _echo_group_finalizer_outcomes(reasoning_service, kwargs["group_inputs"])),
         ):
             result = await reasoning_service.finalize_meal_from_reasoning(
                 session=session,
@@ -821,6 +1253,15 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
             patch.object(
                 interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=1,
+                    FINALIZER_MODEL="google/gemini-3.1-flash-lite",
+                ),
+                create=True,
+            ),
+            patch.object(
+                interview_service,
                 "apply_final_meal_resolution",
                 new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
             ),
@@ -844,7 +1285,7 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             "egg curry with bottle gourd",
         )
 
-    async def test_finalize_confirmed_interview_maps_group_finalizer_output_to_authoritative_write(self) -> None:
+    async def test_finalize_confirmed_interview_maps_inline_grounding_payload_to_authoritative_write(self) -> None:
         from app.services import interview_service
 
         meal = SimpleNamespace(
@@ -928,6 +1369,14 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
                                         "restaurant_name": None,
                                         "correction_note": "Preserve clarified curry style.",
                                         "supporting_details": ["style clarified from interview"],
+                                        "serving_size_g": 320.0,
+                                        "calories": 410.0,
+                                        "protein_g": 31.0,
+                                        "carbs_g": 14.0,
+                                        "fat_g": 27.0,
+                                        "fiber_g": 3.0,
+                                        "confidence": 0.91,
+                                        "selected_source_ids": [],
                                     }
                                 )
                             }
@@ -947,6 +1396,15 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
             patch.object(
                 interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=1,
+                    FINALIZER_MODEL="google/gemini-3.1-flash-lite",
+                ),
+                create=True,
+            ),
+            patch.object(
+                interview_service,
                 "apply_final_meal_resolution",
                 new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
             ),
@@ -960,9 +1418,17 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
 
         final_segments = captured["final_segments"]
         self.assertEqual(len(final_segments), 1)
-        self.assertEqual(final_segments[0].food.canonical_name, "Chicken curry (green masala)")
-        self.assertIn("Green masala chicken curry", final_segments[0].food.aliases or [])
+        self.assertEqual(captured["reasoning_state_json"]["finalizer_groups"][0]["status"], "SUCCEEDED")
         self.assertEqual(final_segments[0].food.source_type, "HOME")
+        self.assertEqual(final_segments[0].food.serving_size_g, 320.0)
+        self.assertEqual(final_segments[0].food.calories, 410.0)
+        self.assertEqual(final_segments[0].food.protein_g, 31.0)
+        self.assertEqual(final_segments[0].food.carbs_g, 14.0)
+        self.assertEqual(final_segments[0].food.fat_g, 27.0)
+        self.assertEqual(final_segments[0].food.fiber_g, 3.0)
+        self.assertTrue(final_segments[0].food.is_verified)
+        self.assertFalse(final_segments[0].food.needs_grounding)
+        self.assertIn("model_knowledge", final_segments[0].food.llm_reasoning or "")
         self.assertEqual(final_segments[0].quantity_display, "2 pieces")
         self.assertEqual(
             final_segments[0].quantity_json,
@@ -975,14 +1441,12 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_segments[0].portion_bucket, "STANDARD")
         self.assertTrue(final_segments[0].create_food_visual)
         self.assertTrue(final_segments[0].visual_learning_eligible)
-        reasoning_state_json = captured["reasoning_state_json"]
-        self.assertEqual(reasoning_state_json["finalizer_groups"][0]["status"], "SUCCEEDED")
         self.assertEqual(
-            reasoning_state_json["confirmation_items"][0]["name"],
+            captured["reasoning_state_json"]["confirmation_items"][0]["name"],
             "Chicken curry (green masala)",
         )
 
-    def test_best_effort_grounding_resolution_preserves_visual_learning_inputs(self) -> None:
+    def test_best_effort_grounding_resolution_blocks_visual_learning(self) -> None:
         from app.services import interview_service
 
         segment = SimpleNamespace(
@@ -1005,17 +1469,40 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(resolution.food.needs_grounding)
         self.assertFalse(resolution.food.is_verified)
-        self.assertTrue(
-            resolution.create_food_visual,
-            "Degraded saves should still preserve FoodVisual creation when segment crops and embeddings exist.",
-        )
+        self.assertFalse(resolution.create_food_visual)
+        self.assertFalse(resolution.visual_learning_eligible)
         self.assertEqual(
             resolution.segment_cropped_image_url,
             "/data/uploads/crops/seg-grounding-fallback.jpg",
         )
         self.assertEqual(len(resolution.segment_embedding or []), EMBEDDING_DIMENSION)
 
-    async def test_apply_final_meal_resolution_preserves_finalizer_write_metadata(self) -> None:
+    def test_unverified_grounding_resolution_blocks_visual_learning_until_verified(self) -> None:
+        from app.services import interview_service
+
+        segment = SimpleNamespace(
+            id="seg-grounding-pending",
+            cropped_image_url="/data/uploads/crops/seg-grounding-pending.jpg",
+            embedding=[0.61] * EMBEDDING_DIMENSION,
+        )
+
+        resolution = interview_service.final_resolution_from_confirmation(
+            item={
+                "segment_id": "seg-grounding-pending",
+                "name": "Protein Bar",
+                "source_type": "PACKAGED",
+                "brand_name": "Acme",
+                "quantity_display": "1 bar",
+            },
+            segment=segment,
+        )
+
+        self.assertTrue(resolution.food.needs_grounding)
+        self.assertFalse(resolution.food.is_verified)
+        self.assertFalse(resolution.create_food_visual)
+        self.assertFalse(resolution.visual_learning_eligible)
+
+    async def test_apply_final_meal_resolution_blocks_food_visual_creation_for_unverified_foods(self) -> None:
         from app.services import meal_resolution_service
 
         meal = SimpleNamespace(
@@ -1090,7 +1577,82 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.quantity_display, "1 bar")
         self.assertEqual(entry.quantity_json["quantity"], 1)
         self.assertEqual(entry.quantity_json["unit"], "bar")
-        self.assertEqual(result.food_visuals[0].cropped_image_url, "/data/uploads/crops/seg-packaged-1.jpg")
+        self.assertEqual(result.food_visuals, [])
+
+    async def test_apply_final_meal_resolution_persists_segment_quantity_and_derives_entry_bucket(self) -> None:
+        from app.services import meal_resolution_service
+
+        meal = SimpleNamespace(
+            id="meal-segment-quantity-persist",
+            processing_status=MealProcessingStatus.INTERVIEWING,
+            reasoning_state_json={},
+            last_stage_started_at=None,
+        )
+        from app.models import FoodItem, MealSegment
+
+        resolved_food = FoodItem(
+            id="food-home-1",
+            name="Egg Curry",
+            source_type="HOME",
+            is_verified=True,
+            times_confirmed=1,
+        )
+        segment = SimpleNamespace(
+            id="seg-quantity-1",
+            ai_reasoning=None,
+            quantity_json=None,
+            quantity_display=None,
+        )
+        session = AsyncMock()
+        session.add = Mock()
+        session.add_all = Mock()
+
+        async def _session_get(model, identifier):
+            if model is MealSegment and identifier == "seg-quantity-1":
+                return segment
+            return None
+
+        session.get = AsyncMock(side_effect=_session_get)
+
+        final_segment = meal_resolution_service.FinalSegmentResolution(
+            food=meal_resolution_service.ResolvedFoodInput(
+                canonical_name="Egg Curry",
+                aliases=["Egg Curry"],
+                source_type="HOME",
+                is_verified=True,
+            ),
+            segment_id="seg-quantity-1",
+            segment_ai_reasoning={"grounding_trace": {"stop_reason": "completed"}},
+            portion_bucket="STANDARD",
+            identification_method="INTERVIEW",
+            quantity_json={
+                "quantity": 2,
+                "unit": "pieces",
+                "portion_bucket": "LARGE",
+            },
+            quantity_display="2 pieces",
+            create_food_visual=False,
+            visual_learning_eligible=False,
+        )
+
+        with patch.object(
+            meal_resolution_service,
+            "resolve_or_create_food_item",
+            new=AsyncMock(return_value=resolved_food),
+        ):
+            await meal_resolution_service.apply_final_meal_resolution(
+                session=session,
+                meal=meal,
+                final_segments=[final_segment],
+            )
+
+        self.assertEqual(
+            segment.quantity_json,
+            {"quantity": 2, "unit": "pieces", "portion_bucket": "LARGE"},
+        )
+        self.assertEqual(segment.quantity_display, "2 pieces")
+        entry = next(call.args[0] for call in session.add.call_args_list if hasattr(call.args[0], "meal_log_id"))
+        self.assertEqual(entry.portion_bucket, "LARGE")
 
     def test_group_finalizer_inputs_keep_bread_other_detail_and_source_answers_together(self) -> None:
         from app.services import interview_service
@@ -1241,6 +1803,18 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
                                         "restaurant_name": None,
                                         "correction_note": None,
                                         "supporting_details": ["store-bought packaged item"],
+                                        "serving_size_g": 68.0,
+                                        "calories": 240.0,
+                                        "protein_g": 20.0,
+                                        "carbs_g": 23.0,
+                                        "fat_g": 8.0,
+                                        "fiber_g": 6.0,
+                                        "is_verified": True,
+                                        "grounding_trace": {
+                                            "queries": ["Acme protein bar nutrition facts"],
+                                            "fetched_urls": ["https://acme.example/protein-bar"],
+                                            "stop_reason": "completed",
+                                        },
                                     }
                                 )
                             }
@@ -1250,7 +1824,29 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        with patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True):
+        captured: dict[str, object] = {}
+
+        async def _capture_apply_final_meal_resolution(**kwargs):
+            captured.update(kwargs)
+            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
+
+        with (
+            patch.object(interview_service, "get_llm_client", return_value=llm_client, create=True),
+            patch.object(
+                interview_service,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    FINALIZER_GROUP_PARALLELISM=1,
+                    FINALIZER_MODEL="google/gemini-3.1-flash-lite",
+                ),
+                create=True,
+            ),
+            patch.object(
+                interview_service,
+                "apply_final_meal_resolution",
+                new=AsyncMock(side_effect=_capture_apply_final_meal_resolution),
+            ),
+        ):
             result = await interview_service.finalize_confirmed_interview(
                 session=session,
                 meal=meal,
@@ -1258,8 +1854,8 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
                 segments=[segment],
             )
 
-        self.assertTrue(result["grounding_required"])
-        reasoning_state_json = meal.reasoning_state_json
+        self.assertFalse(result.get("grounding_required", False))
+        reasoning_state_json = captured["reasoning_state_json"]
         self.assertEqual(
             reasoning_state_json["confirmation_items"][0]["segment_ids"],
             ["seg-bar-1", "seg-bar-2"],
@@ -1272,118 +1868,6 @@ class InterviewFinalizationWriteTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MatchWorkerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_post_interview_grounding_write_failure_surfaces_blocker_and_degraded_save(self) -> None:
-        from bot import polling
-
-        interview = SimpleNamespace(
-            chat_id="999",
-            meal_log_id="meal-grounding-quota",
-            is_active=True,
-            state_key="GROUNDING_PENDING",
-            current_prompt_payload={
-                "roadmap_step": "GROUNDING_PENDING",
-                "grounding_handoff_pending": False,
-                "grounding_status": "HANDOFF_ACKNOWLEDGED",
-            },
-            updated_at=object(),
-        )
-        meal = SimpleNamespace(
-            id="meal-grounding-quota",
-            processing_status=MealProcessingStatus.INTERVIEWING,
-            reasoning_state_json={
-                "grounding_required": True,
-                "grounding_status": "HANDOFF_ACKNOWLEDGED",
-                "confirmation_items": [
-                    {
-                        "segment_id": "seg-1",
-                        "segment_ids": ["seg-1"],
-                        "name": "Protein Bar",
-                        "source_type": "PACKAGED",
-                        "brand_name": "Acme",
-                        "quantity_display": "1 bar",
-                    }
-                ],
-            },
-            recovery_attempt_count=0,
-            last_stage_started_at=None,
-        )
-        segment = SimpleNamespace(
-            id="seg-1",
-            meal_log_id="meal-grounding-quota",
-            label="bar",
-            cropped_image_url="/data/uploads/crops/seg-1.jpg",
-            embedding=[0.1] * 1536,
-            match_candidates_json={
-                "top_3": [
-                    {
-                        "candidate_id": "candidate-1",
-                        "label": "Protein Bar",
-                        "identity_confidence": 0.97,
-                    }
-                ],
-                "match_threshold": 0.9,
-            },
-        )
-        session = AsyncMock()
-        session.add = Mock()
-        session.execute.side_effect = [
-            Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[interview])))),
-            Mock(scalars=Mock(return_value=Mock(all=Mock(return_value=[segment])))),
-        ]
-        session.get = AsyncMock(return_value=meal)
-        engine = SimpleNamespace(dispose=AsyncMock())
-
-        class SessionContext:
-            async def __aenter__(self):
-                return session
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-        session_factory = Mock(return_value=SessionContext())
-        settings = SimpleNamespace(
-            DATABASE_URL="postgresql+asyncpg://meal:pw@db:5432/meal",
-            TELEGRAM_CHAT_ID="999",
-            BOT_POLL_INTERVAL=3.0,
-        )
-        bot = SimpleNamespace(send_message=AsyncMock())
-
-        async def _capture_degraded_finalize(**_kwargs):
-            meal.processing_status = MealProcessingStatus.COMPLETED
-            meal.reasoning_state_json = {
-                "grounding_status": "DEGRADED_SAVED",
-                "grounding_failure": {"category": "tool_execution"},
-            }
-            return {"meal_entries": [], "food_visuals": [], "correction_events": []}
-
-        with (
-            patch.object(polling, "create_async_engine", return_value=engine),
-            patch.object(polling, "async_sessionmaker", return_value=session_factory),
-            patch.object(
-                polling.meal_resolution_service,
-                "apply_final_meal_resolution",
-                AsyncMock(side_effect=RuntimeError("confirmed grounding write failed")),
-            ) as apply_final_meal_resolution,
-            patch.object(polling.interview_service, "finalize_confirmed_interview", AsyncMock(side_effect=_capture_degraded_finalize)),
-            patch.object(polling.asyncio, "sleep", side_effect=asyncio.CancelledError),
-        ):
-            with self.assertRaises(asyncio.CancelledError):
-                await polling.poll_post_interview_grounding(
-                    bot,
-                    settings,
-                    poll_interval=0.01,
-                    bot_data={},
-                )
-
-        self.assertEqual(meal.processing_status, MealProcessingStatus.COMPLETED)
-        self.assertEqual(meal.reasoning_state_json["grounding_status"], "DEGRADED_SAVED")
-        self.assertEqual(meal.reasoning_state_json["grounding_failure"]["category"], "tool_execution")
-        self.assertFalse(interview.is_active)
-        self.assertEqual(interview.current_prompt_payload["grounding_status"], "DEGRADED_SAVED")
-        self.assertIn("failed", bot.send_message.await_args.kwargs["text"].lower())
-        apply_final_meal_resolution.assert_awaited_once()
-        engine.dispose.assert_awaited_once()
-
     async def test_poll_and_match_routes_to_reasoning_when_any_segment_is_unresolved(self) -> None:
         from bot import polling
 

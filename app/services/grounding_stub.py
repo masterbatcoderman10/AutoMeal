@@ -4,19 +4,32 @@ from typing import Any, Mapping
 
 
 GROUNDING_REQUIRED_SOURCES = {"PACKAGED", "RESTAURANT"}
+AUTHORITATIVE_SOURCE_TYPES = {"HOME", "PACKAGED", "RESTAURANT"}
 
 
 def normalize_source_type(value: object) -> str:
     if not isinstance(value, str):
         return "HOME"
     normalized = value.strip().upper()
-    if normalized in {"HOME", "PACKAGED", "RESTAURANT"}:
+    if normalized in AUTHORITATIVE_SOURCE_TYPES:
         return normalized
     return "HOME"
 
 
-def build_grounding_prep(answer: Mapping[str, Any]) -> dict[str, Any] | None:
-    source_type = normalize_source_type(answer.get("source_type"))
+def parse_authoritative_source_type(value: object) -> str:
+    normalized = normalize_source_type(value)
+    raw_value = value if isinstance(value, str) else None
+    if raw_value is None or normalized != raw_value.strip().upper():
+        raise ValueError("source_type must be HOME, PACKAGED, or RESTAURANT")
+    return normalized
+
+
+def build_grounding_prep(answer: Mapping[str, Any], *, strict: bool = False) -> dict[str, Any] | None:
+    source_type = (
+        parse_authoritative_source_type(answer.get("source_type"))
+        if strict
+        else normalize_source_type(answer.get("source_type"))
+    )
     if source_type not in GROUNDING_REQUIRED_SOURCES:
         return None
 
@@ -32,4 +45,10 @@ def build_grounding_prep(answer: Mapping[str, Any]) -> dict[str, Any] | None:
     return {key: value for key, value in payload.items() if value is not None}
 
 
-__all__ = ["GROUNDING_REQUIRED_SOURCES", "build_grounding_prep", "normalize_source_type"]
+__all__ = [
+    "AUTHORITATIVE_SOURCE_TYPES",
+    "GROUNDING_REQUIRED_SOURCES",
+    "build_grounding_prep",
+    "normalize_source_type",
+    "parse_authoritative_source_type",
+]
